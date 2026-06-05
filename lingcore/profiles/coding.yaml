@@ -42,6 +42,8 @@ tools:
   - list_dir
   - search
   - run_shell
+  - fetch_url
+  - patch_file
 
 tool_options:
   run_shell:
