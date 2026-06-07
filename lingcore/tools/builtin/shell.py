@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import shlex
 
 from pydantic import BaseModel, Field
 
@@ -28,6 +29,7 @@ from lingcore.tools import ToolContext, tool
 
 _MAX_OUTPUT_CHARS = 16_000
 _DEFAULT_TIMEOUT = 60
+_SHELL_CONTROL_TOKENS = (";", "&&", "||", "|", "<", ">", "\n", "\r", "`", "$(", "${", "(", ")")
 
 
 class ShellArgs(BaseModel):
@@ -41,9 +43,41 @@ def _truncate(text: str) -> str:
     return f"{head}\n... (truncated, {len(text) - _MAX_OUTPUT_CHARS} more chars)"
 
 
+def _has_shell_control(command: str) -> bool:
+    return any(token in command for token in _SHELL_CONTROL_TOKENS)
+
+
+def _split_command(text: str) -> list[str] | None:
+    try:
+        return shlex.split(text, posix=True)
+    except ValueError:
+        return None
+
+
+def allowlist_pattern_for(command: str) -> str:
+    """Return the safest reusable allowlist pattern for a confirmed command."""
+    stripped = command.strip()
+    if _has_shell_control(stripped):
+        return ""
+    parts = _split_command(stripped)
+    if not parts:
+        return ""
+    return " ".join(shlex.quote(p) for p in parts)
+
+
 def _matches_allowlist(command: str, patterns: list[str]) -> bool:
-    """Return True if command starts with any allowlisted prefix."""
-    return any(command.strip().startswith(p) for p in patterns)
+    """Return True only for simple commands matching an allowlisted token prefix."""
+    stripped = command.strip()
+    if _has_shell_control(stripped):
+        return False
+    command_parts = _split_command(stripped)
+    if not command_parts:
+        return False
+    for pattern in patterns:
+        pattern_parts = _split_command(pattern.strip())
+        if pattern_parts and command_parts[: len(pattern_parts)] == pattern_parts:
+            return True
+    return False
 
 
 @tool(

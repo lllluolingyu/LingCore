@@ -19,6 +19,7 @@ from lingcore.events import (
     ToolCallStarted,
     ToolResultEvent,
 )
+from lingcore.tools.builtin.shell import allowlist_pattern_for
 
 _EXIT_COMMANDS = {"/exit", "/quit", "/q"}
 
@@ -86,14 +87,17 @@ class CLIFrontend:
         )
         answer = (await asyncio.to_thread(self.console.input, prompt)).strip()
         if answer == "A":
-            # Persist approval for this command prefix for the rest of the session.
+            # Persist approval for this exact token prefix for the rest of the session.
             run_shell_opts = self._tool_options.setdefault("run_shell", {})
             patterns: list[str] = run_shell_opts.setdefault("allow_patterns", [])
-            prefix = command.strip().split()[0] if command.strip() else command
-            if prefix not in patterns:
-                patterns.append(prefix)
+            pattern = allowlist_pattern_for(command)
+            if not pattern:
+                self.console.print("[dim]command was not added to session allowlist[/]")
+                return True
+            if pattern not in patterns:
+                patterns.append(pattern)
                 self.console.print(
-                    f"[dim]added {prefix!r} to session allowlist[/]"
+                    f"[dim]added {pattern!r} to session allowlist[/]"
                 )
             return True
         # Empty / Enter, "a", "y", "yes" all mean allow once.

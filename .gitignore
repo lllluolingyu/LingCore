@@ -26,6 +26,8 @@ share/python-wheels/
 *.egg
 MANIFEST
 /.claude/
+/.agents/
+/.codex/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

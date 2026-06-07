@@ -109,6 +109,25 @@ async def test_allowlist_matches_on_prefix_only(tmp_path):
         await run_shell(ShellArgs(command="echo ls"), ctx)
 
 
+@pytest.mark.parametrize(
+    ("command", "pattern"),
+    [
+        ("ls; echo unsafe", "ls"),
+        ("git status && echo unsafe", "git status"),
+        ("pytestx", "pytest"),
+    ],
+)
+async def test_allowlist_does_not_skip_unsafe_prefixes(tmp_path, command, pattern):
+    ctx = _ctx(
+        tmp_path,
+        confirm=_no,
+        require_confirmation=True,
+        allow_patterns=[pattern],
+    )
+    with pytest.raises(ToolError, match="declined"):
+        await run_shell(ShellArgs(command=command), ctx)
+
+
 async def test_timeout_kills_command(tmp_path):
     ctx = _ctx(tmp_path, require_confirmation=False, timeout=0.5)
     with pytest.raises(ToolError, match="timed out"):

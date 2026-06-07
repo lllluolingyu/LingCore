@@ -36,7 +36,7 @@ on everything below it, frontends depend only on `Agent` + events.
 - `lingcore/memory.py` — `ShortTermMemory` protocol + `WindowMemory`.
 - `lingcore/guardrails.py` — `Guardrail` protocol + `NoopGuardrail`.
 - `lingcore/tools/__init__.py` — `Tool`/`@tool`/`ToolRegistry`/`ToolContext` (the plugin contract).
-- `lingcore/tools/builtin/{fs,shell}.py` — coding-agent tools.
+- `lingcore/tools/builtin/{fs,patch,shell,web}.py` — coding-agent tools.
 - `lingcore/io/{base,cli}.py` — frontend protocol + `run_session` driver + Rich CLI.
 - `lingcore/__main__.py` — the CLI entrypoint / composition root.
 - `lingcore/profiles/coding.yaml` — the default profile (keyed provider).
@@ -50,8 +50,9 @@ on everything below it, frontends depend only on `Agent` + events.
 4. **Secrets never live in profile YAML.** `llm.api_key_env` only *names* an env var. Profiles use `extra="forbid"` so a typo is a loud `ConfigError`.
 5. **Tool errors never crash the loop** — a raising tool becomes `ToolResult(ok=False)` fed back to the model. Hard `max_iters` cap emits an `Error` event rather than raising.
 6. **`WindowMemory` trimming is block-aware** — an assistant `tool_calls` message and its `tool` results are atomic; never orphan a tool result from its call (OpenAI rejects it). Always keep ≥1 block.
-7. **`run_shell` is arbitrary code execution; the workspace is NOT a sandbox.** fs tools are confined via `_resolve` + `is_relative_to` (tested against `..`/absolute/symlink escapes), but shell can escape. Mitigations: cwd-scoped, timeout-with-process-group-kill, output truncation, `confirm` gate. Real isolation is the deferred next step; `shell.py` is the plug point.
+7. **`run_shell` is arbitrary code execution; the workspace is NOT a sandbox.** fs tools are confined via `_resolve` + `is_relative_to` (tested against `..`/absolute/symlink escapes), but shell can escape. Mitigations: cwd-scoped, timeout-with-process-group-kill, output truncation, strict allowlist matching, and `confirm` gate. Real isolation is the deferred next step; `shell.py` is the plug point.
 8. **A relative `workspace` resolves against the user's CWD** (where they launched lingcore), not the bundled profile's directory.
+9. **Network fetch is public-web only by default.** `fetch_url` rejects embedded credentials and non-http(s) schemes, resolves the host and rejects any answer that maps to a loopback/link-local/private/reserved address (covering alternate IP encodings — decimal/hex/octal), then **pins the connection to the vetted IP** while keeping the Host header and TLS SNI/cert verification on the hostname — so DNS can't be rebound between the check and the connection. Re-applied to every redirect hop; DNS resolution and downloaded body size are both bounded. Opt into local targets with `tool_options.fetch_url.allow_private_hosts: true`.
 
 ## Conventions
 

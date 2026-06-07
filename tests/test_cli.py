@@ -164,10 +164,19 @@ async def test_cli_confirm_allow_always_persists(monkeypatch):
     cli.console.quiet = True
     monkeypatch.setattr(cli.console, "input", lambda *a, **k: "A")
     assert await cli.confirm("pytest -q") is True
-    # The command's first token is appended to the shared options dict, so the
-    # agent's ToolContext (which holds the same dict) auto-approves it next time.
-    assert opts["run_shell"]["allow_patterns"] == ["pytest"]
+    # The exact command token prefix is appended to the shared options dict, so
+    # approval does not expand to every command sharing the first executable.
+    assert opts["run_shell"]["allow_patterns"] == ["pytest -q"]
     # A second matching command would not even reach confirm; but a re-prompt of
     # the same prefix should not duplicate the entry.
-    await cli.confirm("pytest tests/test_x.py")
-    assert opts["run_shell"]["allow_patterns"] == ["pytest"]
+    await cli.confirm("pytest -q")
+    assert opts["run_shell"]["allow_patterns"] == ["pytest -q"]
+
+
+async def test_cli_confirm_allow_always_skips_shell_control(monkeypatch):
+    opts: dict = {}
+    cli = CLIFrontend(tool_options=opts)
+    cli.console.quiet = True
+    monkeypatch.setattr(cli.console, "input", lambda *a, **k: "A")
+    assert await cli.confirm("ls; echo unsafe") is True
+    assert opts["run_shell"]["allow_patterns"] == []

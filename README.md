@@ -21,7 +21,8 @@ OpenAI-compatible endpoint by pointing at a different `base_url`.
   calls, and a hard iteration cap. No heavyweight orchestration framework.
 - **Pluggable tools** — a tool is an `async` function plus a pydantic args
   model and a `@tool` decorator. The coding agent ships with file read/write/
-  edit, directory listing, search, and a confirmation-gated shell.
+  edit, patch, directory listing, search, URL fetch, and a confirmation-gated
+  shell.
 - **Frontend-agnostic** — the loop emits events; the CLI renders them today, and
   a web or chat frontend can render the same events later without touching core.
 
@@ -94,6 +95,8 @@ tools:                                    # selected by name from the registry
   - list_dir
   - search
   - run_shell
+  - fetch_url
+  - patch_file
 
 tool_options:
   run_shell:
@@ -173,6 +176,15 @@ suite needs no network or API key.
 a command can still reach outside it. The confirmation gate, command timeout,
 and output truncation are the current mitigations; true isolation (containers,
 seccomp) is a deliberate next step.
+
+`fetch_url` reduces SSRF risk by resolving each host (and every redirect hop)
+and refusing any that maps to a loopback, link-local, or private address —
+alternate IP encodings (decimal/hex/octal) and credentialed URLs are rejected
+too. It then pins the connection to the vetted IP (the Host header and TLS
+verification stay on the hostname), so DNS rebinding can't redirect the request
+after the check. DNS resolution and downloaded body size are bounded. Profiles
+can opt into private hosts with `tool_options.fetch_url.allow_private_hosts:
+true` for trusted local workflows (e.g. a local Ollama or an internal API).
 
 ## License
 

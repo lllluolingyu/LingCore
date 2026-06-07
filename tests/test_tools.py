@@ -129,6 +129,28 @@ async def test_search_no_match(ctx):
     assert await search(SearchArgs(query="zzz-nope"), ctx) == "(no matches)"
 
 
+async def test_search_rejects_parent_glob(ctx, tmp_path):
+    outside = tmp_path.parent / "secret-search.txt"
+    outside.write_text("SECRET_SEARCH", encoding="utf-8")
+    with pytest.raises(ToolError, match="glob escapes workspace"):
+        await search(
+            SearchArgs(query="SECRET_SEARCH", glob="../secret-search.txt"),
+            ctx,
+        )
+
+
+async def test_search_skips_symlink_escape(ctx, tmp_path):
+    outside = tmp_path.parent / "search-secret.txt"
+    outside.write_text("SECRET_SEARCH", encoding="utf-8")
+    link = ctx.workspace / "search-link.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks not supported on this platform")
+
+    assert await search(SearchArgs(query="SECRET_SEARCH"), ctx) == "(no matches)"
+
+
 # --- contract / registry --------------------------------------------------
 
 

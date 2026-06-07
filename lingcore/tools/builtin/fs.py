@@ -33,6 +33,15 @@ def _resolve(ctx: ToolContext, path: str) -> Path:
     return full
 
 
+def _validate_search_glob(pattern: str) -> None:
+    """Reject glob patterns that can enumerate outside the workspace."""
+    if not pattern.strip():
+        raise ToolError("search glob must not be empty")
+    p = Path(pattern)
+    if p.is_absolute() or any(part == ".." for part in p.parts):
+        raise ToolError(f"glob escapes workspace: {pattern!r}")
+
+
 class ReadArgs(BaseModel):
     path: str = Field(description="File path relative to the workspace root.")
 
@@ -115,19 +124,31 @@ class SearchArgs(BaseModel):
 @tool(description="Search workspace files for a substring; returns path:line matches.")
 async def search(args: SearchArgs, ctx: ToolContext) -> str:
     base = ctx.workspace.resolve()
+    _validate_search_glob(args.glob)
     hits: list[str] = []
-    for p in base.glob(args.glob):
-        if not p.is_file():
-            continue
-        try:
-            text = p.read_text("utf-8")
-        except (UnicodeDecodeError, OSError):
-            continue
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            if args.query in line:
-                rel = p.relative_to(base)
-                hits.append(f"{rel}:{lineno}: {line.strip()[:200]}")
-                if len(hits) >= _MAX_SEARCH_HITS:
-                    hits.append(f"... (truncated at {_MAX_SEARCH_HITS} hits)")
-                    return "\n".join(hits)
+    try:
+        for p in base.glob(args.glob):
+            try:
+                full = p.resolve()
+            except OSError:
+                continue
+            if full != base and not full.is_relative_to(base):
+                continue
+            if not full.is_file():
+                continue
+            try:
+                if full.stat().st_size > _MAX_READ_BYTES:
+                    continue
+                text = full.read_text("utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if args.query in line:
+                    rel = p.relative_to(base)
+                    hits.append(f"{rel}:{lineno}: {line.strip()[:200]}")
+                    if len(hits) >= _MAX_SEARCH_HITS:
+                        hits.append(f"... (truncated at {_MAX_SEARCH_HITS} hits)")
+                        return "\n".join(hits)
+    except (NotImplementedError, ValueError) as e:
+        raise ToolError(f"invalid search glob {args.glob!r}: {e}") from None
     return "\n".join(hits) if hits else "(no matches)"
