@@ -191,8 +191,12 @@ def _validate_hunk_ranges(hunks: list[_Hunk]) -> None:
     and don't overlap; a malformed (model-generated) diff that violates this
     would otherwise corrupt the file. Ranges are the same 0-based slices _apply
     consumes, so adjacent hunks (one ending where the next begins) are allowed.
+    Two zero-length insertions at the same anchor are rejected — they consume
+    nothing, so the range check can't catch them, and their reverse-order
+    application would silently swap the inserted blocks.
     """
     prev_end = 0
+    last_insert_at: int | None = None
     for h in hunks:
         idx = h.orig_start if h.orig_len == 0 else h.orig_start - 1
         if idx < 0:
@@ -201,7 +205,17 @@ def _validate_hunk_ranges(hunks: list[_Hunk]) -> None:
             raise ToolError(
                 f"diff hunks overlap or are out of order at @@ -{h.orig_start},{h.orig_len}"
             )
-        prev_end = idx + h.orig_len
+        if h.orig_len == 0:
+            if idx == last_insert_at:
+                raise ToolError(
+                    f"diff has duplicate insertion hunks at the same position "
+                    f"@@ -{h.orig_start},0"
+                )
+            last_insert_at = idx
+            prev_end = max(prev_end, idx)
+        else:
+            last_insert_at = None
+            prev_end = idx + h.orig_len
 
 
 def _header_path(diff: str) -> str | None:

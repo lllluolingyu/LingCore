@@ -140,9 +140,25 @@ async def test_fetch_pins_connection_to_vetted_ip(ctx):
     assert req.extensions["sni_hostname"] == "example.com"
 
 
+async def test_fetch_disables_keepalive(ctx):
+    # Keep-alive must be off so a redirect to another host sharing the same IP
+    # can't reuse the first hop's TLS connection (and skip the new hop's SNI).
+    client = _FakeClient([_FakeResponse("ok")])
+    with patch(
+        "lingcore.tools.builtin.web.httpx.AsyncClient", return_value=client
+    ) as MockClient:
+        await fetch_url(FetchArgs(url="https://example.com/"), ctx)
+    assert MockClient.call_args.kwargs["limits"].max_keepalive_connections == 0
+
+
 async def test_fetch_rejects_non_http(ctx):
     with pytest.raises(ToolError, match="http"):
         await fetch_url(FetchArgs(url="ftp://example.com/file"), ctx)
+
+
+async def test_fetch_rejects_invalid_port(ctx):
+    with pytest.raises(ToolError, match="invalid port"):
+        await fetch_url(FetchArgs(url="http://example.com:99999/"), ctx)
 
 
 @pytest.mark.parametrize(

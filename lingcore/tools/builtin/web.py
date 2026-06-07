@@ -93,6 +93,12 @@ async def _vet_url(url: str, *, allow_private_hosts: bool) -> str | None:
         raise ToolError(f"url must include a hostname: {url!r}")
     if parsed.username or parsed.password:
         raise ToolError("URLs with embedded credentials are not supported")
+    # Accessing .port validates the 0-65535 range; surface a clean tool error
+    # (recoverable by the model) instead of leaking an internal ValueError.
+    try:
+        parsed.port
+    except ValueError:
+        raise ToolError(f"invalid port in url: {url!r}") from None
     if allow_private_hosts:
         return None
 
@@ -172,8 +178,15 @@ async def fetch_url(args: FetchArgs, ctx: ToolContext) -> str:
     content_type = ""
     charset = "utf-8"
     body = b""
+    # No keep-alive: SNI is consumed when a TLS connection is opened, not per
+    # request. Reusing a pooled connection across redirect hops that pin to the
+    # same IP would skip the new hop's SNI/cert check, so force a fresh
+    # connection (and handshake) for every hop.
+    limits = httpx.Limits(max_keepalive_connections=0)
     try:
-        async with httpx.AsyncClient(follow_redirects=False, timeout=_TIMEOUT) as client:
+        async with httpx.AsyncClient(
+            follow_redirects=False, timeout=_TIMEOUT, limits=limits
+        ) as client:
             for _ in range(_MAX_REDIRECTS + 1):
                 resp = await client.send(_build_request(client, url, pinned), stream=True)
                 try:

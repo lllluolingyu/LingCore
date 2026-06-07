@@ -101,6 +101,19 @@ async def test_rejects_out_of_order_hunks(ctx):
     assert (ctx.workspace / "f.py").read_text() == "a\nb\nc\n"
 
 
+async def test_zero_length_insertion_applies(ctx):
+    diff = "@@ -3,0 +4,1 @@\n+d\n"
+    await patch_file(PatchArgs(path="f.py", diff=diff), ctx)
+    assert (ctx.workspace / "f.py").read_text() == "a\nb\nc\nd\n"
+
+
+async def test_rejects_duplicate_insertion_hunks(ctx):
+    diff = "@@ -3,0 +4,1 @@\n+d\n@@ -3,0 +4,1 @@\n+e\n"
+    with pytest.raises(ToolError, match="duplicate insertion"):
+        await patch_file(PatchArgs(path="f.py", diff=diff), ctx)
+    assert (ctx.workspace / "f.py").read_text() == "a\nb\nc\n"
+
+
 async def test_rejects_mismatched_header_path(ctx):
     diff = "--- a/other.py\n+++ b/other.py\n@@ -2,1 +2,1 @@\n-b\n+B\n"
     with pytest.raises(ToolError, match="diff header targets"):
