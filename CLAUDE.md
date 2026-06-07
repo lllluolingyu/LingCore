@@ -13,7 +13,7 @@ a code change.** That principle is the design's whole point; preserve it.
 
 ```bash
 uv sync                       # install deps (incl. dev group)
-uv run pytest -q              # run the full suite (68 tests, <1s when tiktoken is cached)
+uv run pytest -q              # run the full suite (113 tests, <1s when tiktoken is cached)
 uv run pytest tests/test_config.py -q         # one file
 uv run pytest tests/test_config.py::test_x -q # one test
 uv run lingcore                               # launch the coding agent over CLI
