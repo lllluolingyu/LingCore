@@ -109,6 +109,27 @@ def test_missing_profile_file():
         AgentProfile.load("/nonexistent/profile.yaml")
 
 
+def test_source_dir_set_on_file_load(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_KEY", "sk-xyz")
+    p = _write(tmp_path, FIXTURE)
+    prof = AgentProfile.load(p)
+    assert prof._source_dir == tmp_path.resolve()
+
+
+def test_load_from_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_KEY", "sk-xyz")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(FIXTURE, encoding="utf-8")
+    prof = AgentProfile.load(tmp_path)
+    assert prof.name == "test-coding"
+    assert prof._source_dir == tmp_path.resolve()
+
+
+def test_load_directory_missing_config(tmp_path):
+    with pytest.raises(ConfigError, match="not found"):
+        AgentProfile.load(tmp_path)
+
+
 async def test_from_profile_builds_runnable_agent(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_KEY", "sk-xyz")
     (tmp_path / "hello.txt").write_text("world", encoding="utf-8")

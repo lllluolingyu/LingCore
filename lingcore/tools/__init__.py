@@ -42,6 +42,7 @@ class ToolContext:
     workspace: Path
     confirm: ConfirmFn | None = None
     options: dict[str, Any] = field(default_factory=dict)
+    profile_dir: Path | None = None
 
 
 ToolFn = Callable[[BaseModel, ToolContext], Awaitable[str]]

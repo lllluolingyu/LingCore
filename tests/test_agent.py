@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from lingcore.agent import Agent
+from lingcore.composer import StaticComposer
 from lingcore.events import Error, Final, TextDelta, ToolCallStarted, ToolResultEvent
 from lingcore.memory import WindowMemory
 from lingcore.message import Message, ToolCall
@@ -34,7 +35,7 @@ def _agent(llm, workspace, tools=("read_file",), **kw) -> Agent:
         llm=llm,
         tools=reg,
         tool_ctx=ToolContext(workspace=workspace),
-        system_prompt="You are a coding agent.",
+        composer=StaticComposer("You are a coding agent."),
         memory=WindowMemory(model="gpt-4o"),
         **kw,
     )

@@ -47,4 +47,14 @@ class Error:
     message: str
 
 
-AgentEvent = TextDelta | ToolCallStarted | ToolResultEvent | Final | Error
+@dataclass(slots=True)
+class SkillActivated:
+    """A skill was activated or deactivated during a turn."""
+
+    name: str
+    active: bool
+
+
+AgentEvent = (
+    TextDelta | ToolCallStarted | ToolResultEvent | Final | Error | SkillActivated
+)

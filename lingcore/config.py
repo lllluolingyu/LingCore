@@ -95,6 +95,7 @@ class PersonaCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     system_prompt: str = "You are a helpful assistant."
+    include: list[str] = Field(default_factory=list)
 
 
 class MemoryCfg(BaseModel):
@@ -138,8 +139,15 @@ class AgentProfile(BaseModel):
 
     @classmethod
     def load(cls, path: str | Path) -> "AgentProfile":
-        """Load and validate a profile YAML, expanding ${ENV} references."""
+        """Load and validate a profile YAML, expanding ${ENV} references.
+
+        ``path`` may be a directory (``config.yaml`` inside is used) or a
+        direct path to any YAML file.  The resolved source directory is stored
+        in ``_source_dir`` for later use (e.g. resolving prompt layer files).
+        """
         p = Path(path)
+        if p.is_dir():
+            p = p / "config.yaml"
         if not p.is_file():
             raise ConfigError(f"profile not found: {path}")
         try:
@@ -150,11 +158,15 @@ class AgentProfile(BaseModel):
             raise ConfigError(f"profile {path} must be a mapping at the top level")
         expanded = _expand(raw)
         try:
-            return cls.model_validate(expanded)
+            profile = cls.model_validate(expanded)
         except Exception as e:
             # Pydantic's ValidationError is verbose but precise; wrap its
             # message so callers see a single ConfigError type.
             raise ConfigError(f"invalid profile {path}: {e}") from None
+        # Store the directory so callers can resolve sibling files (prompt
+        # layers, memory.md, skills/) without knowing the load path.
+        object.__setattr__(profile, "_source_dir", p.parent.resolve())
+        return profile
 
     def workspace_path(self, base: Path | None = None) -> Path:
         """Resolve the workspace, relative to ``base`` (e.g. the profile dir)."""

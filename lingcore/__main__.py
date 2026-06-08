@@ -19,7 +19,7 @@ from lingcore.errors import ConfigError, LingCoreError
 from lingcore.io.base import run_session
 from lingcore.io.cli import CLIFrontend
 
-_DEFAULT_PROFILE = Path(__file__).parent / "profiles" / "coding.yaml"
+_DEFAULT_PROFILE = Path(__file__).parent / "profiles" / "coding"
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

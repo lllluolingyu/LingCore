@@ -43,7 +43,7 @@ uv sync
 ```bash
 ollama pull qwen2.5-coder:7b      # or any model you have
 cd /path/to/your/project
-uv run lingcore --profile lingcore/profiles/coding_ollama.yaml
+uv run lingcore --profile lingcore/profiles/coding_ollama
 ```
 
 ### Keyed provider (OpenAI, etc.)
@@ -66,58 +66,28 @@ commands prompt for confirmation before running. Type `/exit` to quit.
 
 ## Profiles
 
-A profile is a YAML file describing one agent. Two are shipped:
+A profile is a **directory** containing a `config.yaml` and optional Markdown
+prompt-layer files. Two are shipped:
 
-- `lingcore/profiles/coding.yaml` — default profile, targets a keyed provider via env vars.
-- `lingcore/profiles/coding_ollama.yaml` — keyless variant for local Ollama/vLLM.
+- `lingcore/profiles/coding/` — default profile, targets a keyed provider via env vars.
+- `lingcore/profiles/coding_ollama/` — keyless variant for local Ollama/vLLM.
 
-The shape:
-
-```yaml
-name: coding
-workspace: ${LINGCORE_WORKSPACE:-.}      # tools are confined here
-
-llm:
-  model: ${LINGCORE_MODEL:-your-model}
-  base_url: ${LINGCORE_BASE_URL:-https://your-provider/v1}
-  api_key_env: ${LINGCORE_API_KEY_ENV:-}  # NAMES an env var; never the key itself
-  sampling:
-    temperature: 0.2
-
-persona:
-  system_prompt: |
-    You are a coding assistant operating inside a sandboxed workspace.
-
-tools:                                    # selected by name from the registry
-  - read_file
-  - write_file
-  - edit_file
-  - list_dir
-  - search
-  - run_shell
-  - fetch_url
-  - patch_file
-
-tool_options:
-  run_shell:
-    timeout: 60
-    require_confirmation: true
-
-memory:
-  max_messages: 50
-  max_tokens: 16000
-
-loop:
-  max_iters: 30
-  parallel_tools: true
-
-guardrail:
-  policy: noop
+```
+my-agent/
+  config.yaml    # llm, tools, memory, loop, guardrail
+  world.md       # optional — environment / setting context
+  role.md        # optional — persona
+  workflow.md    # optional — operating method
+  memory.md      # auto-created by the memory tool (opt-in)
 ```
 
-String values support `${VAR}` and `${VAR:-default}` expansion. Run a custom
-profile with `uv run lingcore --profile path/to/profile.yaml`. To create a new
-agent type, copy the file, change the persona and tool list — no code required.
+`world.md`, `role.md`, and `workflow.md` are loaded automatically if present and
+composed in that order to form the system prompt. `config.yaml` may also set
+`persona.system_prompt` as an inline fallback and `persona.include` for extra files.
+
+`--profile` accepts a directory or a direct path to any YAML file. String values
+support `${VAR}` and `${VAR:-default}` expansion. To create a new agent type, add
+a directory — no code required.
 
 ## Writing a tool
 
@@ -147,10 +117,12 @@ message.py   canonical Message/ToolCall/ToolResult; the only wire-format seam
 llm.py       async LLMClient over the OpenAI SDK (the loop never imports openai)
 events.py    AgentEvent union the loop emits
 agent.py     the async run loop + Agent.from_profile  ← the core
+composer.py  PromptComposer seam: per-turn system-prompt assembly
 config.py    AgentProfile + YAML loading with ${ENV} expansion
 memory.py    ShortTermMemory protocol + WindowMemory
+skills.py    Skill / SkillState — the model-invoked skill permission model
 guardrails.py  Guardrail protocol + NoopGuardrail (pre/post hooks)
-tools/       Tool / @tool / ToolRegistry / ToolContext, plus builtin fs + shell
+tools/       Tool / @tool / ToolRegistry / ToolContext, plus builtin tools
 io/          Frontend protocol + run_session driver + Rich CLI
 ```
 
@@ -162,7 +134,7 @@ set of invariants.
 ## Development
 
 ```bash
-uv run pytest -q          # full suite (113 tests)
+uv run pytest -q          # full suite (116 tests)
 uv run pytest tests/test_agent.py -q
 ```
 

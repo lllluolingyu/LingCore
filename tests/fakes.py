@@ -33,11 +33,13 @@ class FakeLLMClient:
     def __init__(self, turns: list[ScriptedTurn]):
         self._turns = list(turns)
         self.calls: list[list[Message]] = []  # records messages seen each turn
+        self.tool_schemas: list[list[dict[str, Any]] | None] = []  # tools per turn
 
     async def stream(
         self, messages: list[Message], tools: list[dict[str, Any]] | None = None
     ) -> AsyncIterator[LLMChunk]:
         self.calls.append(list(messages))
+        self.tool_schemas.append(tools)
         if not self._turns:
             # Default terminal behaviour if over-pumped: empty final reply.
             yield LLMChunk(tool_calls=None, finish_reason="stop")

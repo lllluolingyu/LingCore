@@ -13,7 +13,7 @@ a code change.** That principle is the design's whole point; preserve it.
 
 ```bash
 uv sync                       # install deps (incl. dev group)
-uv run pytest -q              # run the full suite (113 tests, <1s when tiktoken is cached)
+uv run pytest -q              # run the full suite (169 tests, <2s when tiktoken is cached)
 uv run pytest tests/test_config.py -q         # one file
 uv run pytest tests/test_config.py::test_x -q # one test
 uv run lingcore                               # launch the coding agent over CLI
@@ -30,17 +30,20 @@ on everything below it, frontends depend only on `Agent` + events.
 
 - `lingcore/message.py` — `Message`/`ToolCall`/`ToolResult`/`Conversation`. `Message.to_openai()` is the **only** place that knows the chat-completions wire shape.
 - `lingcore/llm.py` — `LLMClient`, the single seam over the OpenAI SDK. All streaming quirks (index-keyed tool-call fragment reassembly, partial-JSON args) live here.
-- `lingcore/events.py` — `AgentEvent` union the loop emits.
+- `lingcore/events.py` — `AgentEvent` union the loop emits (incl. `SkillActivated`).
 - `lingcore/agent.py` — the async run loop + `Agent.from_profile`. The core.
-- `lingcore/config.py` — `AgentProfile` + nested pydantic cfgs; YAML loading with `${ENV}` expansion.
+- `lingcore/composer.py` — `PromptComposer` protocol + `ComposeContext` + `StaticComposer`/`LayeredComposer`. The per-turn system-prompt assembly seam.
+- `lingcore/config.py` — `AgentProfile` + nested pydantic cfgs; YAML loading with `${ENV}` expansion; `_source_dir` resolution.
 - `lingcore/memory.py` — `ShortTermMemory` protocol + `WindowMemory`.
+- `lingcore/skills.py` — `Skill`/`SkillState`/`load_skills`. The model-invoked skill permission model.
 - `lingcore/guardrails.py` — `Guardrail` protocol + `NoopGuardrail`.
 - `lingcore/tools/__init__.py` — `Tool`/`@tool`/`ToolRegistry`/`ToolContext` (the plugin contract).
-- `lingcore/tools/builtin/{fs,patch,shell,web}.py` — coding-agent tools.
+- `lingcore/tools/builtin/{fs,patch,shell,web,memory,knowledge,skill}.py` — builtin tools.
 - `lingcore/io/{base,cli}.py` — frontend protocol + `run_session` driver + Rich CLI.
 - `lingcore/__main__.py` — the CLI entrypoint / composition root.
-- `lingcore/profiles/coding.yaml` — the default profile (keyed provider).
-- `lingcore/profiles/coding_ollama.yaml` — Ollama/vLLM variant (keyless local server).
+- `lingcore/profiles/coding/` — the default profile dir (`config.yaml` + world/role/workflow `.md`).
+- `lingcore/profiles/coding_ollama/` — Ollama/vLLM variant (keyless local server).
+- `lingcore/skills/` — bundled skills (each a dir with `skill.md` frontmatter + body).
 
 ## Invariants — do not break these when extending
 
@@ -53,6 +56,9 @@ on everything below it, frontends depend only on `Agent` + events.
 7. **`run_shell` is arbitrary code execution; the workspace is NOT a sandbox.** fs tools are confined via `_resolve` + `is_relative_to` (tested against `..`/absolute/symlink escapes), but shell can escape. Mitigations: cwd-scoped, timeout-with-process-group-kill, output truncation, strict allowlist matching, and `confirm` gate. Real isolation is the deferred next step; `shell.py` is the plug point.
 8. **A relative `workspace` resolves against the user's CWD** (where they launched lingcore), not the bundled profile's directory.
 9. **Network fetch is public-web only by default.** `fetch_url` rejects embedded credentials and non-http(s) schemes, resolves the host and rejects any answer that maps to a loopback/link-local/private/reserved address (covering alternate IP encodings — decimal/hex/octal), then **pins the connection to the vetted IP** while keeping the Host header and TLS SNI/cert verification on the hostname — so DNS can't be rebound between the check and the connection. Re-applied to every redirect hop; DNS resolution and downloaded body size are both bounded. Opt into local targets with `tool_options.fetch_url.allow_private_hosts: true`.
+10. **The system prompt is composed per loop iteration, not frozen.** `agent.py` calls `composer.compose(ctx)` at the top of *every* iteration with an immutable `ComposeContext` (never mutable hidden state). This is why memory writes and skill activation take effect on the *next* model request. A `StaticComposer` (no layers/memory/skills) is the zero-overhead default; `LayeredComposer` reads memory.md fresh each call. Composer content is **read-only context — it can never unlock a tool.**
+11. **Skills never grant tools beyond the profile.** Effective tools when a skill is active = `profile.tools ∩ skill.requested_tools`; the profile's `tools:` list is a hard ceiling. `activate_skill` mutates only the shared `SkillState.active`; the base `ToolRegistry` is **never** mutated. The ceiling is enforced twice: in `_effective_tool_schemas` (what's advertised) and in `_resolve_tool` (what's dispatchable). High-risk tools (`run_shell`/`write_file`/`patch_file`/`edit_file`) require `confirm` before activation.
+12. **`memory` writes are profile-scoped and confined.** The memory file resolves against `profile_dir` (not the workspace); relative paths that escape it raise `ConfigError`, absolute paths require `allow_absolute_path: true`, and writes into the installed package tree are refused. `max_bytes` is checked on the *final* file content. Strict keys: `remember` fails if the key exists; `modify`/`forget` fail if it doesn't.
 
 ## Conventions
 
@@ -65,4 +71,7 @@ on everything below it, frontends depend only on `Agent` + events.
 
 tiktoken downloads its encoding file on first use → `WindowMemory` blocks/fails
 offline. Real guardrail impls, summarize-memory, entry_points third-party
-tools, and web/Discord frontends are not built yet.
+tools, and web/Discord frontends are not built yet. The `knowledge` tool ships
+the grep backend only; the embedding `index`/`hybrid` backends and
+`auto_retrieve` prompt injection are stubbed (raise a clear `ConfigError`
+pending numpy + a SQLite vec store).

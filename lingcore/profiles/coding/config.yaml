@@ -1,0 +1,51 @@
+# LingCore coding-agent profile (keyed provider).
+# Secrets never live here — api_key_env only *names* the env var holding the key.
+
+name: coding
+workspace: ${LINGCORE_WORKSPACE:-.}
+
+llm:
+  model: ${LINGCORE_MODEL:-claude-opus-4-8}
+  base_url: ${LINGCORE_BASE_URL:-https://luolingyu.com/v1}
+  api_key_env: ${LINGCORE_API_KEY_ENV:-LLY_API_KEY}
+  sampling:
+    temperature: 0.2
+
+persona:
+  # Inline fallback — role.md / workflow.md are loaded automatically if present.
+  system_prompt: |
+    You are a coding assistant operating inside a sandboxed workspace.
+
+tools:
+  - read_file
+  - write_file
+  - edit_file
+  - list_dir
+  - search
+  - run_shell
+  - fetch_url
+  - patch_file
+
+tool_options:
+  run_shell:
+    timeout: 60
+    require_confirmation: true
+    allow_patterns:
+      - "python -m pytest"
+      - "python3 -m pytest"
+      - "pytest"
+      - "ls"
+      - "cat "
+      - "git status"
+      - "git diff"
+
+memory:
+  max_messages: 50
+  max_tokens: 16000
+
+loop:
+  max_iters: 30
+  parallel_tools: true
+
+guardrail:
+  policy: noop

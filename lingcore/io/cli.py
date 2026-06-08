@@ -15,6 +15,7 @@ from lingcore.events import (
     AgentEvent,
     Error,
     Final,
+    SkillActivated,
     TextDelta,
     ToolCallStarted,
     ToolResultEvent,
@@ -67,6 +68,10 @@ class CLIFrontend:
             case ToolResultEvent(result):
                 status = "[dim]" if result.ok else "[red]"
                 self.console.print(f"{status}← {result.name}: {_short(result.content)}[/]")
+            case SkillActivated(name, active):
+                self._break_line()
+                verb = "activated" if active else "deactivated"
+                self.console.print(f"[dim]⚙ skill {verb}: {name}[/]")
             case Final(_):
                 self._break_line()
             case Error(message):
