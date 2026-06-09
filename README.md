@@ -166,7 +166,7 @@ set of invariants.
 ## Development
 
 ```bash
-uv run pytest -q          # full suite (197 tests)
+uv run pytest -q          # full suite (204 tests)
 uv run pytest tests/test_agent.py -q
 ```
 

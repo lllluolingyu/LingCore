@@ -117,6 +117,8 @@ class Agent:
             api_key=profile.llm.resolve_api_key(),
             base_url=profile.llm.base_url,
             sampling=profile.llm.sampling.as_kwargs(),
+            max_retries=profile.llm.max_retries,
+            timeout=profile.llm.timeout,
         )
 
         source_dir = getattr(profile, "_source_dir", None)

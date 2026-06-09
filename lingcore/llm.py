@@ -9,6 +9,14 @@ index-keyed fragments of a JSON string across many chunks. This client
 accumulates them internally and yields a single terminal chunk carrying the
 fully-assembled, parsed ``ToolCall`` list — so the loop never sees partial
 JSON.
+
+Transient-failure retry is delegated to the OpenAI SDK rather than hand-rolled:
+the SDK is header-aware (it honors ``Retry-After`` / ``retry-after-ms`` timing
+and the ``x-should-retry`` hint) and retries the right statuses (408/409/429 +
+5xx, plus connection/timeout) with exponential backoff. We only set the attempt
+budget (``max_retries``) and a per-attempt ``timeout``; the retry covers the
+initial request that opens the stream and never the iteration, so already-
+emitted tokens are never replayed.
 """
 
 from __future__ import annotations
@@ -17,28 +25,14 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
+import httpx
 from openai import AsyncOpenAI
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
 from lingcore.message import Message, ToolCall
 
-# Errors worth retrying: transient network / rate-limit / 5xx. Imported lazily
-# so a missing optional symbol in some openai version never breaks import.
-try:  # pragma: no cover - import shim
-    from openai import APIConnectionError, APITimeoutError, RateLimitError
-
-    _RETRYABLE: tuple[type[Exception], ...] = (
-        APIConnectionError,
-        APITimeoutError,
-        RateLimitError,
-    )
-except Exception:  # pragma: no cover
-    _RETRYABLE = (Exception,)
+# Connect phase fails fast even when ``timeout`` (the read/inactivity window) is
+# generous — a black-hole host shouldn't hold a slot for the full read window.
+_MAX_CONNECT_SECONDS = 10.0
 
 
 @dataclass(slots=True)
@@ -85,17 +79,32 @@ class LLMClient:
         api_key: str,
         base_url: str = "https://api.openai.com/v1",
         sampling: dict[str, Any] | None = None,
+        max_retries: int = 10,
+        timeout: float = 120.0,
+        http_client: Any = None,
     ) -> None:
         self.model = model
         self.sampling = sampling or {}
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._max_retries = max(0, max_retries)
+        # Hand retrying to the SDK (header-aware, correct status handling). The
+        # timeout is httpx's read (inactivity) window, not a total wall-clock
+        # cap: it stops a *stalled* attempt from hanging on the SDK's 600s
+        # default, but a steadily-streaming response can run longer, and across
+        # max_retries attempts + backoff the total wait can still be minutes.
+        # Connect is capped shorter so a dead host fails fast, not per attempt.
+        sdk_timeout = httpx.Timeout(
+            timeout, connect=min(timeout, _MAX_CONNECT_SECONDS)
+        )
+        client_kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "base_url": base_url,
+            "max_retries": self._max_retries,
+            "timeout": sdk_timeout,
+        }
+        if http_client is not None:
+            client_kwargs["http_client"] = http_client
+        self._client = AsyncOpenAI(**client_kwargs)
 
-    @retry(
-        retry=retry_if_exception_type(_RETRYABLE),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, max=10),
-        reraise=True,
-    )
     async def _open_stream(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None
     ):
@@ -109,6 +118,10 @@ class LLMClient:
         # reject an empty tools array.
         if tools:
             kwargs["tools"] = tools
+        # The SDK applies the client's retry policy to this request: a transient
+        # 429/5xx/connection failure before the stream opens is retried (with
+        # backoff that honors Retry-After), and once the stream is yielding
+        # tokens it is not — so emitted text is never duplicated.
         return await self._client.chat.completions.create(**kwargs)
 
     async def stream(

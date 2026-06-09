@@ -13,7 +13,7 @@ a code change.** That principle is the design's whole point; preserve it.
 
 ```bash
 uv sync                       # install deps (incl. dev group)
-uv run pytest -q              # run the full suite (197 tests, <2s when tiktoken is cached)
+uv run pytest -q              # run the full suite (204 tests, <2s when tiktoken is cached)
 uv run pytest tests/test_config.py -q         # one file
 uv run pytest tests/test_config.py::test_x -q # one test
 uv run lingcore                               # launch the coding agent over CLI
@@ -29,7 +29,7 @@ Dependency flows bottom-up; `message.py` depends on nothing, the loop depends
 on everything below it, frontends depend only on `Agent` + events.
 
 - `lingcore/message.py` — `Message`/`ToolCall`/`ToolResult`/`Conversation`. `Message.to_openai()` is the **only** place that knows the chat-completions wire shape.
-- `lingcore/llm.py` — `LLMClient`, the single seam over the OpenAI SDK. All streaming quirks (index-keyed tool-call fragment reassembly, partial-JSON args) live here.
+- `lingcore/llm.py` — `LLMClient`, the single seam over the OpenAI SDK. All streaming quirks (index-keyed tool-call fragment reassembly, partial-JSON args) live here. Transient-failure retry is **delegated to the SDK's header-aware policy** (honors `Retry-After`/`retry-after-ms` and `x-should-retry`; retries 408/409/429/5xx + connection/timeout), bounded by `max_retries` and a per-attempt `timeout` from config. It applies to the *initial* stream-open request only — never the iteration — so already-emitted tokens are never replayed.
 - `lingcore/events.py` — `AgentEvent` union the loop emits (incl. `SkillActivated`).
 - `lingcore/agent.py` — the async run loop + `Agent.from_profile`. The core.
 - `lingcore/composer.py` — `PromptComposer` protocol + `ComposeContext` + `StaticComposer`/`LayeredComposer`. The per-turn system-prompt assembly seam.

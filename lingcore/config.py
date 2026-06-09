@@ -72,6 +72,19 @@ class LLMCfg(BaseModel):
     base_url: str = "https://api.openai.com/v1"
     api_key_env: str | None = None
     sampling: SamplingCfg = Field(default_factory=SamplingCfg)
+    # Transient-failure retries when opening the stream (429 / 5xx / connection
+    # errors). Delegated to the OpenAI SDK, which honors Retry-After and the
+    # x-should-retry hint. 0 disables retrying. Raise it for an unstable
+    # endpoint; lower it for a local server you'd rather fail fast against.
+    max_retries: int = Field(default=10, ge=0)
+    # Per-request inactivity timeout (seconds): httpx's read window — the
+    # longest gap with no bytes received, including the wait for the first
+    # token, before an attempt fails. NOT a wall-clock cap on the full streamed
+    # response (which runs as long as tokens keep arriving), and across
+    # max_retries attempts + backoff the total wait can still reach minutes; it
+    # just stops one *stalled* attempt from hanging on the SDK's 600s default.
+    # Raise it if a slow model legitimately pauses between tokens.
+    timeout: float = Field(default=120.0, gt=0)
 
     def resolve_api_key(self) -> str:
         """Read the API key from the named env var.
