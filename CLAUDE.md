@@ -13,7 +13,7 @@ a code change.** That principle is the design's whole point; preserve it.
 
 ```bash
 uv sync                       # install deps (incl. dev group)
-uv run pytest -q              # run the full suite (169 tests, <2s when tiktoken is cached)
+uv run pytest -q              # run the full suite (197 tests, <2s when tiktoken is cached)
 uv run pytest tests/test_config.py -q         # one file
 uv run pytest tests/test_config.py::test_x -q # one test
 uv run lingcore                               # launch the coding agent over CLI
@@ -33,9 +33,9 @@ on everything below it, frontends depend only on `Agent` + events.
 - `lingcore/events.py` — `AgentEvent` union the loop emits (incl. `SkillActivated`).
 - `lingcore/agent.py` — the async run loop + `Agent.from_profile`. The core.
 - `lingcore/composer.py` — `PromptComposer` protocol + `ComposeContext` + `StaticComposer`/`LayeredComposer`. The per-turn system-prompt assembly seam.
-- `lingcore/config.py` — `AgentProfile` + nested pydantic cfgs; YAML loading with `${ENV}` expansion; `_source_dir` resolution.
+- `lingcore/config.py` — `AgentProfile` (+ `skills:` static declaration) + nested pydantic cfgs; YAML loading with `${ENV}` expansion; `_source_dir` resolution.
 - `lingcore/memory.py` — `ShortTermMemory` protocol + `WindowMemory`.
-- `lingcore/skills.py` — `Skill`/`SkillState`/`load_skills`. The model-invoked skill permission model.
+- `lingcore/skills.py` — `Skill`/`SkillState`/`load_skills`/`load_skill_tools`. The skill permission model + the loader that imports a skill's shipped tool code.
 - `lingcore/guardrails.py` — `Guardrail` protocol + `NoopGuardrail`.
 - `lingcore/tools/__init__.py` — `Tool`/`@tool`/`ToolRegistry`/`ToolContext` (the plugin contract).
 - `lingcore/tools/builtin/{fs,patch,shell,web,memory,knowledge,skill}.py` — builtin tools.
@@ -43,7 +43,9 @@ on everything below it, frontends depend only on `Agent` + events.
 - `lingcore/__main__.py` — the CLI entrypoint / composition root.
 - `lingcore/profiles/coding/` — the default profile dir (`config.yaml` + world/role/workflow `.md`).
 - `lingcore/profiles/coding_ollama/` — Ollama/vLLM variant (keyless local server).
-- `lingcore/skills/` — bundled skills (each a dir with `skill.md` frontmatter + body).
+- `lingcore/profiles/daily/` — general-purpose assistant (research/notes/memory, no shell).
+- `lingcore/profiles/teaching/` — teaching assistant; statically engages the `canvas` skill (`skills: [canvas]`).
+- `lingcore/skills/` — bundled skills (each a dir with `skill.md` frontmatter + body). A skill may also ship a Python tool module (`module:` + `provides:`), e.g. `lingcore/skills/canvas/canvas_tools.py`.
 
 ## Invariants — do not break these when extending
 
@@ -57,8 +59,9 @@ on everything below it, frontends depend only on `Agent` + events.
 8. **A relative `workspace` resolves against the user's CWD** (where they launched lingcore), not the bundled profile's directory.
 9. **Network fetch is public-web only by default.** `fetch_url` rejects embedded credentials and non-http(s) schemes, resolves the host and rejects any answer that maps to a loopback/link-local/private/reserved address (covering alternate IP encodings — decimal/hex/octal), then **pins the connection to the vetted IP** while keeping the Host header and TLS SNI/cert verification on the hostname — so DNS can't be rebound between the check and the connection. Re-applied to every redirect hop; DNS resolution and downloaded body size are both bounded. Opt into local targets with `tool_options.fetch_url.allow_private_hosts: true`.
 10. **The system prompt is composed per loop iteration, not frozen.** `agent.py` calls `composer.compose(ctx)` at the top of *every* iteration with an immutable `ComposeContext` (never mutable hidden state). This is why memory writes and skill activation take effect on the *next* model request. A `StaticComposer` (no layers/memory/skills) is the zero-overhead default; `LayeredComposer` reads memory.md fresh each call. Composer content is **read-only context — it can never unlock a tool.**
-11. **Skills never grant tools beyond the profile.** Effective tools when a skill is active = `profile.tools ∩ skill.requested_tools`; the profile's `tools:` list is a hard ceiling. `activate_skill` mutates only the shared `SkillState.active`; the base `ToolRegistry` is **never** mutated. The ceiling is enforced twice: in `_effective_tool_schemas` (what's advertised) and in `_resolve_tool` (what's dispatchable). High-risk tools (`run_shell`/`write_file`/`patch_file`/`edit_file`) require `confirm` before activation.
+11. **Skills never grant tools beyond the profile.** Effective tools when a skill is active = `profile.tools ∩ skill.requested_tools`; the profile's `tools:` list is a hard ceiling. `activate_skill` mutates only the shared `SkillState.active`; the base `ToolRegistry` is **never** mutated. The ceiling is enforced twice: in `_effective_tool_schemas` (what's advertised) and in `_resolve_tool` (what's dispatchable). High-risk tools (`run_shell`/`write_file`/`patch_file`/`edit_file`) require `confirm` before activation. `activate_skill` only *offers* skills the profile can actually use (≥1 requested tool authorized, or instruction-only) — it never advertises a skill whose effective tool set would be empty.
 12. **`memory` writes are profile-scoped and confined.** The memory file resolves against `profile_dir` (not the workspace); relative paths that escape it raise `ConfigError`, absolute paths require `allow_absolute_path: true`, and writes into the installed package tree are refused. `max_bytes` is checked on the *final* file content. Strict keys: `remember` fails if the key exists; `modify`/`forget` fail if it doesn't.
+13. **Skills may ship their own tool code; the `tools:` ceiling still governs.** A skill dir may include a Python module (frontmatter `module:` + `provides:`) whose `@tool` functions are imported into the global `REGISTRY` by `load_skill_tools`, run in `from_profile` **before** `REGISTRY.subset(profile.tools)`. *Registration ≠ authorization*: a skill-provided tool is reachable only if its name is in `profile.tools` (else it fails `subset()`/`_resolve_tool` exactly like a typo — invariant 11 still binds shipped code). A profile loads a skill's code only by *engaging* it — naming it in `skills:` (static; instructions injected as an always-on prompt layer) or enabling `activate_skill` (dynamic). Importing a skill module is code execution; a broken/mismatched module, an undeclared registration, or a name collision raises `ConfigError` at load — never silently. **Loading is atomic**: a module that fails any check is rolled back (the global catalog and its `sys.modules` entry are restored), and a module may **never overwrite an existing tool** — a name it registers but doesn't declare in `provides`, or that collides with an incumbent, is refused (object-identity check, not just a name diff). The synthetic module identity is keyed by the *resolved file path*, so a profile-local skill genuinely *shadows* a bundled one of the same name rather than aliasing its already-imported code. The base subset is never mutated at runtime. (First built skill: `lingcore/skills/canvas`, used by the `teaching` profile.)
 
 ## Conventions
 

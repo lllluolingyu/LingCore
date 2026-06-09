@@ -69,6 +69,15 @@ def test_load_bundled_code_review_skill():
     assert "code-review" in skills
 
 
+def test_prompt_only_skill_has_no_shipped_code():
+    # A prompt-only skill keeps the new code-shipping fields at their defaults,
+    # so existing skills are unaffected by invariant 13 (additive change).
+    bundled = Path(__file__).parent.parent / "lingcore" / "skills"
+    skills = load_skills([bundled])
+    assert skills["code-review"].provides == ()
+    assert skills["code-review"].module is None
+
+
 # --------------------------------------------------------------------------- #
 # Permission model (§8 invariants)                                            #
 # --------------------------------------------------------------------------- #

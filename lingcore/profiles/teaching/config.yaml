@@ -1,0 +1,64 @@
+# LingCore teaching-assistant profile (keyed provider).
+# Secrets never live here — api_key_env / token_env only *name* env vars.
+#
+# A study companion built around Canvas LMS: it surfaces courses, due dates, and
+# announcements, syncs course files into the workspace, and reads those materials
+# to help the student learn. It does NOT run shell commands or write the user's
+# files (canvas_sync is the only writer, and it stays inside the workspace).
+
+name: teaching
+workspace: ${LINGCORE_WORKSPACE:-.}
+
+llm:
+  model: ${LINGCORE_MODEL:-claude-opus-4-8}
+  base_url: ${LINGCORE_BASE_URL:-https://luolingyu.com/v1}
+  api_key_env: ${LINGCORE_API_KEY_ENV:-LLY_API_KEY}
+  sampling:
+    temperature: 0.4
+
+persona:
+  # Inline fallback — world.md / role.md / workflow.md load automatically, and
+  # the canvas skill (declared below) appends its guidance as a prompt layer.
+  system_prompt: |
+    You are a helpful teaching assistant.
+
+# Statically engage the canvas skill: its tool code is loaded and its
+# instructions are injected as an always-on prompt layer.
+skills:
+  - canvas
+
+tools:
+  # File access to work with synced course materials.
+  - read_file
+  - list_dir
+  - search
+  # Canvas tools — shipped by the canvas skill, authorized here (the ceiling).
+  - canvas_courses
+  - canvas_assignments
+  - canvas_announcements
+  - canvas_sync
+
+tool_options:
+  canvas:
+    # base_url is operator-configured; ${CANVAS_URL:-} so the profile still loads
+    # when Canvas isn't set up yet (tools then return a clear "not configured").
+    base_url: ${CANVAS_URL:-}
+    token_env: CANVAS_TOKEN          # NAMES the env var; the secret stays in env
+    course_ids: []                   # optional: restrict to specific course ids
+    download_dir: canvas             # under the workspace; sync writes here
+    file_ext:
+      - ".pdf"
+      - ".pptx"
+      - ".ppt"
+      - ".docx"
+
+memory:
+  max_messages: 60
+  max_tokens: 16000
+
+loop:
+  max_iters: 20
+  parallel_tools: true
+
+guardrail:
+  policy: noop

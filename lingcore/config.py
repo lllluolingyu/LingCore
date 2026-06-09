@@ -132,6 +132,11 @@ class AgentProfile(BaseModel):
     llm: LLMCfg
     persona: PersonaCfg = Field(default_factory=PersonaCfg)
     tools: list[str] = Field(default_factory=list)
+    # Skills the profile *statically engages*: their bundled tool code is loaded
+    # and their instructions are injected as a prompt layer (always-on). Distinct
+    # from the model-invoked ``activate_skill`` tool (dynamic). A profile may use
+    # either, both, or neither.
+    skills: list[str] = Field(default_factory=list)
     tool_options: dict[str, Any] = Field(default_factory=dict)
     memory: MemoryCfg = Field(default_factory=MemoryCfg)
     loop: LoopCfg = Field(default_factory=LoopCfg)

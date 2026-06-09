@@ -67,10 +67,12 @@ commands prompt for confirmation before running. Type `/exit` to quit.
 ## Profiles
 
 A profile is a **directory** containing a `config.yaml` and optional Markdown
-prompt-layer files. Two are shipped:
+prompt-layer files. Four are shipped:
 
 - `lingcore/profiles/coding/` — default profile, targets a keyed provider via env vars.
 - `lingcore/profiles/coding_ollama/` — keyless variant for local Ollama/vLLM.
+- `lingcore/profiles/daily/` — general-purpose assistant (research, notes, persistent memory; no shell).
+- `lingcore/profiles/teaching/` — teaching assistant built on the Canvas skill (courses, due dates, file sync).
 
 ```
 my-agent/
@@ -88,6 +90,36 @@ composed in that order to form the system prompt. `config.yaml` may also set
 `--profile` accepts a directory or a direct path to any YAML file. String values
 support `${VAR}` and `${VAR:-default}` expansion. To create a new agent type, add
 a directory — no code required.
+
+## Skills
+
+A **skill** is a reusable bundle in its own directory: a `skill.md` (YAML
+frontmatter + an instruction body) and, optionally, a Python module that ships
+its own tools. A profile engages a skill either statically (a `skills:` list,
+always-on) or dynamically via the model-invoked `activate_skill` tool.
+
+```
+lingcore/skills/canvas/
+  skill.md         # name, description, requested_tools, provides, module + guidance
+  canvas_tools.py  # @tool functions registered when the skill is engaged
+```
+
+A code-shipping skill declares the tools it registers via `provides:` and the
+module that defines them via `module:`. Crucially, **a skill cannot widen the
+profile's permissions**: a shipped tool is only reachable if the profile also
+lists its name under `tools:` — the `tools:` list is the single hard ceiling,
+whether a tool is a builtin or skill-shipped. The bundled `canvas` skill (used
+by the `teaching` profile) is the worked example: an async Canvas LMS client
+exposing `canvas_courses`, `canvas_assignments`, `canvas_announcements`, and
+`canvas_sync`. Its access token is read from an env var named by
+`tool_options.canvas.token_env` — never stored in YAML — and downloads are
+confined to the workspace.
+
+```bash
+export CANVAS_URL=https://<school>.instructure.com
+export CANVAS_TOKEN=<your-canvas-token>
+uv run lingcore --profile lingcore/profiles/teaching   # "what's due this week?"
+```
 
 ## Writing a tool
 
@@ -120,7 +152,7 @@ agent.py     the async run loop + Agent.from_profile  ← the core
 composer.py  PromptComposer seam: per-turn system-prompt assembly
 config.py    AgentProfile + YAML loading with ${ENV} expansion
 memory.py    ShortTermMemory protocol + WindowMemory
-skills.py    Skill / SkillState — the model-invoked skill permission model
+skills.py    Skill / SkillState / load_skill_tools — skills, incl. code-shipping
 guardrails.py  Guardrail protocol + NoopGuardrail (pre/post hooks)
 tools/       Tool / @tool / ToolRegistry / ToolContext, plus builtin tools
 io/          Frontend protocol + run_session driver + Rich CLI
@@ -134,7 +166,7 @@ set of invariants.
 ## Development
 
 ```bash
-uv run pytest -q          # full suite (116 tests)
+uv run pytest -q          # full suite (197 tests)
 uv run pytest tests/test_agent.py -q
 ```
 

@@ -1,0 +1,53 @@
+# LingCore general daily-assistant profile (keyed provider).
+# Secrets never live here — api_key_env only *names* the env var holding the key.
+#
+# A general-purpose everyday assistant: research, planning, note-taking, and
+# remembering your preferences across sessions. It does NOT run shell commands.
+
+name: daily
+workspace: ${LINGCORE_WORKSPACE:-.}
+
+llm:
+  model: ${LINGCORE_MODEL:-deepseek-v4-pro}
+  base_url: ${LINGCORE_BASE_URL:-https://luolingyu.com/v1}
+  api_key_env: ${LINGCORE_API_KEY_ENV:-LLY_API_KEY}
+  sampling:
+    temperature: 0.6
+
+persona:
+  # Inline fallback — world.md / role.md / workflow.md load automatically.
+  system_prompt: |
+    You are a helpful general-purpose daily assistant.
+
+tools:
+  - read_file
+  - write_file
+  - edit_file
+  - list_dir
+  - search
+  - fetch_url
+  - memory
+  - activate_skill
+
+tool_options:
+  fetch_url:
+    # Public-web research only; private/loopback targets stay blocked.
+    max_bytes: 1048576
+  memory:
+    # Persistent notes/preferences, profile-scoped (resolves against this dir).
+    path: memory.md
+    max_bytes: 65536
+  activate_skill:
+    skills_dir: skills
+    allow_concurrent: false
+
+memory:
+  max_messages: 60
+  max_tokens: 16000
+
+loop:
+  max_iters: 20
+  parallel_tools: true
+
+guardrail:
+  policy: noop

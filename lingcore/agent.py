@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from lingcore.config import AgentProfile
-    from lingcore.skills import SkillState
+    from lingcore.skills import Skill, SkillState
     from lingcore.tools import ConfirmFn
 
 
@@ -119,11 +119,45 @@ class Agent:
             sampling=profile.llm.sampling.as_kwargs(),
         )
 
+        source_dir = getattr(profile, "_source_dir", None)
+        sk_opts = dict(profile.tool_options).get("activate_skill", {})
+
+        # --- Load skills + their shipped tool code BEFORE the tool subset ----
+        # A skill may ship its own @tool code (skill.md ``module:``/``provides:``).
+        # That code must be registered before ``REGISTRY.subset(profile.tools)``
+        # so a profile can authorize a skill-shipped tool by listing it in
+        # ``tools:`` exactly like a builtin. Registration is NOT authorization —
+        # the subset/ceiling still governs reachability (invariant 13).
+        loaded_skills: dict[str, "Skill"] = {}
+        if profile.skills or "activate_skill" in profile.tools:
+            from lingcore.errors import ConfigError
+            from lingcore.skills import load_skill_tools, load_skills
+
+            skill_dirs: list[Path] = []
+            if source_dir is not None:
+                skill_dirs.append(source_dir / sk_opts.get("skills_dir", "skills"))
+            skill_dirs.append(Path(__file__).parent / "skills")
+            loaded_skills = load_skills(skill_dirs)
+            for name in profile.skills:
+                if name not in loaded_skills:
+                    raise ConfigError(
+                        f"profile declares unknown skill {name!r}; "
+                        f"available: {sorted(loaded_skills) or '(none)'}"
+                    )
+            # Import the shipped code only for skills this profile can engage:
+            # statically declared, or providing a tool the profile authorizes.
+            to_import = {
+                name: sk
+                for name, sk in loaded_skills.items()
+                if sk.module is not None
+                and (name in profile.skills or (set(sk.provides) & set(profile.tools)))
+            }
+            load_skill_tools(to_import)
+
         tools = REGISTRY.subset(profile.tools)
         workspace = profile.workspace_path(base_dir)
         workspace.mkdir(parents=True, exist_ok=True)
 
-        source_dir = getattr(profile, "_source_dir", None)
         tool_ctx = ToolContext(
             workspace=workspace,
             confirm=confirm,
@@ -137,22 +171,28 @@ class Agent:
         )
         guardrail = _build_guardrail(profile.guardrail.policy)
 
-        # --- Load skills (if activate_skill is enabled) -------------------
+        # --- Dynamic skill state (only when the activate_skill tool is enabled) ---
         skill_state: "SkillState | None" = None
         if "activate_skill" in profile.tools:
-            from lingcore.skills import SkillState, load_skills
+            from lingcore.skills import SkillState
             from lingcore.tools.builtin.skill import SKILL_STATE_KEY
 
-            sk_opts = dict(profile.tool_options).get("activate_skill", {})
-            skill_dirs = []
-            if source_dir is not None:
-                skill_dirs.append(source_dir / sk_opts.get("skills_dir", "skills"))
-            skill_dirs.append(Path(__file__).parent / "skills")
-            loaded = load_skills(skill_dirs)
+            ptools = frozenset(profile.tools)
+            # Only offer skills this profile can actually use. A skill is
+            # activatable only if the profile authorizes at least one of its
+            # requested tools (or it ships none and is purely instructional).
+            # Otherwise a code-shipping skill like ``canvas`` is advertised to a
+            # profile that can grant none of its tools — effective_tools is ∅, so
+            # activating it would only mislead the model.
+            offerable = {
+                name: sk
+                for name, sk in loaded_skills.items()
+                if not sk.requested_tools or (ptools & frozenset(sk.requested_tools))
+            }
             high_risk = sk_opts.get("high_risk_tools")
             skill_state = SkillState(
-                skills=loaded,
-                profile_tools=frozenset(profile.tools),
+                skills=offerable,
+                profile_tools=ptools,
                 allow_concurrent=bool(sk_opts.get("allow_concurrent", False)),
                 high_risk_tools=frozenset(high_risk) if high_risk is not None
                 else SkillState.high_risk_tools,
@@ -184,9 +224,19 @@ class Agent:
                 if not raw_mem.is_absolute():
                     memory_path = (source_dir / raw_mem).resolve()
 
-        if layers or includes or memory_path is not None or skill_state is not None:
+        # Statically-declared skills (profile ``skills:``) inject their
+        # instructions as an always-on prompt layer — distinct from the dynamic
+        # activate_skill path, which injects via active_skills in the loop.
+        static_skill_layers = [
+            loaded_skills[name].instructions
+            for name in profile.skills
+            if loaded_skills.get(name) and loaded_skills[name].instructions
+        ]
+        all_layers = layers + includes + static_skill_layers
+
+        if all_layers or memory_path is not None or skill_state is not None:
             composer = LayeredComposer(
-                layers=layers + includes,
+                layers=all_layers,
                 memory_path=memory_path,
                 skill_instructions=skill_state.instruction_map() if skill_state else {},
             )
