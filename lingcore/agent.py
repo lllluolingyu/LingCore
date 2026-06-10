@@ -14,14 +14,17 @@ never to the OpenAI SDK directly.
 from __future__ import annotations
 
 import asyncio
+import random
 from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol
 
 from lingcore.composer import ComposeContext, PromptComposer, StaticComposer
+from lingcore.errors import LLMStreamError
 from lingcore.events import (
     AgentEvent,
     Error,
     Final,
     SkillActivated,
+    StreamRetry,
     TextDelta,
     ToolCallStarted,
     ToolResultEvent,
@@ -39,6 +42,20 @@ if TYPE_CHECKING:
     from lingcore.sessions import SessionStore
     from lingcore.skills import Skill, SkillState
     from lingcore.tools import ConfirmFn
+
+
+# Backoff between stream re-requests (mid-stream failure recovery): capped
+# exponential with full jitter. Stream-open backoff is the SDK's job; this
+# only paces the loop's own retries, so it stays simple and unconditional.
+_BACKOFF_BASE_SECONDS = 0.5
+_BACKOFF_CAP_SECONDS = 8.0
+
+
+def _backoff_seconds(attempt: int) -> float:
+    """Delay before stream-retry ``attempt`` (1-based)."""
+    return random.uniform(
+        0.0, min(_BACKOFF_CAP_SECONDS, _BACKOFF_BASE_SECONDS * 2 ** (attempt - 1))
+    )
 
 
 def _build_guardrail(policy: str) -> Guardrail:
@@ -67,6 +84,7 @@ class Agent:
         guardrail: Guardrail | None = None,
         max_iters: int = 25,
         parallel_tools: bool = True,
+        stream_retries: int = 3,
         session_id: str | None = None,
         skill_state: "SkillState | None" = None,
     ) -> None:
@@ -78,6 +96,7 @@ class Agent:
         self.guardrail = guardrail or NoopGuardrail()
         self.max_iters = max_iters
         self.parallel_tools = parallel_tools
+        self.stream_retries = max(0, stream_retries)
         self._session_id = session_id
         # Shared skill runtime state (None when skills are not configured).
         self.skill_state = skill_state
@@ -273,6 +292,7 @@ class Agent:
             guardrail=guardrail,
             max_iters=profile.loop.max_iters,
             parallel_tools=profile.loop.parallel_tools,
+            stream_retries=profile.llm.stream_retries,
             session_id=sid,
             skill_state=skill_state,
         )
@@ -299,15 +319,48 @@ class Agent:
 
             messages = self.memory.render(system_prompt)
             schemas = self._effective_tool_schemas()
-            content_parts: list[str] = []
-            tool_calls: list[ToolCall] = []
 
-            async for chunk in self.llm.stream(messages, tools=schemas):
-                if chunk.text_delta:
-                    content_parts.append(chunk.text_delta)
-                    yield TextDelta(chunk.text_delta)
-                if chunk.tool_calls:
-                    tool_calls = chunk.tool_calls
+            # --- Stream one assistant turn, recovering from mid-stream loss ---
+            # A turn that fails in flight was never committed to memory, so it
+            # can be re-requested cleanly: discard the partial accumulation,
+            # tell the frontend (StreamRetry voids any text it already
+            # rendered), back off, and ask again with the same request. An
+            # LLM failure never crashes the loop (invariant 5): terminal
+            # failures end the turn with an Error event instead of raising.
+            attempt = 0
+            while True:
+                content_parts: list[str] = []
+                tool_calls: list[ToolCall] = []
+                try:
+                    async for chunk in self.llm.stream(messages, tools=schemas):
+                        if chunk.text_delta:
+                            content_parts.append(chunk.text_delta)
+                            yield TextDelta(chunk.text_delta)
+                        if chunk.tool_calls:
+                            tool_calls = chunk.tool_calls
+                    break
+                except LLMStreamError as e:
+                    attempt += 1
+                    if not e.retryable or attempt > self.stream_retries:
+                        spent = (
+                            f" after {self.stream_retries} retries"
+                            if e.retryable and self.stream_retries
+                            else ""
+                        )
+                        yield Error(f"model request failed{spent}: {e}")
+                        return
+                    yield StreamRetry(
+                        attempt=attempt,
+                        max_attempts=self.stream_retries,
+                        reason=str(e),
+                        discarded_chars=sum(len(p) for p in content_parts),
+                    )
+                    await asyncio.sleep(_backoff_seconds(attempt))
+                except Exception as e:
+                    # A duck-typed backend may raise anything; without a
+                    # retryable classification, surface it and end the turn.
+                    yield Error(f"model request failed: {type(e).__name__}: {e}")
+                    return
 
             assistant = Message.assistant(
                 content="".join(content_parts), tool_calls=tool_calls

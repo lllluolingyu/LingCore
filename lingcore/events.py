@@ -41,6 +41,22 @@ class Final:
 
 
 @dataclass(slots=True)
+class StreamRetry:
+    """The in-flight model response failed and is being re-requested.
+
+    Whatever this turn had already streamed (``discarded_chars`` of text) is
+    void — the reply will be regenerated from scratch, and may differ.
+    Frontends should mark the rupture so a user never reads the partial and
+    the regenerated text as one continuous reply.
+    """
+
+    attempt: int
+    max_attempts: int
+    reason: str
+    discarded_chars: int = 0
+
+
+@dataclass(slots=True)
 class Error:
     """A turn-level error the frontend should surface."""
 
@@ -56,5 +72,11 @@ class SkillActivated:
 
 
 AgentEvent = (
-    TextDelta | ToolCallStarted | ToolResultEvent | Final | Error | SkillActivated
+    TextDelta
+    | ToolCallStarted
+    | ToolResultEvent
+    | StreamRetry
+    | Final
+    | Error
+    | SkillActivated
 )

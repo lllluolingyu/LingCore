@@ -8,7 +8,14 @@ import pytest
 
 from lingcore.agent import Agent
 from lingcore.config import AgentProfile
-from lingcore.events import Error, Final, TextDelta, ToolCallStarted, ToolResultEvent
+from lingcore.events import (
+    Error,
+    Final,
+    StreamRetry,
+    TextDelta,
+    ToolCallStarted,
+    ToolResultEvent,
+)
 from lingcore.io.base import run_session
 from lingcore.io.cli import CLIFrontend
 from lingcore.message import ToolCall, ToolResult
@@ -135,6 +142,8 @@ def test_cli_renders_all_event_types_without_error():
     cli.render(TextDelta("world"))
     cli.render(ToolCallStarted(ToolCall(id="c", name="read_file", arguments={"path": "a"})))
     cli.render(ToolResultEvent(ToolResult(call_id="c", name="read_file", content="data")))
+    cli.render(StreamRetry(attempt=1, max_attempts=3,
+                           reason="stream interrupted: [boom]", discarded_chars=11))
     cli.render(Final("hello world"))
     cli.render(Error("something broke"))
     # If we got here, all event branches rendered without raising.

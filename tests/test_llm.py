@@ -8,6 +8,7 @@ import httpx
 import pytest
 from openai import BadRequestError, InternalServerError, RateLimitError
 
+from lingcore.errors import LLMStreamError
 from lingcore.llm import LLMClient
 from tests.fakes import (
     _Choice,
@@ -205,6 +206,94 @@ async def test_max_retries_zero_attempts_once():
     assert calls["n"] == 1                           # retrying disabled
 
 
+# --------------------------------------------------------------------------- #
+# Failure classification — everything `stream()` raises is an LLMStreamError   #
+# whose `retryable` flag tells the agent loop whether re-requesting helps.     #
+# --------------------------------------------------------------------------- #
+
+
+async def test_open_failure_wrapped_nonretryable():
+    # The SDK already retried what was retryable before this surfaces, so the
+    # loop must not retry again: retryable=False, original error chained.
+    def handler(request):
+        return _err(400)
+
+    client = _mock_client(handler, max_retries=5)
+    with pytest.raises(LLMStreamError) as ei:
+        async for _ in client.stream(messages=[]):
+            pass
+    assert ei.value.retryable is False
+    assert isinstance(ei.value.__cause__, BadRequestError)
+
+
+async def test_exhausted_sdk_retries_wrapped_nonretryable():
+    def handler(request):
+        return _err(429, **{"retry-after-ms": "1"})
+
+    client = _mock_client(handler, max_retries=1)
+    with pytest.raises(LLMStreamError) as ei:
+        async for _ in client.stream(messages=[]):
+            pass
+    assert ei.value.retryable is False
+    assert isinstance(ei.value.__cause__, RateLimitError)
+
+
+async def test_midstream_interruption_wrapped_retryable(client, monkeypatch):
+    # The stream opens and yields, then the connection dies. The SDK never
+    # retries this; it must surface as retryable=True so the loop can discard
+    # the partial turn and re-request.
+    closed = {"n": 0}
+
+    class _BrokenStream:
+        def __aiter__(self):
+            return self._gen()
+
+        async def _gen(self):
+            yield _Event([_Choice(_Delta(content="He"))])
+            raise httpx.ReadError("connection lost")
+
+        async def close(self):  # the abandoned stream must be released
+            closed["n"] += 1
+
+    async def fake_open(messages, tools):
+        return _BrokenStream()
+
+    monkeypatch.setattr(client, "_open_stream", fake_open)
+    got = []
+    with pytest.raises(LLMStreamError) as ei:
+        async for chunk in client.stream(messages=[]):
+            got.append(chunk)
+    assert ei.value.retryable is True
+    assert isinstance(ei.value.__cause__, httpx.ReadError)
+    assert [c.text_delta for c in got] == ["He"]  # the partial did stream
+    assert closed["n"] == 1
+
+
+async def test_premature_eof_is_retryable_truncation(client, monkeypatch):
+    # A stream that ends without ever sending a finish reason is a truncated
+    # response — surfacing beats silently committing half a reply (or running
+    # a tool on half its JSON arguments).
+    events = [
+        _Event([_Choice(_Delta(content="half a re"))]),
+        _Event([_Choice(_Delta(tool_calls=[
+            _ToolCallDelta(index=0, id="c0", function=_Fn(name="x", arguments='{"pa')),
+        ]))]),
+    ]
+    chunks = []
+    with pytest.raises(LLMStreamError) as ei:
+
+        async def fake_open(messages, tools):
+            return make_openai_stream(events)
+
+        monkeypatch.setattr(client, "_open_stream", fake_open)
+        async for chunk in client.stream(messages=[]):
+            chunks.append(chunk)
+    assert ei.value.retryable is True
+    assert "finish reason" in str(ei.value)
+    # No terminal chunk was yielded — the half-assembled tool call never escapes.
+    assert all(c.tool_calls is None for c in chunks)
+
+
 def test_retry_and_timeout_wired_to_sdk():
     client = LLMClient(model="x", api_key="k", base_url="http://test/v1",
                        max_retries=7, timeout=33.0)
@@ -240,3 +329,34 @@ async def test_retry_and_timeout_flow_from_profile_to_client(tmp_path, monkeypat
     Agent.from_profile(AgentProfile.load(root))  # llm=None → builds the (spy) client
     assert captured["max_retries"] == 7
     assert captured["timeout"] == 42.0
+
+
+async def test_stream_retries_flow_from_profile_to_agent(tmp_path):
+    # stream_retries is an llm.* knob but it parameterizes the *loop* (the
+    # client only classifies failures; the loop owns the re-request).
+    from lingcore.agent import Agent
+    from lingcore.config import AgentProfile
+    from tests.fakes import FakeLLMClient
+
+    root = tmp_path / "p"
+    root.mkdir()
+    (root / "config.yaml").write_text(
+        "name: t\nllm:\n  model: m\n  stream_retries: 5\ntools: []\n",
+        encoding="utf-8",
+    )
+    agent = Agent.from_profile(AgentProfile.load(root), llm=FakeLLMClient([]))
+    assert agent.stream_retries == 5
+
+
+def test_negative_stream_retries_rejected(tmp_path):
+    from lingcore.config import AgentProfile
+    from lingcore.errors import ConfigError
+
+    root = tmp_path / "p"
+    root.mkdir()
+    (root / "config.yaml").write_text(
+        "name: t\nllm:\n  model: m\n  stream_retries: -1\ntools: []\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError):
+        AgentProfile.load(root)

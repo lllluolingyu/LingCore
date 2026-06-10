@@ -77,6 +77,14 @@ class LLMCfg(BaseModel):
     # x-should-retry hint. 0 disables retrying. Raise it for an unstable
     # endpoint; lower it for a local server you'd rather fail fast against.
     max_retries: int = Field(default=10, ge=0)
+    # Re-request budget for a response that fails *mid-stream*: a connection
+    # drop, a stall past `timeout`, or a stream that ends without a finish
+    # reason (truncation). max_retries never covers these — the SDK only
+    # retries opening the request — so the agent loop recovers instead: it
+    # discards the partial turn (never committed to memory), emits a
+    # StreamRetry event so the frontend can mark the rupture, and asks again,
+    # at most this many times per request. 0 disables mid-stream recovery.
+    stream_retries: int = Field(default=3, ge=0)
     # Per-request inactivity timeout (seconds): httpx's read window — the
     # longest gap with no bytes received, including the wait for the first
     # token, before an attempt fails. NOT a wall-clock cap on the full streamed

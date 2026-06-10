@@ -19,6 +19,7 @@ from lingcore.events import (
     Error,
     Final,
     SkillActivated,
+    StreamRetry,
     TextDelta,
     ToolCallStarted,
     ToolResultEvent,
@@ -91,6 +92,13 @@ class CLIFrontend:
                 self._break_line()
                 verb = "activated" if active else "deactivated"
                 self.console.print(f"[dim]⚙ skill {verb}: {name}[/]")
+            case StreamRetry(attempt, max_attempts, reason, discarded_chars):
+                self._break_line()
+                note = " — partial reply above discarded" if discarded_chars else ""
+                self.console.print(
+                    f"[yellow]⟲ {escape(reason)}; "
+                    f"retrying ({attempt}/{max_attempts}){note}[/]"
+                )
             case Final(_):
                 self._break_line()
             case Error(message):

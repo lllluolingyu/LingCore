@@ -2,7 +2,9 @@
 
 ``FakeLLMClient`` is scripted: each call to ``stream`` pops the next scripted
 turn and yields it as ``LLMChunk``s. This lets the agent loop be tested with
-zero network and zero API cost.
+zero network and zero API cost. A scripted turn may also be a
+``StreamFailure`` — text that streams and then dies — to exercise the loop's
+mid-stream recovery.
 
 ``make_openai_stream`` fabricates an async iterator shaped like the real
 OpenAI streaming response, used to test ``LLMClient``'s delta reassembly
@@ -14,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
+from lingcore.errors import LLMStreamError
 from lingcore.llm import LLMChunk
 from lingcore.message import Message, ToolCall
 
@@ -27,10 +30,23 @@ class ScriptedTurn:
     finish_reason: str = "stop"
 
 
+@dataclass
+class StreamFailure:
+    """A scripted mid-stream failure: yield ``text``, then raise.
+
+    Models a connection drop / truncation after ``text`` already streamed —
+    exactly what the agent loop's stream-retry recovery must handle.
+    """
+
+    text: str = ""
+    reason: str = "stream interrupted: connection dropped"
+    retryable: bool = True
+
+
 class FakeLLMClient:
     """A scripted stand-in for ``LLMClient`` with the same ``stream`` shape."""
 
-    def __init__(self, turns: list[ScriptedTurn]):
+    def __init__(self, turns: list[ScriptedTurn | StreamFailure]):
         self._turns = list(turns)
         self.calls: list[list[Message]] = []  # records messages seen each turn
         self.tool_schemas: list[list[dict[str, Any]] | None] = []  # tools per turn
@@ -48,6 +64,8 @@ class FakeLLMClient:
         if turn.text:
             for piece in _chunk_text(turn.text):
                 yield LLMChunk(text_delta=piece)
+        if isinstance(turn, StreamFailure):
+            raise LLMStreamError(turn.reason, retryable=turn.retryable)
         yield LLMChunk(tool_calls=turn.tool_calls, finish_reason=turn.finish_reason)
 
 
