@@ -6,7 +6,7 @@ own separate history — exactly like the memory tool's ``memory.md``. The same
 confinement rules apply (invariant 12): a relative ``sessions.path`` may not
 escape the profile directory, an absolute one requires
 ``allow_absolute_path: true``, and a path inside the installed package tree
-(all bundled profiles) disables persistence gracefully rather than erroring.
+disables persistence gracefully rather than erroring.
 
 Design notes:
 
@@ -361,7 +361,8 @@ def open_store(profile: "AgentProfile") -> tuple[SessionStore | None, str | None
 
     Returns ``(store, notice)``: a usable store with no notice, or ``None``
     with an optional one-line notice explaining why persistence is off
-    (bundled in-package profile, or a profile without a source directory).
+    (a profile directory inside the installed package, or one without a
+    source directory).
     Misconfiguration — an escaping relative path, or an absolute path without
     ``allow_absolute_path`` — raises ``ConfigError`` instead.
     """
@@ -387,8 +388,8 @@ def open_store(profile: "AgentProfile") -> tuple[SessionStore | None, str | None
         try:
             resolved.relative_to(_PACKAGE_DIR)
             return None, (
-                "session persistence disabled: bundled profile lives inside the "
-                "installed package — copy the profile directory elsewhere, or set "
+                "session persistence disabled: the profile directory is inside "
+                "the installed lingcore package — copy it elsewhere, or set "
                 "an absolute sessions.path with allow_absolute_path: true"
             )
         except ValueError:

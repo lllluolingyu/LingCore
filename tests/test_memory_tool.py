@@ -122,7 +122,7 @@ async def test_absolute_path_allowed_with_flag(tmp_path):
 
 async def test_package_dir_write_blocked(tmp_path):
     """profile_dir inside the installed package must not be writable."""
-    package_profile = _PACKAGE_DIR / "profiles" / "coding"
+    package_profile = _PACKAGE_DIR / "some_profile"
     ctx = ToolContext(
         workspace=tmp_path,
         profile_dir=package_profile,

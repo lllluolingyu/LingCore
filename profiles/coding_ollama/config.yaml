@@ -1,7 +1,10 @@
 # LingCore coding-agent profile (Ollama/vLLM — keyless local server).
 
 name: coding_ollama
-workspace: ${LINGCORE_WORKSPACE:-.}
+# Where the agent's file tools and shell operate. Unset resolves to
+# ./workspace inside this profile dir — point it at a real project with
+# --workspace or LINGCORE_WORKSPACE.
+workspace: ${LINGCORE_WORKSPACE:-}
 
 llm:
   model: ${LINGCORE_MODEL:-qwen3.5:latest}

@@ -7,7 +7,9 @@
 # files (canvas_sync is the only writer, and it stays inside the workspace).
 
 name: teaching
-workspace: ${LINGCORE_WORKSPACE:-.}
+# Synced course files land in ./workspace/canvas inside this profile dir by
+# default — override with --workspace or LINGCORE_WORKSPACE.
+workspace: ${LINGCORE_WORKSPACE:-}
 
 llm:
   model: ${LINGCORE_MODEL:-claude-opus-4-8}

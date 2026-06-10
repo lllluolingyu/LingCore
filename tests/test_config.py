@@ -146,3 +146,53 @@ async def test_from_profile_builds_runnable_agent(tmp_path, monkeypatch):
 
     events = [ev async for ev in agent.run("hi")]
     assert events[-1].__class__.__name__ == "Final"
+
+
+# --------------------------------------------------------------------------- #
+# Workspace resolution                                                         #
+# --------------------------------------------------------------------------- #
+
+def test_unset_workspace_defaults_to_profile_subdir(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_KEY", "sk-xyz")
+    text = FIXTURE.replace("workspace: ${TEST_WS:-.}\n", "")
+    prof = AgentProfile.load(_write(tmp_path, text))
+    assert prof.workspace is None
+    # The profile dir wins even when a base (the user's CWD) is supplied.
+    assert prof.workspace_path(tmp_path / "elsewhere") == (tmp_path / "workspace").resolve()
+
+
+def test_blank_workspace_expansion_means_default(tmp_path, monkeypatch):
+    # The bundled-profile idiom: ${VAR:-} expands to "" when VAR is unset,
+    # which must behave exactly like omitting the workspace key.
+    monkeypatch.setenv("TEST_KEY", "sk-xyz")
+    monkeypatch.delenv("TEST_WS", raising=False)
+    text = FIXTURE.replace("${TEST_WS:-.}", "${TEST_WS:-}")
+    prof = AgentProfile.load(_write(tmp_path, text))
+    assert prof.workspace is None
+    assert prof.workspace_path() == (tmp_path / "workspace").resolve()
+
+
+def test_explicit_relative_workspace_resolves_against_base(tmp_path, monkeypatch):
+    # Invariant 8: an explicit relative workspace follows the user's CWD
+    # (passed as base), not the profile directory.
+    monkeypatch.setenv("TEST_KEY", "sk-xyz")
+    monkeypatch.delenv("TEST_WS", raising=False)
+    prof = AgentProfile.load(_write(tmp_path, FIXTURE))  # workspace: "."
+    assert prof.workspace == "."
+    assert prof.workspace_path(tmp_path / "cwd") == (tmp_path / "cwd").resolve()
+
+
+def test_default_workspace_without_source_dir_falls_back_to_base(tmp_path):
+    prof = AgentProfile.model_validate({"llm": {"model": "m"}})
+    assert prof.workspace_path(tmp_path) == (tmp_path / "workspace").resolve()
+
+
+async def test_from_profile_creates_default_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_KEY", "sk-xyz")
+    text = FIXTURE.replace("workspace: ${TEST_WS:-.}\n", "")
+    prof = AgentProfile.load(_write(tmp_path, text))
+    agent = Agent.from_profile(
+        prof, llm=FakeLLMClient([ScriptedTurn(text="hi")]), base_dir=tmp_path / "cwd"
+    )
+    assert agent.tool_ctx.workspace == (tmp_path / "workspace").resolve()
+    assert agent.tool_ctx.workspace.is_dir()  # auto-created on assembly

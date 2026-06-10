@@ -47,8 +47,8 @@ uv sync
 
 ```bash
 ollama pull qwen2.5-coder:7b      # or any model you have
-cd /path/to/your/project
-uv run lingcore --profile lingcore/profiles/coding_ollama
+cd LingCore
+uv run lingcore --profile profiles/coding_ollama --workspace /path/to/your/project
 ```
 
 ### Keyed provider (OpenAI, etc.)
@@ -66,8 +66,12 @@ uv run lingcore
 Type a message; the agent streams its reply and shows each tool call. Shell
 commands prompt for confirmation before running. Type `/exit` to quit.
 
-When the profile lives outside the installed package (any profile you created),
-the conversation is saved automatically and can be picked up later:
+By default the agent works in a `workspace/` folder inside the profile
+directory (auto-created) — point it at a real project with
+`--workspace /path/to/project` or `LINGCORE_WORKSPACE`.
+
+Conversations are saved automatically — per profile — and can be picked up
+later:
 
 ```bash
 uv run lingcore -p my-agent -c                  # resume the most recent session
@@ -75,10 +79,11 @@ uv run lingcore -p my-agent --resume 3ca5       # resume by unique id prefix
 uv run lingcore -p my-agent --list-sessions     # see what's stored
 ```
 
-History lands in `my-agent/sessions.db` — delete the file to wipe it. The
-bundled profiles live inside the package tree, where writes are refused, so
-they run ephemeral with a one-line notice (copy the profile directory out to
-keep history).
+History lands in `<profile>/sessions.db` — delete the file to wipe it. The
+bundled profiles live at the repo root (`profiles/`), outside the installed
+package, so they keep history too (their db files are gitignored). A profile
+inside an installed package can't persist and runs ephemeral with a one-line
+notice.
 
 > The first message may pause briefly while `tiktoken` downloads its tokenizer
 > data (cached afterward). This step needs network access once.
@@ -88,10 +93,10 @@ keep history).
 A profile is a **directory** containing a `config.yaml` and optional Markdown
 prompt-layer files. Four are shipped:
 
-- `lingcore/profiles/coding/` — default profile, targets a keyed provider via env vars.
-- `lingcore/profiles/coding_ollama/` — keyless variant for local Ollama/vLLM.
-- `lingcore/profiles/daily/` — general-purpose assistant (research, notes, persistent memory; no shell).
-- `lingcore/profiles/teaching/` — teaching assistant built on the Canvas skill (courses, due dates, file sync).
+- `profiles/coding/` — default profile, targets a keyed provider via env vars.
+- `profiles/coding_ollama/` — keyless variant for local Ollama/vLLM.
+- `profiles/daily/` — general-purpose assistant (research, notes, persistent memory; no shell).
+- `profiles/teaching/` — teaching assistant built on the Canvas skill (courses, due dates, file sync).
 
 ```
 my-agent/
@@ -101,6 +106,7 @@ my-agent/
   workflow.md    # optional — operating method
   memory.md      # auto-created by the memory tool (opt-in)
   sessions.db    # auto-created session history (on by default; sessions.enabled: false to opt out)
+  workspace/     # default working dir for the agent's tools (auto-created; workspace: / --workspace overrides)
 ```
 
 `world.md`, `role.md`, and `workflow.md` are loaded automatically if present and
@@ -138,7 +144,7 @@ confined to the workspace.
 ```bash
 export CANVAS_URL=https://<school>.instructure.com
 export CANVAS_TOKEN=<your-canvas-token>
-uv run lingcore --profile lingcore/profiles/teaching   # "what's due this week?"
+uv run lingcore --profile profiles/teaching   # "what's due this week?"
 ```
 
 ## Writing a tool
@@ -187,7 +193,7 @@ set of invariants.
 ## Development
 
 ```bash
-uv run pytest -q          # full suite (251 tests)
+uv run pytest -q          # full suite (256 tests)
 uv run pytest tests/test_agent.py -q
 ```
 

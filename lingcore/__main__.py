@@ -21,7 +21,10 @@ from lingcore.io.base import run_session
 from lingcore.io.cli import CLIFrontend, rel_time
 from lingcore.sessions import SessionMeta, SessionStore, open_store
 
-_DEFAULT_PROFILE = Path(__file__).parent / "profiles" / "coding"
+# Bundled profiles live at the repo root — outside the package tree — so their
+# sessions.db / memory.md are writable. The default only resolves in a repo
+# checkout; wheel installs must pass --profile.
+_DEFAULT_PROFILE = Path(__file__).resolve().parents[1] / "profiles" / "coding"
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

@@ -248,7 +248,7 @@ def test_folder_path_reconstruction():
 # End-to-end: the real teaching profile builds in this (already-polluted) proc #
 # --------------------------------------------------------------------------- #
 
-async def test_teaching_profile_loads_without_collision(monkeypatch):
+async def test_teaching_profile_loads_without_collision(tmp_path, monkeypatch):
     # This module already registered the canvas tools at import time (the
     # ``canvas = _load_canvas()`` above). Building the *real* teaching profile
     # must still succeed: the framework re-imports the same canvas module path
@@ -261,8 +261,10 @@ async def test_teaching_profile_loads_without_collision(monkeypatch):
 
     monkeypatch.setenv("LLY_API_KEY", "dummy")
     prof = AgentProfile.load(
-        Path(__file__).parent.parent / "lingcore" / "profiles" / "teaching"
+        Path(__file__).parent.parent / "profiles" / "teaching"
     )
+    # Keep the auto-created default workspace out of the real profile dir.
+    prof.workspace = str(tmp_path)
     agent = Agent.from_profile(prof, llm=FakeLLMClient([ScriptedTurn(text="hi")]))
     assert {
         "canvas_courses",

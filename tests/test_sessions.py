@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -435,14 +436,19 @@ def test_open_store_refuses_package_tree(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(sessions_mod, "_PACKAGE_DIR", tmp_path.resolve())
     store, notice = open_store(_profile(tmp_path))
     assert store is None
-    assert "bundled profile" in notice
+    assert "inside the installed" in notice
 
 
-def test_open_store_refuses_real_bundled_profile():
-    bundled = Path(__file__).parent.parent / "lingcore" / "profiles" / "daily"
-    profile = AgentProfile.load(bundled)
-    store, notice = open_store(profile)
-    assert store is None and "bundled profile" in notice
+def test_bundled_profiles_live_outside_package_and_persist(tmp_path: Path):
+    import lingcore.sessions as sessions_mod
+
+    repo_profiles = Path(__file__).parent.parent / "profiles"
+    assert not repo_profiles.resolve().is_relative_to(sessions_mod._PACKAGE_DIR)
+    copy = tmp_path / "daily"
+    shutil.copytree(repo_profiles / "daily", copy)
+    store, notice = open_store(AgentProfile.load(copy))
+    assert store is not None and notice is None
+    store.close()
 
 
 def test_open_store_without_source_dir():

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from lingcore.errors import ConfigError
 
@@ -137,7 +137,7 @@ class SessionsCfg(BaseModel):
     The DB path resolves exactly like the memory tool's file (invariant 12):
     relative paths are confined to the profile directory, absolute paths
     require ``allow_absolute_path: true``, and a path inside the installed
-    package tree disables persistence gracefully (bundled profiles).
+    package tree disables persistence gracefully.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -157,7 +157,11 @@ class AgentProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = "agent"
-    workspace: str = "."
+    # Where the agent's file tools (and shell) operate. Unset (the default)
+    # resolves to a ``workspace/`` subdirectory of the profile directory —
+    # per-profile scratch space alongside sessions.db and memory.md — so a
+    # bare launch never adopts whatever directory the user happened to be in.
+    workspace: str | None = None
     llm: LLMCfg
     persona: PersonaCfg = Field(default_factory=PersonaCfg)
     tools: list[str] = Field(default_factory=list)
@@ -171,6 +175,19 @@ class AgentProfile(BaseModel):
     loop: LoopCfg = Field(default_factory=LoopCfg)
     guardrail: GuardrailCfg = Field(default_factory=GuardrailCfg)
     sessions: SessionsCfg = Field(default_factory=SessionsCfg)
+
+    @field_validator("workspace")
+    @classmethod
+    def _blank_workspace_is_unset(cls, v: str | None) -> str | None:
+        """Treat a blank workspace exactly like an omitted one.
+
+        Bundled profiles write ``workspace: ${LINGCORE_WORKSPACE:-}`` — the
+        expansion yields ``""`` when the env var is unset, which must mean
+        "use the per-profile default", not "the empty path".
+        """
+        if v is not None and not v.strip():
+            return None
+        return v
 
     @classmethod
     def load(cls, path: str | Path) -> "AgentProfile":
@@ -204,7 +221,17 @@ class AgentProfile(BaseModel):
         return profile
 
     def workspace_path(self, base: Path | None = None) -> Path:
-        """Resolve the workspace, relative to ``base`` (e.g. the profile dir)."""
+        """Resolve the workspace directory.
+
+        Unset (``None``/blank) defaults to a ``workspace/`` subdirectory of
+        the profile directory (falling back to ``base``, then the CWD, for a
+        profile constructed without a source file). An *explicit* relative
+        path resolves against ``base`` — the user's CWD, not the profile dir
+        (invariant 8); absolute paths are taken as-is.
+        """
+        if self.workspace is None:
+            root = getattr(self, "_source_dir", None) or base or Path.cwd()
+            return (root / "workspace").resolve()
         ws = Path(self.workspace).expanduser()
         if not ws.is_absolute() and base is not None:
             ws = base / ws

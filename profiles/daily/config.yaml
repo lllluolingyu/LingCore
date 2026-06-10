@@ -5,7 +5,9 @@
 # remembering your preferences across sessions. It does NOT run shell commands.
 
 name: daily
-workspace: ${LINGCORE_WORKSPACE:-.}
+# Notes and saved files land in ./workspace inside this profile dir by
+# default — override with --workspace or LINGCORE_WORKSPACE.
+workspace: ${LINGCORE_WORKSPACE:-}
 
 llm:
   model: ${LINGCORE_MODEL:-deepseek-v4-pro}

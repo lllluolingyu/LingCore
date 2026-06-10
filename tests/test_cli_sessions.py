@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-import lingcore
 from lingcore.__main__ import main
 from lingcore.io.cli import CLIFrontend
 from lingcore.message import Message
@@ -57,10 +56,13 @@ def test_list_sessions_populated(tmp_path, capsys):
     assert SID_A[:8] in out and "hello world" in out
 
 
-def test_list_sessions_on_bundled_profile_prints_notice(capsys):
-    bundled = Path(lingcore.__file__).parent / "profiles" / "daily"
-    assert main(["-p", str(bundled), "--list-sessions"]) == 0
-    assert "bundled profile" in capsys.readouterr().out
+def test_list_sessions_on_in_package_profile_prints_notice(tmp_path, monkeypatch, capsys):
+    import lingcore.sessions as sessions_mod
+
+    d = _write_profile(tmp_path)
+    monkeypatch.setattr(sessions_mod, "_PACKAGE_DIR", tmp_path.resolve())
+    assert main(["-p", str(d), "--list-sessions"]) == 0
+    assert "inside the installed" in capsys.readouterr().out
 
 
 def test_continue_with_no_sessions_fails(tmp_path, capsys):
