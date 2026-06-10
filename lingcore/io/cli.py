@@ -8,8 +8,11 @@ runs in a worker thread so the asyncio event loop is never stalled.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from rich.console import Console
+from rich.markup import escape
 
 from lingcore.events import (
     AgentEvent,
@@ -22,7 +25,23 @@ from lingcore.events import (
 )
 from lingcore.tools.builtin.shell import allowlist_pattern_for
 
+if TYPE_CHECKING:
+    from lingcore.message import Message
+    from lingcore.sessions import SessionMeta
+
 _EXIT_COMMANDS = {"/exit", "/quit", "/q"}
+
+
+def rel_time(dt: datetime) -> str:
+    """Compact relative time for session listings ("just now", "5m ago")."""
+    seconds = int((datetime.now(timezone.utc) - dt).total_seconds())
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
 
 
 def _short(text: str, limit: int = 200) -> str:
@@ -82,6 +101,39 @@ class CLIFrontend:
         if self._needs_newline:
             self.console.print()
             self._needs_newline = False
+
+    def show_resume(
+        self, meta: "SessionMeta", messages: "list[Message]", tail: int = 6
+    ) -> None:
+        """Print a resume banner plus a dim replay of the last few messages.
+
+        Composition-root UI (called before the session loop starts), so it is
+        not part of the ``Frontend`` protocol.
+        """
+        title = escape(meta.title or "(untitled)")
+        self.console.print(
+            f"[dim]resumed[/] [cyan]{meta.id[:8]}[/] [dim]· \"{title}\" · "
+            f"{meta.message_count} stored messages · last active {rel_time(meta.updated_at)}[/]"
+        )
+        shown = messages[-tail:]
+        if len(messages) > len(shown):
+            self.console.print(
+                f"[dim]  … {len(messages) - len(shown)} earlier messages omitted …[/]"
+            )
+        for m in shown:
+            if m.role == "user":
+                self.console.print(f"[dim]  you › {escape(_short(m.content))}[/]")
+            elif m.role == "assistant":
+                if m.content:
+                    self.console.print(
+                        f"[dim]  {self.agent_name} › {escape(_short(m.content))}[/]"
+                    )
+                for tc in m.tool_calls:
+                    self.console.print(
+                        f"[dim]  → {tc.name}({escape(_short(str(tc.arguments)))})[/]"
+                    )
+            else:  # tool result
+                self.console.print(f"[dim]  ← {m.name}: {escape(_short(m.content))}[/]")
 
     async def confirm(self, command: str) -> bool:
         self._break_line()

@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from lingcore.config import AgentProfile
+    from lingcore.sessions import SessionStore
     from lingcore.skills import Skill, SkillState
     from lingcore.tools import ConfirmFn
 
@@ -102,8 +103,17 @@ class Agent:
         llm: _LLMLike | None = None,
         base_dir: "Path | None" = None,
         tool_options: "dict | None" = None,
+        session_store: "SessionStore | None" = None,
+        session_id: str | None = None,
     ) -> "Agent":
-        """Assemble a runnable Agent from a validated profile."""
+        """Assemble a runnable Agent from a validated profile.
+
+        ``session_store``/``session_id`` opt into persistent history: the
+        memory is hydrated from the store (resuming ``session_id`` when given,
+        else starting a fresh session) and every subsequent message is
+        recorded. Opening the store is the composition root's job — see
+        ``lingcore.sessions.open_store``.
+        """
         from pathlib import Path
 
         import lingcore.tools.builtin  # noqa: F401  (registration side effect)
@@ -171,6 +181,15 @@ class Agent:
             max_tokens=profile.memory.max_tokens,
             model=profile.llm.model,
         )
+        memory: ShortTermMemory = mem
+        sid = session_id
+        restored_turn_index = 0
+        if session_store is not None:
+            from lingcore.sessions import attach_session
+
+            memory, sid, restored_turn_index = attach_session(
+                mem, session_store, session_id
+            )
         guardrail = _build_guardrail(profile.guardrail.policy)
 
         # --- Dynamic skill state (only when the activate_skill tool is enabled) ---
@@ -245,17 +264,20 @@ class Agent:
         else:
             composer = StaticComposer(profile.persona.system_prompt)
 
-        return cls(
+        agent = cls(
             llm=client,
             tools=tools,
             tool_ctx=tool_ctx,
             composer=composer,
-            memory=mem,
+            memory=memory,
             guardrail=guardrail,
             max_iters=profile.loop.max_iters,
             parallel_tools=profile.loop.parallel_tools,
+            session_id=sid,
             skill_state=skill_state,
         )
+        agent._turn_index = restored_turn_index
+        return agent
 
     async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
         """Drive one user turn to completion, yielding events as they happen."""

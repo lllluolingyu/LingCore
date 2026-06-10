@@ -131,6 +131,22 @@ class GuardrailCfg(BaseModel):
     policy: str = "noop"
 
 
+class SessionsCfg(BaseModel):
+    """Session-history persistence settings.
+
+    The DB path resolves exactly like the memory tool's file (invariant 12):
+    relative paths are confined to the profile directory, absolute paths
+    require ``allow_absolute_path: true``, and a path inside the installed
+    package tree disables persistence gracefully (bundled profiles).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    path: str = "sessions.db"
+    allow_absolute_path: bool = False
+
+
 class AgentProfile(BaseModel):
     """A complete, validated agent definition loaded from YAML.
 
@@ -154,6 +170,7 @@ class AgentProfile(BaseModel):
     memory: MemoryCfg = Field(default_factory=MemoryCfg)
     loop: LoopCfg = Field(default_factory=LoopCfg)
     guardrail: GuardrailCfg = Field(default_factory=GuardrailCfg)
+    sessions: SessionsCfg = Field(default_factory=SessionsCfg)
 
     @classmethod
     def load(cls, path: str | Path) -> "AgentProfile":

@@ -23,6 +23,11 @@ OpenAI-compatible endpoint by pointing at a different `base_url`.
   model and a `@tool` decorator. The coding agent ships with file read/write/
   edit, patch, directory listing, search, URL fetch, and a confirmation-gated
   shell.
+- **Session history & resume** — conversations persist to a small SQLite db
+  *inside the profile directory* (each profile keeps its own history). Resume
+  the latest with `-c`, a specific one with `--resume <id-prefix>`, inspect
+  with `--list-sessions`, or opt out with `--no-session` /
+  `sessions.enabled: false`.
 - **Frontend-agnostic** — the loop emits events; the CLI renders them today, and
   a web or chat frontend can render the same events later without touching core.
 
@@ -61,6 +66,20 @@ uv run lingcore
 Type a message; the agent streams its reply and shows each tool call. Shell
 commands prompt for confirmation before running. Type `/exit` to quit.
 
+When the profile lives outside the installed package (any profile you created),
+the conversation is saved automatically and can be picked up later:
+
+```bash
+uv run lingcore -p my-agent -c                  # resume the most recent session
+uv run lingcore -p my-agent --resume 3ca5       # resume by unique id prefix
+uv run lingcore -p my-agent --list-sessions     # see what's stored
+```
+
+History lands in `my-agent/sessions.db` — delete the file to wipe it. The
+bundled profiles live inside the package tree, where writes are refused, so
+they run ephemeral with a one-line notice (copy the profile directory out to
+keep history).
+
 > The first message may pause briefly while `tiktoken` downloads its tokenizer
 > data (cached afterward). This step needs network access once.
 
@@ -76,11 +95,12 @@ prompt-layer files. Four are shipped:
 
 ```
 my-agent/
-  config.yaml    # llm, tools, memory, loop, guardrail
+  config.yaml    # llm, tools, memory, loop, guardrail, sessions
   world.md       # optional — environment / setting context
   role.md        # optional — persona
   workflow.md    # optional — operating method
   memory.md      # auto-created by the memory tool (opt-in)
+  sessions.db    # auto-created session history (on by default; sessions.enabled: false to opt out)
 ```
 
 `world.md`, `role.md`, and `workflow.md` are loaded automatically if present and
@@ -152,6 +172,7 @@ agent.py     the async run loop + Agent.from_profile  ← the core
 composer.py  PromptComposer seam: per-turn system-prompt assembly
 config.py    AgentProfile + YAML loading with ${ENV} expansion
 memory.py    ShortTermMemory protocol + WindowMemory
+sessions.py  SessionStore (SQLite per profile dir) + SessionMemory — history & resume
 skills.py    Skill / SkillState / load_skill_tools — skills, incl. code-shipping
 guardrails.py  Guardrail protocol + NoopGuardrail (pre/post hooks)
 tools/       Tool / @tool / ToolRegistry / ToolContext, plus builtin tools
@@ -166,7 +187,7 @@ set of invariants.
 ## Development
 
 ```bash
-uv run pytest -q          # full suite (204 tests)
+uv run pytest -q          # full suite (251 tests)
 uv run pytest tests/test_agent.py -q
 ```
 

@@ -29,3 +29,7 @@ class ToolError(LingCoreError):
 
 class MaxIterationsError(LingCoreError):
     """The agent loop hit its iteration cap without producing a final reply."""
+
+
+class SessionError(LingCoreError):
+    """A session-store operation failed (unknown/ambiguous id, schema mismatch)."""
