@@ -1,10 +1,10 @@
 """Canonical message data model.
 
 Everything in LingCore speaks ``Message`` — the loop, memory, the LLM client,
-and frontends. This module depends on nothing else in the package so it can
-sit at the bottom of the dependency graph. ``Message.to_openai`` is the single
-place that knows the chat-completions wire shape, keeping the OpenAI coupling
-contained.
+and frontends. This module sits at the bottom of the runtime dependency graph;
+it only imports standalone validation helpers. ``Message.to_openai`` is the
+single place that knows the chat-completions wire shape, keeping the OpenAI
+coupling contained.
 """
 
 from __future__ import annotations
@@ -12,10 +12,21 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from lingcore.media_types import (
+    AttachmentKind,
+    MAX_ATTACHMENTS,
+    TOTAL_ATTACHMENT_MAX_BYTES,
+    decoded_payload_size,
+    kind_for_media_type,
+    max_bytes_for,
+    sanitize_name,
+    supported_media_types,
+    validate_base64_payload,
+)
 
 Role = Literal["system", "user", "assistant", "tool"]
-AttachmentKind = Literal["image", "file"]
 
 
 class Attachment(BaseModel):
@@ -30,12 +41,37 @@ class Attachment(BaseModel):
     data: str
     name: str | None = None
 
+    @model_validator(mode="after")
+    def _validate_attachment(self) -> Attachment:
+        expected = kind_for_media_type(self.media_type)
+        if expected is None:
+            raise ValueError(f"unsupported media type: {self.media_type!r}")
+        if self.kind != expected:
+            raise ValueError(
+                f"attachment kind {self.kind!r} does not match media type "
+                f"{self.media_type!r}"
+            )
+        normalized, _ = validate_base64_payload(
+            self.data,
+            media_type=self.media_type,
+            max_bytes=max_bytes_for(self.kind),
+        )
+        self.data = normalized
+        if self.name is not None:
+            self.name = sanitize_name(self.name)
+        return self
+
 
 class UserInput(BaseModel):
     """One user turn before it is committed as a ``Message``."""
 
     text: str = ""
     attachments: list[Attachment] = Field(default_factory=list)
+
+    @field_validator("attachments")
+    @classmethod
+    def _validate_attachments(cls, attachments: list[Attachment]) -> list[Attachment]:
+        return _validate_attachment_list(attachments)
 
 
 class ToolCall(BaseModel):
@@ -72,6 +108,11 @@ class ToolResult(BaseModel):
     ok: bool = True
     attachments: list[Attachment] = Field(default_factory=list)
 
+    @field_validator("attachments")
+    @classmethod
+    def _validate_attachments(cls, attachments: list[Attachment]) -> list[Attachment]:
+        return _validate_attachment_list(attachments)
+
 
 class Message(BaseModel):
     """One turn in a conversation.
@@ -90,6 +131,11 @@ class Message(BaseModel):
     tool_call_id: str | None = None
     name: str | None = None
     attachments: list[Attachment] = Field(default_factory=list)
+
+    @field_validator("attachments")
+    @classmethod
+    def _validate_attachments(cls, attachments: list[Attachment]) -> list[Attachment]:
+        return _validate_attachment_list(attachments)
 
     # --- constructors -------------------------------------------------
     @classmethod
@@ -144,7 +190,8 @@ class Message(BaseModel):
                     parts.append({
                         "type": "file",
                         "file": {
-                            "filename": attachment.name or _default_filename(attachment),
+                            "filename": attachment.name
+                            or _default_filename(attachment),
                             "file_data": data_uri,
                         },
                     })
@@ -158,8 +205,33 @@ class Message(BaseModel):
 def _default_filename(attachment: Attachment) -> str:
     if attachment.media_type == "application/pdf":
         return "attachment.pdf"
-    subtype = attachment.media_type.split("/", 1)[-1] if "/" in attachment.media_type else "bin"
+    subtype = (
+        attachment.media_type.split("/", 1)[-1]
+        if "/" in attachment.media_type
+        else "bin"
+    )
     return f"attachment.{subtype or 'bin'}"
+
+
+def _validate_attachment_list(attachments: list[Attachment]) -> list[Attachment]:
+    if len(attachments) > MAX_ATTACHMENTS:
+        raise ValueError(
+            f"too many attachments ({len(attachments)}; limit {MAX_ATTACHMENTS})"
+        )
+    try:
+        total = sum(decoded_payload_size(attachment.data) for attachment in attachments)
+    except Exception:
+        raise ValueError("invalid attachment base64 data") from None
+    if total > TOTAL_ATTACHMENT_MAX_BYTES:
+        raise ValueError(
+            f"attachments too large ({total} bytes; "
+            f"limit {TOTAL_ATTACHMENT_MAX_BYTES})"
+        )
+    known = supported_media_types()
+    for attachment in attachments:
+        if (attachment.kind, attachment.media_type) not in known:
+            raise ValueError(f"unsupported media type: {attachment.media_type!r}")
+    return attachments
 
 
 class Conversation(BaseModel):

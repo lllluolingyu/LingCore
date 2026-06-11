@@ -75,6 +75,75 @@ def test_append_and_messages_roundtrip(store: SessionStore):
     assert msgs[2].tool_call_id == "c1" and msgs[2].name == "read_file"
 
 
+def test_messages_salvages_rows_with_stale_attachments(store: SessionStore):
+    # A row whose attachments fail *today's* validation (e.g. written before
+    # the rules tightened) must not brick the session: the text survives, the
+    # media is dropped, and the loss is marked on the message.
+    import json
+
+    sid = new_session_id()
+    store.append(sid, Message.user("look at this"))
+    bad = {
+        "role": "user",
+        "content": "[media from tool results: a.png]",
+        "tool_calls": [],
+        "tool_call_id": None,
+        "name": "media",
+        "attachments": [
+            # invalid base64 + spoofed type: fails Attachment validation today
+            {"kind": "image", "media_type": "image/png", "data": "@@@", "name": "a.png"}
+        ],
+    }
+    with store._lock, store._conn:
+        store._conn.execute(
+            "INSERT INTO messages (session_id, seq, role, created_at, payload)"
+            " VALUES (?, 1, 'user', '2026-01-01T00:00:00+00:00', ?)",
+            (sid, json.dumps(bad)),
+        )
+
+    msgs = store.messages(sid)
+    assert len(msgs) == 2
+    assert msgs[1].attachments == []
+    assert "no longer pass validation" in msgs[1].content
+    assert msgs[1].name == "media"
+
+
+def test_messages_still_raises_on_truly_corrupt_row(store: SessionStore):
+    sid = new_session_id()
+    store.append(sid, Message.user("ok"))
+    with store._lock, store._conn:
+        store._conn.execute(
+            "INSERT INTO messages (session_id, seq, role, created_at, payload)"
+            " VALUES (?, 1, 'user', '2026-01-01T00:00:00+00:00', ?)",
+            (sid, "{not json"),
+        )
+    with pytest.raises(SessionError, match="corrupt message row"):
+        store.messages(sid)
+
+
+def test_messages_still_raises_on_non_list_attachments(store: SessionStore):
+    import json
+
+    sid = new_session_id()
+    store.append(sid, Message.user("ok"))
+    bad = {
+        "role": "user",
+        "content": "bad",
+        "tool_calls": [],
+        "tool_call_id": None,
+        "name": None,
+        "attachments": 1,
+    }
+    with store._lock, store._conn:
+        store._conn.execute(
+            "INSERT INTO messages (session_id, seq, role, created_at, payload)"
+            " VALUES (?, 1, 'user', '2026-01-01T00:00:00+00:00', ?)",
+            (sid, json.dumps(bad)),
+        )
+    with pytest.raises(SessionError, match="corrupt message row"):
+        store.messages(sid)
+
+
 def test_rows_are_lazy(store: SessionStore):
     sid = new_session_id()
     assert store.get(sid) is None

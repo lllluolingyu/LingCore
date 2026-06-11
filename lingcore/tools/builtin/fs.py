@@ -66,13 +66,15 @@ async def read_file(args: ReadArgs, ctx: ToolContext) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-@tool(description="Attach an image or PDF file from the workspace for multimodal model input.")
+@tool(
+    description="Attach an image or PDF file from the workspace for multimodal model input."
+)
 async def read_media(args: ReadArgs, ctx: ToolContext) -> ToolOutput:
     full = _resolve(ctx, args.path)
     if not full.is_file():
         raise ToolError(f"not a file: {args.path!r}")
     attachment = attachment_from_path(full)
-    size = len(full.read_bytes())
+    size = full.stat().st_size
     return ToolOutput(
         text=f"attached {attachment.name} ({attachment.media_type}, {size} bytes)",
         attachments=[attachment],

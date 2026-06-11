@@ -5,6 +5,7 @@ Driven entirely by a scripted FakeLLMClient — no network, no API cost.
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 
 import pytest
@@ -94,7 +95,8 @@ async def test_tool_output_attachments_are_hoisted(workspace):
 
     @tool(name="media_tool", registry=local_reg)
     async def media_tool(args: _EmptyArgs, ctx: ToolContext) -> ToolOutput:
-        att = Attachment(kind="image", media_type="image/png", data="aW1n", name="pic.png")
+        data = base64.b64encode(b"\x89PNG\r\n\x1a\nrest").decode("ascii")
+        att = Attachment(kind="image", media_type="image/png", data=data, name="pic.png")
         return ToolOutput(text="attached pic", attachments=[att])
 
     call = ToolCall(id="c1", name="media_tool", arguments={})
@@ -123,6 +125,80 @@ async def test_tool_output_attachments_are_hoisted(workspace):
     wire = llm.calls[1]
     last_user = [m for m in wire if m.role == "user"][-1]
     assert last_user.attachments
+
+
+async def test_hoist_caps_aggregate_attachments(workspace):
+    # Each result passes its own per-list caps (3 <= 8), but the round's
+    # aggregate (9) exceeds MAX_ATTACHMENTS. The loop must cap the hoist and
+    # finish the turn instead of letting the Message validator raise
+    # (invariant 5).
+    from lingcore.media_types import MAX_ATTACHMENTS
+
+    local_reg = ToolRegistry()
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\nrest").decode("ascii")
+
+    @tool(name="three_pics", registry=local_reg)
+    async def three_pics(args: _EmptyArgs, ctx: ToolContext) -> ToolOutput:
+        atts = [
+            Attachment(kind="image", media_type="image/png", data=png, name=f"p{i}.png")
+            for i in range(3)
+        ]
+        return ToolOutput(text="3 pics", attachments=atts)
+
+    calls = [ToolCall(id=f"c{i}", name="three_pics", arguments={}) for i in range(3)]
+    llm = FakeLLMClient([
+        ScriptedTurn(tool_calls=calls, finish_reason="tool_calls"),
+        ScriptedTurn(text="done"),
+    ])
+    agent = Agent(
+        llm=llm,
+        tools=local_reg,
+        tool_ctx=ToolContext(workspace=workspace),
+        composer=StaticComposer("sys"),
+        memory=WindowMemory(model="gpt-4o"),
+    )
+    events = await _drain(agent, "go")
+    assert isinstance(events[-1], Final)  # the turn completed
+
+    hoist = [m for m in agent.memory.messages if m.name == "media"][0]
+    assert len(hoist.attachments) == MAX_ATTACHMENTS
+    assert "1 attachment(s) dropped" in hoist.content
+
+
+async def test_hoist_caps_aggregate_total_bytes(workspace, monkeypatch):
+    # Two results within their own byte caps, together over the message total:
+    # the second attachment is dropped, the turn still completes.
+    import lingcore.agent as agent_mod
+
+    local_reg = ToolRegistry()
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * 64).decode("ascii")
+
+    @tool(name="one_pic", registry=local_reg)
+    async def one_pic(args: _EmptyArgs, ctx: ToolContext) -> ToolOutput:
+        att = Attachment(kind="image", media_type="image/png", data=png, name="p.png")
+        return ToolOutput(text="pic", attachments=[att])
+
+    # Shrink the loop's total budget so one tiny PNG fits and the second does
+    # not (the real 20MB constant would need huge fixtures).
+    monkeypatch.setattr(agent_mod, "TOTAL_ATTACHMENT_MAX_BYTES", 100)
+
+    calls = [ToolCall(id=f"c{i}", name="one_pic", arguments={}) for i in range(2)]
+    llm = FakeLLMClient([
+        ScriptedTurn(tool_calls=calls, finish_reason="tool_calls"),
+        ScriptedTurn(text="done"),
+    ])
+    agent = Agent(
+        llm=llm,
+        tools=local_reg,
+        tool_ctx=ToolContext(workspace=workspace),
+        composer=StaticComposer("sys"),
+        memory=WindowMemory(model="gpt-4o"),
+    )
+    events = await _drain(agent, "go")
+    assert isinstance(events[-1], Final)
+    hoist = [m for m in agent.memory.messages if m.name == "media"][0]
+    assert len(hoist.attachments) == 1
+    assert "dropped" in hoist.content
 
 
 async def test_tool_error_is_contained(workspace):

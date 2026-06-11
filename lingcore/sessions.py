@@ -30,6 +30,7 @@ Design notes:
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import threading
@@ -111,6 +112,33 @@ def _message_title(message: Message) -> str:
     if len(names) > 3:
         joined += f", +{len(names) - 3} more"
     return _derive_title(joined)
+
+
+def _strip_invalid_attachments(payload: str) -> Message | None:
+    """Re-parse a stored row without its attachments, marking the loss.
+
+    Returns None when the row is broken beyond its attachments (truly corrupt
+    JSON or invalid core fields) — the caller then raises SessionError as
+    before.
+    """
+    try:
+        raw = json.loads(payload)
+    except ValueError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    attachments = raw.get("attachments")
+    if not isinstance(attachments, list) or not attachments:
+        return None
+    dropped = len(attachments)
+    raw["attachments"] = []
+    try:
+        message = Message.model_validate(raw)
+    except Exception:
+        return None
+    suffix = f" [{dropped} stored attachment(s) no longer pass validation; dropped on load]"
+    message.content = (message.content + suffix).strip()
+    return message
 
 
 class SessionMeta(BaseModel):
@@ -267,6 +295,15 @@ class SessionStore:
             try:
                 out.append(Message.model_validate_json(payload))
             except Exception as e:
+                # Attachment validation tightens over releases, so a row that
+                # was valid when written may fail today's rules (e.g. an
+                # over-limit hoist persisted before the caps existed). Dropping
+                # the media but keeping the text degrades one message instead
+                # of bricking the whole session on load.
+                salvaged = _strip_invalid_attachments(payload)
+                if salvaged is not None:
+                    out.append(salvaged)
+                    continue
                 raise SessionError(
                     f"corrupt message row {session_id[:8]}/{seq}: {e}"
                 ) from None

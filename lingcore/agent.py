@@ -31,8 +31,13 @@ from lingcore.events import (
 )
 from lingcore.guardrails import Guardrail, NoopGuardrail
 from lingcore.llm import LLMChunk
+from lingcore.media_types import (
+    MAX_ATTACHMENTS,
+    TOTAL_ATTACHMENT_MAX_BYTES,
+    decoded_payload_size,
+)
 from lingcore.memory import ShortTermMemory, WindowMemory
-from lingcore.message import Message, ToolCall, ToolResult, UserInput
+from lingcore.message import Attachment, Message, ToolCall, ToolResult, UserInput
 from lingcore.tools import ToolContext, ToolOutput, ToolRegistry
 
 if TYPE_CHECKING:
@@ -65,6 +70,35 @@ def _build_guardrail(policy: str) -> Guardrail:
     from lingcore.errors import ConfigError
 
     raise ConfigError(f"unknown guardrail policy: {policy!r}")
+
+
+def _cap_hoist_media(
+    media: list[Attachment],
+) -> tuple[list[Attachment], list[Attachment]]:
+    """Split a round's tool media into (kept, dropped) under the Message caps.
+
+    Each ToolResult enforces the per-list limits on its own attachments, but
+    the hoist aggregates *all* results of the round into one Message — whose
+    validator re-applies those limits to the aggregate. Capping here keeps a
+    many-tool round from raising out of the loop (invariant 5); the dropped
+    tail is reported in the hoist text so the model can re-request what it
+    actually needs one file at a time.
+    """
+    kept: list[Attachment] = []
+    dropped: list[Attachment] = []
+    total = 0
+    for attachment in media:
+        try:
+            size = decoded_payload_size(attachment.data)
+        except Exception:
+            dropped.append(attachment)
+            continue
+        if len(kept) >= MAX_ATTACHMENTS or total + size > TOTAL_ATTACHMENT_MAX_BYTES:
+            dropped.append(attachment)
+            continue
+        kept.append(attachment)
+        total += size
+    return kept, dropped
 
 
 class _LLMLike(Protocol):
@@ -386,14 +420,22 @@ class Agent:
                 yield ToolResultEvent(result)
             media = [attachment for result in results for attachment in result.attachments]
             if media:
-                names = ", ".join(a.name or a.media_type for a in media[:3])
-                if len(media) > 3:
-                    names += f", +{len(media) - 3} more"
+                kept, dropped = _cap_hoist_media(media)
+                names = ", ".join(a.name or a.media_type for a in kept[:3])
+                if len(kept) > 3:
+                    names += f", +{len(kept) - 3} more"
+                note = f"[media from tool results: {names}]"
+                if dropped:
+                    note += (
+                        f" [{len(dropped)} attachment(s) dropped over the "
+                        "per-message media limit; re-run the tool for the ones "
+                        "you need, fewer at a time]"
+                    )
                 self.memory.add(Message(
                     role="user",
-                    content=f"[media from tool results: {names}]",
+                    content=note,
                     name="media",
-                    attachments=media,
+                    attachments=kept,
                 ))
 
             # Surface skill activation/deactivation changes as events.
