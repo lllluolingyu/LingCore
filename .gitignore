@@ -211,6 +211,7 @@ __marimo__/
 
 ## LingChat
 /LingChat/
+style.css
 
 # Per-profile runtime state written by the agent (session history + memory + default workspace)
 /profiles/*/sessions.db*
