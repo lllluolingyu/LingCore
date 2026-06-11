@@ -22,6 +22,7 @@ from lingcore.tools.builtin.fs import (
     edit_file,
     list_dir,
     read_file,
+    read_media,
     search,
     write_file,
 )
@@ -85,6 +86,43 @@ async def test_read_file(ctx):
 async def test_read_missing(ctx):
     with pytest.raises(ToolError, match="not a file"):
         await read_file(ReadArgs(path="nope.txt"), ctx)
+
+
+async def test_read_file_rejects_known_media(ctx):
+    (ctx.workspace / "pic.png").write_bytes(b"\x89PNG\r\n\x1a\nrest")
+    with pytest.raises(ToolError, match="read_media"):
+        await read_file(ReadArgs(path="pic.png"), ctx)
+
+
+async def test_read_file_rejects_other_binary(ctx):
+    (ctx.workspace / "blob.bin").write_bytes(b"abc\x00def")
+    with pytest.raises(ToolError, match="binary file"):
+        await read_file(ReadArgs(path="blob.bin"), ctx)
+
+
+async def test_read_media_image(ctx):
+    (ctx.workspace / "pic.png").write_bytes(b"\x89PNG\r\n\x1a\nrest")
+    out = await read_media(ReadArgs(path="pic.png"), ctx)
+    assert out.text.startswith("attached pic.png")
+    assert out.attachments[0].media_type == "image/png"
+
+
+async def test_read_media_pdf(ctx):
+    (ctx.workspace / "doc.pdf").write_bytes(b"%PDF-1.4\n")
+    out = await read_media(ReadArgs(path="doc.pdf"), ctx)
+    assert out.attachments[0].kind == "file"
+    assert out.attachments[0].name == "doc.pdf"
+
+
+async def test_read_media_rejects_escape(ctx):
+    with pytest.raises(ToolError, match="escapes workspace"):
+        await read_media(ReadArgs(path="../pic.png"), ctx)
+
+
+async def test_read_media_rejects_unknown_extension(ctx):
+    (ctx.workspace / "blob.bin").write_bytes(b"blob")
+    with pytest.raises(ToolError, match="unsupported media type"):
+        await read_media(ReadArgs(path="blob.bin"), ctx)
 
 
 async def test_write_creates_nested(ctx):

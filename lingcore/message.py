@@ -15,6 +15,27 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 Role = Literal["system", "user", "assistant", "tool"]
+AttachmentKind = Literal["image", "file"]
+
+
+class Attachment(BaseModel):
+    """A user-visible media attachment carried alongside message text.
+
+    ``data`` is the raw base64 payload without a ``data:`` URI prefix. The wire
+    adapter adds that provider-specific wrapper in ``Message.to_openai``.
+    """
+
+    kind: AttachmentKind
+    media_type: str
+    data: str
+    name: str | None = None
+
+
+class UserInput(BaseModel):
+    """One user turn before it is committed as a ``Message``."""
+
+    text: str = ""
+    attachments: list[Attachment] = Field(default_factory=list)
 
 
 class ToolCall(BaseModel):
@@ -39,13 +60,17 @@ class ToolResult(BaseModel):
     """The outcome of executing one ``ToolCall``.
 
     ``ok=False`` marks an in-domain failure (a ``ToolError``); the content is
-    still fed back to the model so it can recover.
+    still fed back to the model so it can recover. Attachments are intentionally
+    not rendered on the tool-role wire message; the agent hoists them into a
+    synthetic user message because chat-completions only accepts media parts on
+    user messages.
     """
 
     call_id: str
     name: str
     content: str
     ok: bool = True
+    attachments: list[Attachment] = Field(default_factory=list)
 
 
 class Message(BaseModel):
@@ -55,6 +80,8 @@ class Message(BaseModel):
     message carries ``tool_call_id`` + ``name`` linking it to the call it
     answers — OpenAI rejects a tool message that does not follow a matching
     assistant tool_call, so the two must never be separated (see WindowMemory).
+    User messages may carry media attachments; only ``to_openai`` knows how to
+    render those into provider wire parts.
     """
 
     role: Role
@@ -62,6 +89,7 @@ class Message(BaseModel):
     tool_calls: list[ToolCall] = Field(default_factory=list)
     tool_call_id: str | None = None
     name: str | None = None
+    attachments: list[Attachment] = Field(default_factory=list)
 
     # --- constructors -------------------------------------------------
     @classmethod
@@ -69,8 +97,10 @@ class Message(BaseModel):
         return cls(role="system", content=content)
 
     @classmethod
-    def user(cls, content: str) -> Message:
-        return cls(role="user", content=content)
+    def user(
+        cls, content: str, attachments: list[Attachment] | None = None
+    ) -> Message:
+        return cls(role="user", content=content, attachments=attachments or [])
 
     @classmethod
     def assistant(
@@ -96,10 +126,40 @@ class Message(BaseModel):
                 "tool_call_id": self.tool_call_id,
                 "content": self.content,
             }
-        msg: dict[str, Any] = {"role": self.role, "content": self.content}
+        content: str | list[dict[str, Any]] = self.content
+        if self.role == "user" and self.attachments:
+            parts: list[dict[str, Any]] = []
+            if self.content:
+                parts.append({"type": "text", "text": self.content})
+            for attachment in self.attachments:
+                data_uri = (
+                    f"data:{attachment.media_type};base64,{attachment.data}"
+                )
+                if attachment.kind == "image":
+                    parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": data_uri},
+                    })
+                else:
+                    parts.append({
+                        "type": "file",
+                        "file": {
+                            "filename": attachment.name or _default_filename(attachment),
+                            "file_data": data_uri,
+                        },
+                    })
+            content = parts
+        msg: dict[str, Any] = {"role": self.role, "content": content}
         if self.tool_calls:
             msg["tool_calls"] = [tc.to_openai() for tc in self.tool_calls]
         return msg
+
+
+def _default_filename(attachment: Attachment) -> str:
+    if attachment.media_type == "application/pdf":
+        return "attachment.pdf"
+    subtype = attachment.media_type.split("/", 1)[-1] if "/" in attachment.media_type else "bin"
+    return f"attachment.{subtype or 'bin'}"
 
 
 class Conversation(BaseModel):

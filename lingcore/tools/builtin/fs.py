@@ -13,7 +13,8 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from lingcore.errors import ToolError
-from lingcore.tools import ToolContext, tool
+from lingcore.media import attachment_from_path, detect_media, is_probably_binary
+from lingcore.tools import ToolContext, ToolOutput, tool
 
 _MAX_READ_BYTES = 256 * 1024
 _MAX_SEARCH_HITS = 100
@@ -56,7 +57,26 @@ async def read_file(args: ReadArgs, ctx: ToolContext) -> str:
         raise ToolError(
             f"file too large ({len(data)} bytes; limit {_MAX_READ_BYTES})"
         )
+    if detect_media(data, full):
+        raise ToolError(
+            "media file is not readable as UTF-8 text; use read_media if available"
+        )
+    if is_probably_binary(data):
+        raise ToolError("binary file; not readable as text")
     return data.decode("utf-8", errors="replace")
+
+
+@tool(description="Attach an image or PDF file from the workspace for multimodal model input.")
+async def read_media(args: ReadArgs, ctx: ToolContext) -> ToolOutput:
+    full = _resolve(ctx, args.path)
+    if not full.is_file():
+        raise ToolError(f"not a file: {args.path!r}")
+    attachment = attachment_from_path(full)
+    size = len(full.read_bytes())
+    return ToolOutput(
+        text=f"attached {attachment.name} ({attachment.media_type}, {size} bytes)",
+        attachments=[attachment],
+    )
 
 
 class WriteArgs(BaseModel):

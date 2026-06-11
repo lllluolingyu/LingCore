@@ -98,6 +98,21 @@ def _derive_title(content: str) -> str:
     return title if len(title) <= _TITLE_LIMIT else title[: _TITLE_LIMIT - 1] + "…"
 
 
+def _message_title(message: Message) -> str:
+    if message.name:
+        return ""
+    title = _derive_title(message.content)
+    if title:
+        return title
+    names = [a.name for a in message.attachments if a.name]
+    if not names:
+        return ""
+    joined = ", ".join(names[:3])
+    if len(names) > 3:
+        joined += f", +{len(names) - 3} more"
+    return _derive_title(joined)
+
+
 class SessionMeta(BaseModel):
     """Summary row for one stored session."""
 
@@ -176,10 +191,12 @@ class SessionStore:
                 "UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id)
             )
             if message.role == "user":
-                self._conn.execute(
-                    "UPDATE sessions SET title = ? WHERE id = ? AND title = ''",
-                    (_derive_title(message.content), session_id),
-                )
+                title = _message_title(message)
+                if title:
+                    self._conn.execute(
+                        "UPDATE sessions SET title = ? WHERE id = ? AND title = ''",
+                        (title, session_id),
+                    )
 
     def rename(self, session_id: str, title: str) -> SessionMeta:
         title = " ".join(title.split())[:200]

@@ -26,6 +26,7 @@ from typing import (
 from pydantic import BaseModel
 
 from lingcore.errors import ConfigError, ToolError
+from lingcore.message import Attachment
 
 
 @runtime_checkable
@@ -45,7 +46,15 @@ class ToolContext:
     profile_dir: Path | None = None
 
 
-ToolFn = Callable[[BaseModel, ToolContext], Awaitable[str]]
+@dataclass(slots=True)
+class ToolOutput:
+    """Structured tool output with optional media attachments."""
+
+    text: str
+    attachments: list[Attachment] = field(default_factory=list)
+
+
+ToolFn = Callable[[BaseModel, ToolContext], Awaitable[str | ToolOutput]]
 
 
 @dataclass(slots=True)
@@ -71,10 +80,10 @@ class Tool:
     def validate_args(self, raw: dict[str, Any]) -> BaseModel:
         return self.args_model.model_validate(raw)
 
-    async def run(self, args: BaseModel, ctx: ToolContext) -> str:
+    async def run(self, args: BaseModel, ctx: ToolContext) -> str | ToolOutput:
         return await self.fn(args, ctx)
 
-    async def __call__(self, args: BaseModel, ctx: ToolContext) -> str:
+    async def __call__(self, args: BaseModel, ctx: ToolContext) -> str | ToolOutput:
         """A decorated tool stays directly awaitable: ``await read_file(a, c)``."""
         return await self.fn(args, ctx)
 

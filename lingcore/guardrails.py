@@ -14,7 +14,12 @@ from typing import Protocol
 
 class Guardrail(Protocol):
     async def pre_input(self, text: str) -> str:
-        """Inspect/transform user input before it reaches the model."""
+        """Inspect/transform user text before it reaches the model.
+
+        V1 guardrails inspect text only. Multimodal attachment bytes are
+        validated at frontend/tool boundaries and then passed through to the
+        model without guardrail inspection.
+        """
         ...
 
     async def post_output(self, text: str) -> str:

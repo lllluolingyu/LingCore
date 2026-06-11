@@ -18,7 +18,7 @@ from lingcore.events import (
 )
 from lingcore.io.base import run_session
 from lingcore.io.cli import CLIFrontend
-from lingcore.message import ToolCall, ToolResult
+from lingcore.message import ToolCall, ToolResult, UserInput
 from tests.fakes import FakeLLMClient, ScriptedTurn
 
 PROFILE = """
@@ -189,3 +189,37 @@ async def test_cli_confirm_allow_always_skips_shell_control(monkeypatch):
     monkeypatch.setattr(cli.console, "input", lambda *a, **k: "A")
     assert await cli.confirm("ls; echo unsafe") is True
     assert opts["run_shell"]["allow_patterns"] == []
+
+
+async def test_user_input_frontend_drives_agent(tmp_path):
+    (tmp_path / "pic.png").write_bytes(b"\x89PNG\r\n\x1a\nrest")
+    prof = _profile(tmp_path)
+    llm = FakeLLMClient([ScriptedTurn(text="I see it")])
+    agent = Agent.from_profile(prof, llm=llm, base_dir=tmp_path)
+
+    from lingcore.media import attachment_from_path
+
+    att = attachment_from_path(tmp_path / "pic.png")
+    incoming = UserInput(text="describe", attachments=[att])
+
+    class AttachFrontend:
+        def __init__(self):
+            self.sent = False
+
+        async def read_input(self):
+            if self.sent:
+                return None
+            self.sent = True
+            return incoming
+
+        def render(self, event):
+            pass
+
+        async def confirm(self, command):
+            return True
+
+    frontend = AttachFrontend()
+    from lingcore.io.base import run_session
+
+    await run_session(agent, frontend)
+    assert agent.memory.messages[0].attachments

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lingcore.message import Conversation, Message, ToolCall, ToolResult
+from lingcore.message import Attachment, Conversation, Message, ToolCall, ToolResult, UserInput
 
 
 def test_user_and_system_to_openai():
@@ -39,3 +39,36 @@ def test_conversation_to_openai_order():
     wire = conv.to_openai()
     assert [m["role"] for m in wire] == ["system", "user"]
     assert len(conv) == 2
+
+
+def test_user_attachments_to_openai_parts():
+    img = Attachment(kind="image", media_type="image/png", data="aW1n", name="pic.png")
+    pdf = Attachment(kind="file", media_type="application/pdf", data="cGRm", name="doc.pdf")
+    wire = Message.user("describe", attachments=[img, pdf]).to_openai()
+    assert wire == {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1n"}},
+            {"type": "file", "file": {"filename": "doc.pdf", "file_data": "data:application/pdf;base64,cGRm"}},
+        ],
+    }
+
+
+def test_user_attachment_without_text_skips_text_part():
+    img = Attachment(kind="image", media_type="image/jpeg", data="x", name="p.jpg")
+    wire = Message.user("", attachments=[img]).to_openai()
+    assert wire["content"] == [
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,x"}}
+    ]
+
+
+def test_non_user_attachment_does_not_change_wire_shape():
+    img = Attachment(kind="image", media_type="image/png", data="x", name="p.png")
+    msg = Message(role="assistant", content="done", attachments=[img])
+    assert msg.to_openai() == {"role": "assistant", "content": "done"}
+
+
+def test_user_input_defaults():
+    assert UserInput().text == ""
+    assert UserInput().attachments == []

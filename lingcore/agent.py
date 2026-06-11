@@ -32,8 +32,8 @@ from lingcore.events import (
 from lingcore.guardrails import Guardrail, NoopGuardrail
 from lingcore.llm import LLMChunk
 from lingcore.memory import ShortTermMemory, WindowMemory
-from lingcore.message import Message, ToolCall, ToolResult
-from lingcore.tools import ToolContext, ToolRegistry
+from lingcore.message import Message, ToolCall, ToolResult, UserInput
+from lingcore.tools import ToolContext, ToolOutput, ToolRegistry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -299,10 +299,14 @@ class Agent:
         agent._turn_index = restored_turn_index
         return agent
 
-    async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
+    async def run(self, user_input: str | UserInput) -> AsyncIterator[AgentEvent]:
         """Drive one user turn to completion, yielding events as they happen."""
-        text = await self.guardrail.pre_input(user_input)
-        self.memory.add(Message.user(text))
+        if isinstance(user_input, str):
+            incoming = UserInput(text=user_input)
+        else:
+            incoming = user_input
+        text = await self.guardrail.pre_input(incoming.text)
+        self.memory.add(Message.user(text, attachments=incoming.attachments))
 
         for _ in range(self.max_iters):
             active = tuple(self.skill_state.active) if self.skill_state else ()
@@ -380,6 +384,17 @@ class Agent:
             for result in results:
                 self.memory.add(Message.from_tool_result(result))
                 yield ToolResultEvent(result)
+            media = [attachment for result in results for attachment in result.attachments]
+            if media:
+                names = ", ".join(a.name or a.media_type for a in media[:3])
+                if len(media) > 3:
+                    names += f", +{len(media) - 3} more"
+                self.memory.add(Message(
+                    role="user",
+                    content=f"[media from tool results: {names}]",
+                    name="media",
+                    attachments=media,
+                ))
 
             # Surface skill activation/deactivation changes as events.
             if self.skill_state is not None:
@@ -433,6 +448,14 @@ class Agent:
                 tool = self._resolve_tool(call.name)
                 args = tool.validate_args(call.arguments)
                 out = await tool.run(args, self.tool_ctx)
+                if isinstance(out, ToolOutput):
+                    return ToolResult(
+                        call_id=call.id,
+                        name=call.name,
+                        content=out.text,
+                        attachments=out.attachments,
+                        ok=True,
+                    )
                 return ToolResult(call_id=call.id, name=call.name, content=out, ok=True)
             except Exception as e:
                 from lingcore.errors import ToolError

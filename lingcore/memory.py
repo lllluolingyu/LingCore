@@ -54,6 +54,8 @@ class WindowMemory:
         # Approximate but stable: encode content plus any tool-call argument
         # text. Exact accounting is the API's job; this only drives trimming.
         n = len(self._enc.encode(message.content or ""))
+        for attachment in message.attachments:
+            n += 1_000 if attachment.kind == "image" else 4_000
         for tc in message.tool_calls:
             n += len(self._enc.encode(tc.name)) + len(self._enc.encode(str(tc.arguments)))
         return n + 4  # per-message overhead fudge

@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from pydantic import BaseModel
+
 from lingcore.agent import Agent
 from lingcore.composer import StaticComposer
 from lingcore.events import (
@@ -21,10 +23,14 @@ from lingcore.events import (
 )
 from lingcore.llm import LLMChunk
 from lingcore.memory import WindowMemory
-from lingcore.message import Message, ToolCall
-from lingcore.tools import ToolContext, ToolRegistry, tool
+from lingcore.message import Attachment, Message, ToolCall
+from lingcore.tools import ToolContext, ToolOutput, ToolRegistry, tool
 from lingcore.tools.builtin.fs import read_file
 from tests.fakes import FakeLLMClient, ScriptedTurn, StreamFailure
+
+
+class _EmptyArgs(BaseModel):
+    pass
 
 
 @pytest.fixture
@@ -81,6 +87,42 @@ async def test_tool_call_then_final(workspace):
     # The model saw the tool result on its second turn.
     second_turn_msgs = llm.calls[1]
     assert any(m.role == "tool" and m.content == "hello" for m in second_turn_msgs)
+
+
+async def test_tool_output_attachments_are_hoisted(workspace):
+    local_reg = ToolRegistry()
+
+    @tool(name="media_tool", registry=local_reg)
+    async def media_tool(args: _EmptyArgs, ctx: ToolContext) -> ToolOutput:
+        att = Attachment(kind="image", media_type="image/png", data="aW1n", name="pic.png")
+        return ToolOutput(text="attached pic", attachments=[att])
+
+    call = ToolCall(id="c1", name="media_tool", arguments={})
+    llm = FakeLLMClient([
+        ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
+        ScriptedTurn(text="done"),
+    ])
+    agent = Agent(
+        llm=llm,
+        tools=local_reg,
+        tool_ctx=ToolContext(workspace=workspace),
+        composer=StaticComposer("sys"),
+        memory=WindowMemory(model="gpt-4o"),
+    )
+    events = await _drain(agent, "test")
+    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert tool_results[0].result.content == "attached pic"
+    assert len(tool_results[0].result.attachments) == 1
+
+    user_msgs = [m for m in agent.memory.messages if m.role == "user"]
+    assert len(user_msgs) == 2
+    assert user_msgs[1].name == "media"
+    assert len(user_msgs[1].attachments) == 1
+    assert user_msgs[1].attachments[0].name == "pic.png"
+
+    wire = llm.calls[1]
+    last_user = [m for m in wire if m.role == "user"][-1]
+    assert last_user.attachments
 
 
 async def test_tool_error_is_contained(workspace):

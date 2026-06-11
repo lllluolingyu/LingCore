@@ -8,7 +8,10 @@ runs in a worker thread so the asyncio event loop is never stalled.
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich.console import Console
@@ -24,6 +27,8 @@ from lingcore.events import (
     ToolCallStarted,
     ToolResultEvent,
 )
+from lingcore.media import attachment_from_path, supported_media_type
+from lingcore.message import UserInput
 from lingcore.tools.builtin.shell import allowlist_pattern_for
 
 if TYPE_CHECKING:
@@ -31,6 +36,32 @@ if TYPE_CHECKING:
     from lingcore.sessions import SessionMeta
 
 _EXIT_COMMANDS = {"/exit", "/quit", "/q"}
+_ATTACH_RE = re.compile(r'(?<!\S)@("[^"]+"|\S+)')
+
+
+def _parse_attachments(line: str, base: Path | None = None) -> UserInput:
+    """Parse conservative CLI @path media attachments from one line."""
+    base = base or Path.cwd()
+    attachments = []
+    out: list[str] = []
+    pos = 0
+    for match in _ATTACH_RE.finditer(line):
+        token = match.group(1)
+        raw_path = token[1:-1] if token.startswith('"') and token.endswith('"') else token
+        if supported_media_type(raw_path) is None:
+            continue
+        path = Path(os.path.expanduser(raw_path))
+        if not path.is_absolute():
+            path = base / path
+        if not path.is_file():
+            raise FileNotFoundError(raw_path)
+        attachment = attachment_from_path(path)
+        attachments.append(attachment)
+        out.append(line[pos:match.start()])
+        out.append(raw_path)
+        pos = match.end()
+    out.append(line[pos:])
+    return UserInput(text="".join(out), attachments=attachments)
 
 
 def rel_time(dt: datetime) -> str:
@@ -50,6 +81,13 @@ def _short(text: str, limit: int = 200) -> str:
     return text if len(text) <= limit else text[:limit] + " …"
 
 
+def _attachment_summary(message: "Message") -> str:
+    if not message.attachments:
+        return ""
+    labels = [f"{a.kind}: {a.name or a.media_type}" for a in message.attachments]
+    return " [" + "; ".join(labels) + "]"
+
+
 class CLIFrontend:
     """Implements the ``Frontend`` protocol over a Rich console."""
 
@@ -64,7 +102,7 @@ class CLIFrontend:
         # Shared with the agent's ToolContext so "allow always" writes land live.
         self._tool_options: dict = tool_options if tool_options is not None else {}
 
-    async def read_input(self) -> str | None:
+    async def read_input(self) -> str | UserInput | None:
         prompt = "\n[bold cyan]you ›[/] "
         try:
             line = await asyncio.to_thread(self.console.input, prompt)
@@ -73,7 +111,17 @@ class CLIFrontend:
             return None
         if line.strip() in _EXIT_COMMANDS:
             return None
-        return line
+        try:
+            incoming = _parse_attachments(line)
+        except Exception as e:
+            self.console.print(f"[red]attachment error:[/] {escape(str(e))}")
+            return UserInput()
+        for attachment in incoming.attachments:
+            self.console.print(
+                f"[dim]attached {escape(attachment.name or attachment.media_type)}"
+                f" ({escape(attachment.media_type)})[/]"
+            )
+        return incoming if incoming.attachments else line
 
     def render(self, event: AgentEvent) -> None:
         match event:
@@ -130,7 +178,13 @@ class CLIFrontend:
             )
         for m in shown:
             if m.role == "user":
-                self.console.print(f"[dim]  you › {escape(_short(m.content))}[/]")
+                summary = _attachment_summary(m)
+                if m.name == "media":
+                    self.console.print(f"[dim]  ↥ media{escape(summary)}[/]")
+                else:
+                    self.console.print(
+                        f"[dim]  you › {escape(_short(m.content))}{escape(summary)}[/]"
+                    )
             elif m.role == "assistant":
                 if m.content:
                     self.console.print(

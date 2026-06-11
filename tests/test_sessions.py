@@ -12,7 +12,7 @@ from lingcore.agent import Agent
 from lingcore.config import AgentProfile, LLMCfg
 from lingcore.errors import ConfigError, SessionError
 from lingcore.memory import WindowMemory
-from lingcore.message import Message, ToolCall, ToolResult
+from lingcore.message import Attachment, Message, ToolCall, ToolResult
 from lingcore.sessions import (
     SessionMemory,
     SessionStore,

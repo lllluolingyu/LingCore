@@ -12,10 +12,11 @@ from typing import Protocol
 
 from lingcore.agent import Agent
 from lingcore.events import AgentEvent
+from lingcore.message import UserInput
 
 
 class Frontend(Protocol):
-    async def read_input(self) -> str | None:
+    async def read_input(self) -> str | UserInput | None:
         """Return the next user message, or ``None`` to end the session."""
         ...
 
@@ -39,7 +40,8 @@ async def run_session(agent: Agent, frontend: Frontend) -> None:
         user_input = await frontend.read_input()
         if user_input is None:
             return
-        if not user_input.strip():
+        incoming = user_input if isinstance(user_input, UserInput) else UserInput(text=user_input)
+        if not incoming.text.strip() and not incoming.attachments:
             continue
-        async for event in agent.run(user_input):
+        async for event in agent.run(incoming):
             frontend.render(event)

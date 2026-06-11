@@ -6,11 +6,12 @@ from lingcore.errors import (
     MaxIterationsError,
     ToolError,
 )
-from lingcore.message import Conversation, Message, ToolCall, ToolResult
+from lingcore.message import Attachment, Conversation, Message, ToolCall, ToolResult, UserInput
 
 __version__ = "0.0.1"
 
 __all__ = [
+    "Attachment",
     "ConfigError",
     "Conversation",
     "LingCoreError",
@@ -19,5 +20,6 @@ __all__ = [
     "ToolCall",
     "ToolError",
     "ToolResult",
+    "UserInput",
     "__version__",
 ]

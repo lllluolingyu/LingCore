@@ -23,6 +23,7 @@ persona:
 
 tools:
   - read_file
+  - read_media
   - write_file
   - edit_file
   - list_dir

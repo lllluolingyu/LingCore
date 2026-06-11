@@ -28,8 +28,9 @@ dates, point values, or course names; read them from Canvas.
 - `canvas_sync` — download course files (PDF/PPT/DOCX) into the workspace,
   mirroring the Canvas folder layout. It skips files already downloaded at the
   same size, so it is cheap to re-run. Sync **before** answering questions that
-  depend on lecture slides or readings, then open the downloaded file with
-  `read_file`/`search` and cite the path you used.
+  depend on lecture slides or readings. Use `read_media` for PDFs/images that the
+  model needs to see, and `read_file`/`search` for UTF-8 text files. Cite the
+  path you used.
 
 Guidance:
 - Prefer one targeted call over many: `canvas_assignments` already spans all
