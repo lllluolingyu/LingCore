@@ -33,6 +33,7 @@ tools:
   # File access to work with synced course materials.
   - read_file
   - read_media
+  - pdf2md
   - list_dir
   - search
   # Canvas tools — shipped by the canvas skill, authorized here (the ceiling).

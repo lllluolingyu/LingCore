@@ -48,3 +48,21 @@ def test_keeps_at_least_one_block_even_over_budget():
     rendered = mem.render("SYS")
     # system + the single block (we never return an empty conversation)
     assert any(m.role == "user" for m in rendered)
+
+
+def test_attachment_estimates_flat_and_fallback_text():
+    import base64
+
+    from lingcore.message import Attachment
+
+    mem = WindowMemory(model="gpt-4o")
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\nrest").decode("ascii")
+    plain = Attachment(kind="image", media_type="image/png", data=png)
+    converted = plain.model_copy(update={"fallback_text": "x" * 40_000})
+
+    flat = mem._tokens(Message.user("m", attachments=[plain]))
+    with_text = mem._tokens(Message.user("m", attachments=[converted]))
+    assert flat >= 1_000  # flat per-image estimate
+    # A large fallback may be what actually goes on the wire: the estimate
+    # must grow with it (40k chars ≈ 10k tokens > the flat 1k).
+    assert with_text >= 10_000

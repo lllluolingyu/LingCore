@@ -100,6 +100,48 @@ async def test_malformed_args_become_empty_dict(client, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Modality narrowing — the client owns the to_openai render site.              #
+# --------------------------------------------------------------------------- #
+
+
+async def test_narrow_modalities_render_plain_string_wire(monkeypatch):
+    import base64
+
+    from lingcore.message import Attachment, Message
+
+    client = LLMClient(
+        model="x", api_key="k", base_url="http://localhost/v1", modalities=[]
+    )
+    captured: dict = {}
+
+    async def fake_open(messages, tools):
+        captured["messages"] = messages
+        return make_openai_stream([_Event([_Choice(_Delta(), finish_reason="stop")])])
+
+    monkeypatch.setattr(client, "_open_stream", fake_open)
+    att = Attachment(
+        kind="image",
+        media_type="image/png",
+        data=base64.b64encode(b"\x89PNG\r\n\x1a\nrest").decode("ascii"),
+        name="p.png",
+        fallback_text="a bar chart",
+    )
+    [c async for c in client.stream([Message.user("look", attachments=[att])])]
+    wire = captured["messages"][0]
+    # A text-only model gets a plain string — never a parts array.
+    assert isinstance(wire["content"], str)
+    assert "look" in wire["content"] and "a bar chart" in wire["content"]
+
+
+def test_full_modalities_normalize_to_native_fast_path():
+    client = LLMClient(model="x", api_key="k", modalities=["image", "file"])
+    assert client._modalities is None  # same as not narrowing at all
+    assert LLMClient(model="x", api_key="k")._modalities is None
+    narrowed = LLMClient(model="x", api_key="k", modalities=["image"])
+    assert narrowed._modalities == frozenset({"image"})
+
+
+# --------------------------------------------------------------------------- #
 # Retry — delegated to the SDK, exercised through a mocked HTTP transport.     #
 # `retry-after-ms: 1` (1ms) is honored by the SDK, so retries are effectively  #
 # instant and the suite never really sleeps.                                   #

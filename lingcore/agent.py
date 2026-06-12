@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from lingcore.config import AgentProfile
+    from lingcore.modality import MediaAdapter
     from lingcore.sessions import SessionStore
     from lingcore.skills import Skill, SkillState
     from lingcore.tools import ConfirmFn
@@ -121,6 +122,7 @@ class Agent:
         stream_retries: int = 3,
         session_id: str | None = None,
         skill_state: "SkillState | None" = None,
+        media_adapter: "MediaAdapter | None" = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -134,6 +136,9 @@ class Agent:
         self._session_id = session_id
         # Shared skill runtime state (None when skills are not configured).
         self.skill_state = skill_state
+        # Text-fallback adapter for attachment kinds the model lacks
+        # (None — the all-native default — costs nothing).
+        self.media_adapter = media_adapter
         self._turn_index: int = 0
 
     # ------------------------------------------------------------------
@@ -154,6 +159,7 @@ class Agent:
         *,
         confirm: "ConfirmFn | None" = None,
         llm: _LLMLike | None = None,
+        vision_llm: _LLMLike | None = None,
         base_dir: "Path | None" = None,
         tool_options: "dict | None" = None,
         session_store: "SessionStore | None" = None,
@@ -165,7 +171,9 @@ class Agent:
         memory is hydrated from the store (resuming ``session_id`` when given,
         else starting a fresh session) and every subsequent message is
         recorded. Opening the store is the composition root's job — see
-        ``lingcore.sessions.open_store``.
+        ``lingcore.sessions.open_store``. ``vision_llm`` overrides the
+        ``media_fallback.image`` client (tests inject a fake here, exactly
+        like ``llm``).
         """
         from pathlib import Path
 
@@ -182,7 +190,37 @@ class Agent:
             sampling=profile.llm.sampling.as_kwargs(),
             max_retries=profile.llm.max_retries,
             timeout=profile.llm.timeout,
+            modalities=profile.llm.modalities,
         )
+
+        # --- Modality fallbacks (only when the model lacks a native kind) ----
+        media_adapter: "MediaAdapter | None" = None
+        native = frozenset(profile.llm.modalities)
+        if native != frozenset({"image", "file"}):
+            from lingcore.modality import MediaAdapter
+
+            fb = profile.media_fallback
+            vision = vision_llm
+            if vision is None and "image" not in native and fb.image is not None:
+                # The describe request always renders natively (no modalities
+                # narrowing): config validation guarantees the vision model
+                # accepts images.
+                vision = LLMClient(
+                    model=fb.image.model,
+                    api_key=fb.image.resolve_api_key(),
+                    base_url=fb.image.base_url,
+                    sampling=fb.image.sampling.as_kwargs(),
+                    max_retries=fb.image.max_retries,
+                    timeout=fb.image.timeout,
+                )
+            media_adapter = MediaAdapter(
+                native,
+                pdf_mode=fb.pdf,
+                pdf_max_chars=fb.pdf_max_chars,
+                vision=vision,
+                vision_prompt=fb.image_prompt,
+                vision_max_chars=fb.image_max_chars,
+            )
 
         source_dir = getattr(profile, "_source_dir", None)
         sk_opts = dict(profile.tool_options).get("activate_skill", {})
@@ -329,6 +367,7 @@ class Agent:
             stream_retries=profile.llm.stream_retries,
             session_id=sid,
             skill_state=skill_state,
+            media_adapter=media_adapter,
         )
         agent._turn_index = restored_turn_index
         return agent
@@ -340,7 +379,12 @@ class Agent:
         else:
             incoming = user_input
         text = await self.guardrail.pre_input(incoming.text)
-        self.memory.add(Message.user(text, attachments=incoming.attachments))
+        attachments = incoming.attachments
+        if attachments and self.media_adapter is not None:
+            # Compute text fallbacks once, before the message is committed —
+            # stream retries re-render but never re-pay a conversion.
+            attachments = await self.media_adapter.prepare(attachments)
+        self.memory.add(Message.user(text, attachments=attachments))
 
         for _ in range(self.max_iters):
             active = tuple(self.skill_state.active) if self.skill_state else ()
@@ -421,6 +465,10 @@ class Agent:
             media = [attachment for result in results for attachment in result.attachments]
             if media:
                 kept, dropped = _cap_hoist_media(media)
+                if kept and self.media_adapter is not None:
+                    # After the cap, so dropped attachments never cost a
+                    # conversion (PDF extraction / a vision describe call).
+                    kept = await self.media_adapter.prepare(kept)
                 names = ", ".join(a.name or a.media_type for a in kept[:3])
                 if len(kept) > 3:
                     names += f", +{len(kept) - 3} more"

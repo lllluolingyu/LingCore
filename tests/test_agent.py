@@ -24,10 +24,12 @@ from lingcore.events import (
 )
 from lingcore.llm import LLMChunk
 from lingcore.memory import WindowMemory
-from lingcore.message import Attachment, Message, ToolCall
+from lingcore.message import Attachment, Message, ToolCall, UserInput
+from lingcore.modality import MediaAdapter
 from lingcore.tools import ToolContext, ToolOutput, ToolRegistry, tool
 from lingcore.tools.builtin.fs import read_file
 from tests.fakes import FakeLLMClient, ScriptedTurn, StreamFailure
+from tests.test_modality import make_pdf
 
 
 class _EmptyArgs(BaseModel):
@@ -199,6 +201,68 @@ async def test_hoist_caps_aggregate_total_bytes(workspace, monkeypatch):
     hoist = [m for m in agent.memory.messages if m.name == "media"][0]
     assert len(hoist.attachments) == 1
     assert "dropped" in hoist.content
+
+
+async def test_modality_fallback_prepares_user_attachments(workspace):
+    # A text-only model: the PDF the user attached is converted before the
+    # message is committed, so every render of this turn sees the text.
+    adapter = MediaAdapter(native=frozenset())
+    llm = FakeLLMClient([ScriptedTurn(text="ok")])
+    agent = _agent(llm, workspace, media_adapter=adapter)
+    att = Attachment(
+        kind="file",
+        media_type="application/pdf",
+        data=base64.b64encode(make_pdf("hidden rent figure")).decode("ascii"),
+        name="d.pdf",
+    )
+    events = await _drain(agent, UserInput(text="read this", attachments=[att]))
+    assert isinstance(events[-1], Final)
+    user = [m for m in agent.memory.messages if m.role == "user"][0]
+    assert "hidden rent figure" in user.attachments[0].fallback_text
+    # The model-facing copy carried it too (FakeLLM records Message objects).
+    assert llm.calls[0][-1].attachments[0].fallback_text
+
+
+async def test_modality_fallback_prepares_hoisted_tool_media(workspace):
+    adapter = MediaAdapter(native=frozenset())
+    local_reg = ToolRegistry()
+    pdf_b64 = base64.b64encode(make_pdf("quarterly numbers")).decode("ascii")
+
+    @tool(name="fetch_doc", registry=local_reg)
+    async def fetch_doc(args: _EmptyArgs, ctx: ToolContext) -> ToolOutput:
+        att = Attachment(
+            kind="file", media_type="application/pdf", data=pdf_b64, name="q.pdf"
+        )
+        return ToolOutput(text="attached q.pdf", attachments=[att])
+
+    call = ToolCall(id="c1", name="fetch_doc", arguments={})
+    llm = FakeLLMClient([
+        ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
+        ScriptedTurn(text="done"),
+    ])
+    agent = Agent(
+        llm=llm,
+        tools=local_reg,
+        tool_ctx=ToolContext(workspace=workspace),
+        composer=StaticComposer("sys"),
+        memory=WindowMemory(model="gpt-4o"),
+        media_adapter=adapter,
+    )
+    events = await _drain(agent, "get the doc")
+    assert isinstance(events[-1], Final)
+    hoist = [m for m in agent.memory.messages if m.name == "media"][0]
+    assert "quarterly numbers" in hoist.attachments[0].fallback_text
+
+
+async def test_no_adapter_leaves_attachments_untouched(workspace):
+    llm = FakeLLMClient([ScriptedTurn(text="ok")])
+    agent = _agent(llm, workspace)  # media_adapter defaults to None
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\nrest").decode("ascii")
+    att = Attachment(kind="image", media_type="image/png", data=png, name="p.png")
+    await _drain(agent, UserInput(text="look", attachments=[att]))
+    user = [m for m in agent.memory.messages if m.role == "user"][0]
+    assert user.attachments[0] is att
+    assert user.attachments[0].fallback_text is None
 
 
 async def test_tool_error_is_contained(workspace):

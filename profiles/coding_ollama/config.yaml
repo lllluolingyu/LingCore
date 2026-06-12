@@ -10,6 +10,11 @@ llm:
   model: ${LINGCORE_MODEL:-qwen3.5:latest}
   base_url: ${LINGCORE_BASE_URL:-http://localhost:11434/v1}
   api_key_env: ${LINGCORE_API_KEY_ENV:-}
+  # Attachment modalities the model accepts natively. Most local text models
+  # accept neither, so this profile registers none — attached images/PDFs
+  # degrade to text via media_fallback instead of erroring mid-turn. Raise to
+  # [image] or [image, file] for a multimodal local model.
+  modalities: []
   sampling:
     temperature: 0.2
 
@@ -19,6 +24,8 @@ persona:
 
 tools:
   - read_file
+  - read_media
+  - pdf2md
   - write_file
   - edit_file
   - list_dir
@@ -31,6 +38,15 @@ tool_options:
   run_shell:
     timeout: 60
     require_confirmation: true
+
+# Text fallbacks for the modalities registered above. PDFs become extracted
+# text automatically (needs the optional pymupdf extra: pip install
+# 'lingcore[pdf]', or uv sync --extra pdf). To have images described by a
+# local vision model instead of skipped, uncomment:
+# media_fallback:
+#   image:
+#     model: qwen3-vl:latest
+#     base_url: http://localhost:11434/v1
 
 memory:
   max_messages: 50

@@ -13,6 +13,11 @@ llm:
   model: ${LINGCORE_MODEL:-deepseek-v4-pro}
   base_url: ${LINGCORE_BASE_URL:-https://luolingyu.com/v1}
   api_key_env: ${LINGCORE_API_KEY_ENV:-LLY_API_KEY}
+  # Modality registration: attachment kinds the model accepts natively as
+  # content parts. deepseek-v4-pro is text-only, so none are registered —
+  # attached images/PDFs degrade to text via media_fallback below instead of
+  # erroring mid-turn. (Omitting this key means [image, file], full native.)
+  modalities: []
   sampling:
     temperature: 0.6
 
@@ -24,6 +29,7 @@ persona:
 tools:
   - read_file
   - read_media
+  - pdf2md
   - write_file
   - edit_file
   - list_dir
@@ -43,6 +49,18 @@ tool_options:
   activate_skill:
     skills_dir: skills
     allow_concurrent: false
+
+# Text fallbacks for the modalities registered above (llm.modalities).
+# PDFs already degrade to extracted markdown automatically (pdf: markdown is
+# the default; needs the optional pymupdf extra — a dev clone has it via
+# `uv sync`). Without an image fallback, attached images become a short
+# "cannot view images" note. To have them described by a vision-capable
+# model on the same endpoint instead, uncomment and name one:
+# media_fallback:
+#   image:
+#     model: qwen3.5-vl
+#     base_url: ${LINGCORE_BASE_URL:-https://luolingyu.com/v1}
+#     api_key_env: ${LINGCORE_API_KEY_ENV:-LLY_API_KEY}
 
 memory:
   max_messages: 60

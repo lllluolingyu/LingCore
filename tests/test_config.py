@@ -196,3 +196,97 @@ async def test_from_profile_creates_default_workspace(tmp_path, monkeypatch):
     )
     assert agent.tool_ctx.workspace == (tmp_path / "workspace").resolve()
     assert agent.tool_ctx.workspace.is_dir()  # auto-created on assembly
+
+
+# --------------------------------------------------------------------------- #
+# Modality registration + media_fallback                                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_modalities_default_to_both(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_KEY", "sk-xyz")
+    prof = AgentProfile.load(_write(tmp_path, FIXTURE))
+    assert prof.llm.modalities == ["image", "file"]
+    assert prof.media_fallback.pdf == "markdown"
+    assert prof.media_fallback.image is None
+
+
+def test_modalities_parse_and_dedup(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_KEY", "sk-xyz")
+    text = FIXTURE.replace(
+        "  sampling:", "  modalities: [image, image]\n  sampling:"
+    )
+    prof = AgentProfile.load(_write(tmp_path, text))
+    assert prof.llm.modalities == ["image"]
+
+
+def test_modalities_invalid_value_is_loud(tmp_path):
+    text = FIXTURE.replace("  sampling:", "  modalities: [video]\n  sampling:")
+    with pytest.raises(ConfigError, match="invalid profile"):
+        AgentProfile.load(_write(tmp_path, text))
+
+
+def test_media_fallback_section_parses(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_KEY", "sk-xyz")
+    text = FIXTURE + (
+        "media_fallback:\n"
+        "  pdf: none\n"
+        "  pdf_max_chars: 5000\n"
+        "  image:\n"
+        "    model: vision-model\n"
+        "    base_url: http://localhost:11434/v1\n"
+    )
+    prof = AgentProfile.load(_write(tmp_path, text))
+    assert prof.media_fallback.pdf == "none"
+    assert prof.media_fallback.pdf_max_chars == 5000
+    assert prof.media_fallback.image.model == "vision-model"
+
+
+def test_media_fallback_typo_is_loud(tmp_path):
+    text = FIXTURE + "media_fallback:\n  pdff: none\n"
+    with pytest.raises(ConfigError, match="invalid profile"):
+        AgentProfile.load(_write(tmp_path, text))
+
+
+def test_media_fallback_vision_model_must_see_images(tmp_path):
+    text = FIXTURE + (
+        "media_fallback:\n"
+        "  image:\n"
+        "    model: blind-model\n"
+        "    modalities: [file]\n"
+    )
+    with pytest.raises(ConfigError, match="exclude 'image'"):
+        AgentProfile.load(_write(tmp_path, text))
+
+
+def test_media_fallback_pdf_max_chars_bounds(tmp_path):
+    text = FIXTURE + "media_fallback:\n  pdf_max_chars: 10\n"
+    with pytest.raises(ConfigError, match="invalid profile"):
+        AgentProfile.load(_write(tmp_path, text))
+
+
+async def test_from_profile_wires_adapter_for_narrow_modalities(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("TEST_KEY", "sk-xyz")
+    text = FIXTURE.replace("  sampling:", "  modalities: []\n  sampling:")
+    prof = AgentProfile.load(_write(tmp_path, text))
+    vision = FakeLLMClient([])
+    agent = Agent.from_profile(
+        prof,
+        llm=FakeLLMClient([ScriptedTurn(text="hi")]),
+        vision_llm=vision,
+        base_dir=tmp_path,
+    )
+    assert agent.media_adapter is not None
+    assert agent.media_adapter.native == frozenset()
+    assert agent.media_adapter.vision is vision
+
+
+async def test_from_profile_full_modalities_means_no_adapter(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_KEY", "sk-xyz")
+    prof = AgentProfile.load(_write(tmp_path, FIXTURE))
+    agent = Agent.from_profile(
+        prof, llm=FakeLLMClient([ScriptedTurn(text="hi")]), base_dir=tmp_path
+    )
+    assert agent.media_adapter is None

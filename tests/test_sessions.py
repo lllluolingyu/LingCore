@@ -75,6 +75,25 @@ def test_append_and_messages_roundtrip(store: SessionStore):
     assert msgs[2].tool_call_id == "c1" and msgs[2].name == "read_file"
 
 
+def test_attachment_fallback_text_round_trips(store: SessionStore):
+    # A fallback computed under a text-only model must survive resume — the
+    # conversion is paid once, not once per session load.
+    import base64
+
+    sid = new_session_id()
+    att = Attachment(
+        kind="image",
+        media_type="image/png",
+        data=base64.b64encode(b"\x89PNG\r\n\x1a\nrest").decode("ascii"),
+        name="p.png",
+        fallback_text="a bar chart of rent by month",
+    )
+    store.append(sid, Message.user("look", attachments=[att]))
+    loaded = store.messages(sid)[0]
+    assert loaded.attachments[0].fallback_text == "a bar chart of rent by month"
+    assert loaded.attachments[0].data == att.data
+
+
 def test_messages_salvages_rows_with_stale_attachments(store: SessionStore):
     # A row whose attachments fail *today's* validation (e.g. written before
     # the rules tightened) must not brick the session: the text survives, the

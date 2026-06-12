@@ -18,6 +18,11 @@ FILE_MAX_BYTES = 10 * 1024 * 1024
 MAX_ATTACHMENT_NAME_CHARS = 120
 MAX_ATTACHMENTS = 8
 TOTAL_ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024
+# Hard ceiling on an attachment's text stand-in (``Attachment.fallback_text``).
+# Producers cap below this (DEFAULT_PDF_MAX_CHARS = 256 KiB of chars); the
+# model validator *truncates* to it rather than rejecting, so a stored row can
+# never become unloadable over this field.
+FALLBACK_TEXT_MAX_CHARS = 300_000
 
 _EXTENSIONS: dict[str, tuple[AttachmentKind, str]] = {
     ".png": ("image", "image/png"),

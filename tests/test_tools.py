@@ -26,6 +26,7 @@ from lingcore.tools.builtin.fs import (
     search,
     write_file,
 )
+from lingcore.tools.builtin.pdf import Pdf2MdArgs, pdf2md
 
 
 class _IntArgs(BaseModel):
@@ -123,6 +124,81 @@ async def test_read_media_rejects_unknown_extension(ctx):
     (ctx.workspace / "blob.bin").write_bytes(b"blob")
     with pytest.raises(ToolError, match="unsupported media type"):
         await read_media(ReadArgs(path="blob.bin"), ctx)
+
+
+# --- pdf2md ----------------------------------------------------------------
+
+
+async def test_pdf2md_extracts_pages(ctx):
+    from tests.test_modality import make_pdf
+
+    (ctx.workspace / "doc.pdf").write_bytes(make_pdf("alpha beta", "gamma"))
+    out = await pdf2md(Pdf2MdArgs(path="doc.pdf"), ctx)
+    assert "## Page 1" in out and "alpha beta" in out
+    assert "## Page 2" in out and "gamma" in out
+
+
+async def test_pdf2md_rejects_escape(ctx):
+    with pytest.raises(ToolError, match="escapes workspace"):
+        await pdf2md(Pdf2MdArgs(path="../doc.pdf"), ctx)
+
+
+async def test_pdf2md_rejects_non_pdf_content(ctx):
+    (ctx.workspace / "fake.pdf").write_bytes(b"\x89PNG\r\n\x1a\nrest")
+    with pytest.raises(ToolError, match="not a PDF"):
+        await pdf2md(Pdf2MdArgs(path="fake.pdf"), ctx)
+
+
+async def test_pdf2md_arg_caps_output(ctx):
+    from tests.test_modality import make_pdf
+
+    # Multi-line text: a single insert_text line is clipped at the page edge,
+    # so newlines are what make page 1 long enough to overflow the cap.
+    long_page = "\n".join(["lorem ipsum dolor sit amet"] * 12)
+    (ctx.workspace / "doc.pdf").write_bytes(make_pdf(long_page, "tail page"))
+    out = await pdf2md(Pdf2MdArgs(path="doc.pdf", max_chars=200), ctx)
+    assert "[truncated at 200 characters" in out
+    assert "tail page" not in out
+
+
+async def test_pdf2md_tool_options_default(tmp_path):
+    from tests.test_modality import make_pdf
+
+    long_page = "\n".join(["lorem ipsum dolor sit amet"] * 12)
+    (tmp_path / "doc.pdf").write_bytes(make_pdf(long_page, "tail page"))
+    opt_ctx = ToolContext(
+        workspace=tmp_path, options={"pdf2md": {"max_chars": 200}}
+    )
+    out = await pdf2md(Pdf2MdArgs(path="doc.pdf"), opt_ctx)
+    assert "[truncated at 200 characters" in out
+
+
+async def test_pdf2md_tool_options_reject_over_cap(tmp_path):
+    from lingcore.media_types import FALLBACK_TEXT_MAX_CHARS
+    from tests.test_modality import make_pdf
+
+    (tmp_path / "doc.pdf").write_bytes(make_pdf("x"))
+    opt_ctx = ToolContext(
+        workspace=tmp_path,
+        options={"pdf2md": {"max_chars": FALLBACK_TEXT_MAX_CHARS + 1}},
+    )
+    with pytest.raises(ToolError, match="between 200"):
+        await pdf2md(Pdf2MdArgs(path="doc.pdf"), opt_ctx)
+
+
+async def test_pdf2md_without_pymupdf_names_the_extra(ctx, monkeypatch):
+    import lingcore.modality as modality_mod
+    from lingcore.modality import PDF_INSTALL_HINT
+    from tests.test_modality import make_pdf
+
+    (ctx.workspace / "doc.pdf").write_bytes(make_pdf("x"))
+
+    def boom():
+        raise ToolError(PDF_INSTALL_HINT)
+
+    monkeypatch.setattr(modality_mod, "_import_pymupdf", boom)
+    with pytest.raises(ToolError, match=r"lingcore\[pdf\]"):
+        await pdf2md(Pdf2MdArgs(path="doc.pdf"), ctx)
 
 
 async def test_write_creates_nested(ctx):

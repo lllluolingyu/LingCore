@@ -16,12 +16,14 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from lingcore.errors import ConfigError
+from lingcore.media_types import FALLBACK_TEXT_MAX_CHARS, AttachmentKind
+from lingcore.modality import DEFAULT_PDF_MAX_CHARS
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
@@ -93,6 +95,19 @@ class LLMCfg(BaseModel):
     # just stops one *stalled* attempt from hanging on the SDK's 600s default.
     # Raise it if a slow model legitimately pauses between tokens.
     timeout: float = Field(default=120.0, gt=0)
+    # Attachment modalities the model natively accepts as content parts
+    # ("image" -> image_url parts, "file" -> file/PDF parts); text is always
+    # on. Defaults to both — today's behavior. Declare fewer for a model that
+    # rejects media parts: unsupported attachments then degrade to text via
+    # the profile's ``media_fallback`` section instead of erroring mid-turn.
+    modalities: list[AttachmentKind] = Field(
+        default_factory=lambda: ["image", "file"]
+    )
+
+    @field_validator("modalities")
+    @classmethod
+    def _dedup_modalities(cls, v: list[AttachmentKind]) -> list[AttachmentKind]:
+        return list(dict.fromkeys(v))
 
     def resolve_api_key(self) -> str:
         """Read the API key from the named env var.
@@ -117,6 +132,40 @@ class PersonaCfg(BaseModel):
 
     system_prompt: str = "You are a helpful assistant."
     include: list[str] = Field(default_factory=list)
+
+
+class MediaFallbackCfg(BaseModel):
+    """Text fallbacks for attachment modalities the main model lacks.
+
+    Consulted only for kinds missing from ``llm.modalities``. PDFs degrade to
+    extracted text (needs the optional ``lingcore[pdf]`` extra — pymupdf);
+    images degrade to a description from the secondary vision model declared
+    in ``image`` (an ordinary ``llm`` block, so its key still comes from the
+    environment via ``api_key_env``, never the YAML). When no fallback is
+    available, the model receives a short note saying what it can't see.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    pdf: Literal["markdown", "none"] = "markdown"
+    pdf_max_chars: int = Field(
+        default=DEFAULT_PDF_MAX_CHARS, ge=200, le=FALLBACK_TEXT_MAX_CHARS
+    )
+    image: LLMCfg | None = None
+    image_prompt: str = (
+        "Describe this image in detail for a text-only assistant. "
+        "Transcribe any visible text verbatim."
+    )
+    image_max_chars: int = Field(default=4_000, ge=200, le=FALLBACK_TEXT_MAX_CHARS)
+
+    @model_validator(mode="after")
+    def _vision_model_must_see_images(self) -> "MediaFallbackCfg":
+        if self.image is not None and "image" not in self.image.modalities:
+            raise ValueError(
+                "media_fallback.image names a vision model whose modalities "
+                "exclude 'image' — it could never describe anything"
+            )
+        return self
 
 
 class MemoryCfg(BaseModel):
@@ -183,6 +232,7 @@ class AgentProfile(BaseModel):
     loop: LoopCfg = Field(default_factory=LoopCfg)
     guardrail: GuardrailCfg = Field(default_factory=GuardrailCfg)
     sessions: SessionsCfg = Field(default_factory=SessionsCfg)
+    media_fallback: MediaFallbackCfg = Field(default_factory=MediaFallbackCfg)
 
     @field_validator("workspace")
     @classmethod

@@ -5,9 +5,10 @@ from lingcore.tools.builtin import (  # noqa: F401  (registration side effect)
     knowledge,
     memory,
     patch,
+    pdf,
     shell,
     skill,
     web,
 )
 
-__all__ = ["fs", "knowledge", "memory", "patch", "shell", "skill", "web"]
+__all__ = ["fs", "knowledge", "memory", "patch", "pdf", "shell", "skill", "web"]

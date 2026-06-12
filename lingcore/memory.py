@@ -55,7 +55,10 @@ class WindowMemory:
         # text. Exact accounting is the API's job; this only drives trimming.
         n = len(self._enc.encode(message.content or ""))
         for attachment in message.attachments:
-            n += 1_000 if attachment.kind == "image" else 4_000
+            flat = 1_000 if attachment.kind == "image" else 4_000
+            # A text fallback may be what actually goes on the wire; count
+            # whichever estimate is larger (over-counting only trims earlier).
+            n += max(flat, len(attachment.fallback_text or "") // 4)
         for tc in message.tool_calls:
             n += len(self._enc.encode(tc.name)) + len(self._enc.encode(str(tc.arguments)))
         return n + 4  # per-message overhead fudge

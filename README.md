@@ -23,6 +23,11 @@ OpenAI-compatible endpoint by pointing at a different `base_url`.
   model and a `@tool` decorator. The coding agent ships with file read/write/
   edit, patch, directory listing, search, URL fetch, and a confirmation-gated
   shell.
+- **Multimodal with graceful degradation** — images/PDFs attach via CLI
+  `@path`, the web UI, or the `read_media` tool. A profile registers which
+  modalities its model natively accepts (`llm.modalities`); anything else
+  degrades to text — PDFs via markdown extraction, images via a description
+  from a configured fallback vision model (`media_fallback`).
 - **Session history & resume** — conversations persist to a small SQLite db
   *inside the profile directory* (each profile keeps its own history). Resume
   the latest with `-c`, a specific one with `--resume <id-prefix>`, inspect
@@ -39,6 +44,15 @@ Requires Python ≥3.11. Uses [uv](https://docs.astral.sh/uv/).
 git clone <your-repo-url> LingCore
 cd LingCore
 uv sync
+```
+
+PDF text extraction (the `pdf2md` tool and the automatic PDF→text fallback)
+needs PyMuPDF, which is AGPL-3.0 while LingCore is Apache-2.0 — so it ships as
+an optional extra rather than a base dependency. A dev clone already gets it
+via `uv sync` (dev group); a plain install opts in with:
+
+```bash
+pip install 'lingcore[pdf]'
 ```
 
 ## Quick start

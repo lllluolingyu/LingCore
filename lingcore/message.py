@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from lingcore.media_types import (
     AttachmentKind,
+    FALLBACK_TEXT_MAX_CHARS,
     MAX_ATTACHMENTS,
     TOTAL_ATTACHMENT_MAX_BYTES,
     decoded_payload_size,
@@ -28,18 +29,29 @@ from lingcore.media_types import (
 
 Role = Literal["system", "user", "assistant", "tool"]
 
+# Attachment kinds a chat-completions request carries natively when nothing
+# says otherwise. ``to_openai(attachment_modalities=...)`` narrows this set
+# per model (see LLMCfg.modalities); ``None`` means "all of them".
+NATIVE_MODALITIES: frozenset[str] = frozenset({"image", "file"})
+
 
 class Attachment(BaseModel):
     """A user-visible media attachment carried alongside message text.
 
     ``data`` is the raw base64 payload without a ``data:`` URI prefix. The wire
     adapter adds that provider-specific wrapper in ``Message.to_openai``.
+    ``fallback_text`` is an optional text stand-in (extracted PDF text, a
+    vision model's description, or a diagnostic note) computed once when the
+    attachment enters a conversation whose model lacks the native modality;
+    the original payload is always kept so a later modality upgrade restores
+    native delivery.
     """
 
     kind: AttachmentKind
     media_type: str
     data: str
     name: str | None = None
+    fallback_text: str | None = None
 
     @model_validator(mode="after")
     def _validate_attachment(self) -> Attachment:
@@ -59,6 +71,16 @@ class Attachment(BaseModel):
         self.data = normalized
         if self.name is not None:
             self.name = sanitize_name(self.name)
+        # Truncate (never reject) an over-long fallback: rejecting would make a
+        # stored session row unloadable over a derived, non-essential field.
+        if (
+            self.fallback_text is not None
+            and len(self.fallback_text) > FALLBACK_TEXT_MAX_CHARS
+        ):
+            marker = "\n[fallback text truncated]"
+            self.fallback_text = (
+                self.fallback_text[: FALLBACK_TEXT_MAX_CHARS - len(marker)] + marker
+            )
         return self
 
 
@@ -164,8 +186,18 @@ class Message(BaseModel):
         )
 
     # --- wire format --------------------------------------------------
-    def to_openai(self) -> dict[str, Any]:
-        """Render to a chat-completions message dict."""
+    def to_openai(
+        self, *, attachment_modalities: frozenset[str] | None = None
+    ) -> dict[str, Any]:
+        """Render to a chat-completions message dict.
+
+        ``attachment_modalities`` narrows which attachment kinds may render as
+        native media parts (``None`` = all). An attachment outside the set
+        renders as text instead — its precomputed ``fallback_text`` when
+        present, else a placeholder note — and when *no* native part remains
+        the whole content collapses to a plain string, because text-only
+        servers may reject a parts array outright.
+        """
         if self.role == "tool":
             return {
                 "role": "tool",
@@ -174,20 +206,27 @@ class Message(BaseModel):
             }
         content: str | list[dict[str, Any]] = self.content
         if self.role == "user" and self.attachments:
-            parts: list[dict[str, Any]] = []
-            if self.content:
-                parts.append({"type": "text", "text": self.content})
+            modalities = (
+                NATIVE_MODALITIES
+                if attachment_modalities is None
+                else attachment_modalities
+            )
+            native_parts: list[dict[str, Any]] = []
+            fallback_chunks: list[str] = []
             for attachment in self.attachments:
+                if attachment.kind not in modalities:
+                    fallback_chunks.append(_fallback_block(attachment))
+                    continue
                 data_uri = (
                     f"data:{attachment.media_type};base64,{attachment.data}"
                 )
                 if attachment.kind == "image":
-                    parts.append({
+                    native_parts.append({
                         "type": "image_url",
                         "image_url": {"url": data_uri},
                     })
                 else:
-                    parts.append({
+                    native_parts.append({
                         "type": "file",
                         "file": {
                             "filename": attachment.name
@@ -195,11 +234,36 @@ class Message(BaseModel):
                             "file_data": data_uri,
                         },
                     })
-            content = parts
+            text = "\n\n".join(
+                chunk for chunk in (self.content, *fallback_chunks) if chunk
+            )
+            if native_parts:
+                parts: list[dict[str, Any]] = []
+                if text:
+                    parts.append({"type": "text", "text": text})
+                parts.extend(native_parts)
+                content = parts
+            else:
+                content = text
         msg: dict[str, Any] = {"role": self.role, "content": content}
         if self.tool_calls:
             msg["tool_calls"] = [tc.to_openai() for tc in self.tool_calls]
         return msg
+
+
+def _fallback_block(attachment: Attachment) -> str:
+    """Text stand-in for an attachment the model can't receive natively."""
+    label = attachment.name or _default_filename(attachment)
+    if attachment.fallback_text:
+        return (
+            f"[{attachment.kind} {label!r} ({attachment.media_type}) as text:]\n"
+            f"{attachment.fallback_text}"
+        )
+    return (
+        f"[{attachment.kind} {label!r} ({attachment.media_type}) is attached, "
+        "but this model does not support that modality and no text fallback "
+        "is available]"
+    )
 
 
 def _default_filename(attachment: Attachment) -> str:

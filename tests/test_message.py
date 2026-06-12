@@ -131,3 +131,84 @@ def test_user_input_rejects_too_many_attachments():
     )
     with pytest.raises(ValidationError, match="too many attachments"):
         UserInput(attachments=[img] * 9)
+
+
+# --------------------------------------------------------------------------- #
+# Modality-narrowed rendering (attachment_modalities=...)                      #
+# --------------------------------------------------------------------------- #
+
+
+def _png() -> Attachment:
+    return Attachment(
+        kind="image",
+        media_type="image/png",
+        data=_b64(b"\x89PNG\r\n\x1a\nrest"),
+        name="p.png",
+    )
+
+
+def test_unsupported_modality_collapses_to_plain_string():
+    pdf = Attachment(
+        kind="file",
+        media_type="application/pdf",
+        data=_b64(b"%PDF-1.4\n"),
+        name="doc.pdf",
+        fallback_text="page one words",
+    )
+    wire = Message.user("summarize", attachments=[pdf]).to_openai(
+        attachment_modalities=frozenset()
+    )
+    # No native part remains -> plain string (text-only servers may reject
+    # a parts array outright).
+    assert isinstance(wire["content"], str)
+    assert "summarize" in wire["content"]
+    assert "doc.pdf" in wire["content"]
+    assert "page one words" in wire["content"]
+
+
+def test_unsupported_modality_without_fallback_gets_placeholder():
+    wire = Message.user("", attachments=[_png()]).to_openai(
+        attachment_modalities=frozenset()
+    )
+    assert isinstance(wire["content"], str)
+    assert "p.png" in wire["content"]
+    assert "no text fallback is available" in wire["content"]
+
+
+def test_mixed_modalities_merge_fallback_into_text_part():
+    img = _png()
+    pdf = Attachment(
+        kind="file",
+        media_type="application/pdf",
+        data=_b64(b"%PDF-1.4\n"),
+        name="doc.pdf",
+        fallback_text="extracted words",
+    )
+    wire = Message.user("look", attachments=[img, pdf]).to_openai(
+        attachment_modalities=frozenset({"image"})
+    )
+    parts = wire["content"]
+    assert [p["type"] for p in parts] == ["text", "image_url"]
+    assert "look" in parts[0]["text"] and "extracted words" in parts[0]["text"]
+    assert parts[1]["image_url"]["url"] == f"data:image/png;base64,{img.data}"
+
+
+def test_full_modalities_param_matches_default_render():
+    msg = Message.user("d", attachments=[_png()])
+    assert (
+        msg.to_openai(attachment_modalities=frozenset({"image", "file"}))
+        == msg.to_openai()
+    )
+
+
+def test_fallback_text_is_truncated_never_rejected():
+    from lingcore.media_types import FALLBACK_TEXT_MAX_CHARS
+
+    att = Attachment(
+        kind="image",
+        media_type="image/png",
+        data=_b64(b"\x89PNG\r\n\x1a\nrest"),
+        fallback_text="y" * (FALLBACK_TEXT_MAX_CHARS + 5_000),
+    )
+    assert len(att.fallback_text) == FALLBACK_TEXT_MAX_CHARS
+    assert att.fallback_text.endswith("[fallback text truncated]")

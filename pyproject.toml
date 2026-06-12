@@ -14,6 +14,11 @@ dependencies = [
     "httpx==0.28.1",
 ]
 
+[project.optional-dependencies]
+# pymupdf is AGPL-3.0 (LingCore is Apache-2.0): kept out of the base install on
+# purpose. Only the pdf2md tool / PDF modality fallback need it.
+pdf = ["pymupdf==1.27.2.3"]
+
 [project.scripts]
 lingcore = "lingcore.__main__:main"
 
@@ -21,6 +26,7 @@ lingcore = "lingcore.__main__:main"
 dev = [
     "pytest==9.0.3",
     "pytest-asyncio==1.4.0",
+    "pymupdf==1.27.2.3",  # keep in sync with optional-dependencies.pdf
 ]
 
 [build-system]

@@ -36,7 +36,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from lingcore.errors import LLMStreamError
-from lingcore.message import Message, ToolCall
+from lingcore.message import NATIVE_MODALITIES, Message, ToolCall
 
 # Connect phase fails fast even when ``timeout`` (the read/inactivity window) is
 # generous — a black-hole host shouldn't hold a slot for the full read window.
@@ -111,9 +111,15 @@ class LLMClient:
         max_retries: int = 10,
         timeout: float = 120.0,
         http_client: Any = None,
+        modalities: "frozenset[str] | list[str] | None" = None,
     ) -> None:
         self.model = model
         self.sampling = sampling or {}
+        # Attachment kinds this model accepts as native content parts
+        # (LLMCfg.modalities). The full set normalizes to None so the common
+        # all-native case stays on Message.to_openai's default fast path.
+        narrowed = None if modalities is None else frozenset(modalities)
+        self._modalities = None if narrowed == NATIVE_MODALITIES else narrowed
         self._max_retries = max(0, max_retries)
         # Hand retrying to the SDK (header-aware, correct status handling). The
         # timeout is httpx's read (inactivity) window, not a total wall-clock
@@ -171,7 +177,9 @@ class LLMClient:
         no SDK retry ever covers it and only the caller can decide to discard
         the partial turn and re-request.
         """
-        wire = [m.to_openai() for m in messages]
+        wire = [
+            m.to_openai(attachment_modalities=self._modalities) for m in messages
+        ]
         try:
             stream = await self._open_stream(wire, tools)
         except Exception as e:
