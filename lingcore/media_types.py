@@ -8,10 +8,18 @@ dependency cycles.
 from __future__ import annotations
 
 import base64
+import re
 from pathlib import Path
 from typing import Literal
 
-AttachmentKind = Literal["image", "file"]
+# Four attachment kinds. ``image``/``file`` may be delivered as native content
+# parts; ``text`` always inlines its decoded content as prompt text; ``binary``
+# is a copied-into-the-workspace file the model reaches only through tools.
+AttachmentKind = Literal["image", "file", "text", "binary"]
+# The kinds a chat-completions request can carry as a *native* content part.
+# ``llm.modalities`` is typed to this subset (declaring ``text``/``binary`` as
+# native is nonsensical, so config rejects it loudly).
+NativeModality = Literal["image", "file"]
 
 IMAGE_MAX_BYTES = 5 * 1024 * 1024
 FILE_MAX_BYTES = 10 * 1024 * 1024
@@ -23,6 +31,20 @@ TOTAL_ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024
 # model validator *truncates* to it rather than rejecting, so a stored row can
 # never become unloadable over this field.
 FALLBACK_TEXT_MAX_CHARS = 300_000
+# Max characters of a text attachment inlined into the prompt at ingest. Sized
+# so an inlined file (~chars/4 tokens) fits the default ``memory.max_tokens``
+# budget with room for history; raise ``memory.max_tokens`` for heavy text work.
+TEXT_INLINE_MAX_CHARS = 32_768
+
+# A conservative ``type/subtype`` shape for the free-form media types text and
+# binary attachments carry. Beyond well-formedness it bars whitespace, newlines,
+# and brackets, so a media_type interpolated into a one-line fallback header
+# can't reshape it.
+_MEDIA_TYPE_RE = re.compile(r"[\w.+-]+/[\w.+-]+")
+
+
+def is_valid_media_type(media_type: str) -> bool:
+    return bool(_MEDIA_TYPE_RE.fullmatch(media_type))
 
 _EXTENSIONS: dict[str, tuple[AttachmentKind, str]] = {
     ".png": ("image", "image/png"),
@@ -105,40 +127,75 @@ def media_bytes_match(data: bytes, media_type: str) -> bool:
     return detected is not None and detected[1] == media_type
 
 
-def validate_base64_payload(
-    data: str, *, media_type: str, max_bytes: int
-) -> tuple[str, int]:
-    """Validate and normalize a base64 payload, returning normalized data + size."""
+def decode_base64_payload(
+    data: str, *, max_bytes: int, declared_media_type: str | None = None
+) -> tuple[str, bytes]:
+    """Strip an optional ``data:`` URI, size-check, and decode a base64 payload.
+
+    Returns ``(normalized_base64, decoded_bytes)``. No magic-byte check — that
+    is the caller's job (image/file verify it; text/binary don't). The decoded
+    bytes are handed back so callers needing them (a NUL scan, a content
+    classifier) don't decode twice.
+    """
     raw = data.strip()
     if raw.startswith("data:"):
         try:
             header, raw = raw.split(",", 1)
         except ValueError:
             raise ValueError("invalid attachment data URI") from None
-        uri_media_type = header[5:].split(";", 1)[0]
         if ";base64" not in header:
             raise ValueError("invalid attachment data URI")
-        if uri_media_type and uri_media_type != media_type:
+        uri_media_type = header[5:].split(";", 1)[0]
+        if (
+            declared_media_type
+            and uri_media_type
+            and uri_media_type != declared_media_type
+        ):
             raise ValueError(
                 f"attachment data URI media type {uri_media_type!r} "
-                f"does not match {media_type!r}"
+                f"does not match {declared_media_type!r}"
             )
     # Reject on encoded length first: base64 decodes 4 chars -> 3 bytes, so an
     # over-cap payload is refused without materializing the decoded bytes.
     if (len(raw) // 4) * 3 - 2 > max_bytes:
-        raise ValueError(
-            f"attachment too large (>{max_bytes} bytes decoded)"
-        )
+        raise ValueError(f"attachment too large (>{max_bytes} bytes decoded)")
     try:
         decoded = base64.b64decode(raw, validate=True)
     except Exception:
         raise ValueError("invalid attachment base64 data") from None
-    size = len(decoded)
-    if size > max_bytes:
-        raise ValueError(f"attachment too large ({size} bytes; limit {max_bytes})")
+    if len(decoded) > max_bytes:
+        raise ValueError(f"attachment too large ({len(decoded)} bytes; limit {max_bytes})")
+    return base64.b64encode(decoded).decode("ascii"), decoded
+
+
+def validate_base64_payload(
+    data: str, *, media_type: str, max_bytes: int
+) -> tuple[str, int]:
+    """Validate+normalize an image/file payload, asserting its magic bytes."""
+    normalized, decoded = decode_base64_payload(
+        data, max_bytes=max_bytes, declared_media_type=media_type
+    )
     if not media_bytes_match(decoded, media_type):
         raise ValueError(f"attachment data does not match media type {media_type!r}")
-    return base64.b64encode(decoded).decode("ascii"), size
+    return normalized, len(decoded)
+
+
+def validate_text_payload(data: str, *, max_bytes: int) -> tuple[str, int]:
+    """Validate+normalize a text payload: decodable, capped, and NUL-free.
+
+    A NUL byte means the payload is not the UTF-8 text it claims to be — the
+    cheap mislabel guard ``is_probably_binary`` uses.
+    """
+    normalized, decoded = decode_base64_payload(data, max_bytes=max_bytes)
+    if b"\x00" in decoded:
+        raise ValueError("text attachment contains NUL bytes (not UTF-8 text)")
+    return normalized, len(decoded)
+
+
+def validate_binary_payload(data: str, *, max_bytes: int) -> tuple[str, int]:
+    """Validate+normalize a binary payload: decodable and within the cap only."""
+    normalized, decoded = decode_base64_payload(data, max_bytes=max_bytes)
+    return normalized, len(decoded)
 
 
 def decoded_payload_size(data: str) -> int:

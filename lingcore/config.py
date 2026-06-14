@@ -22,7 +22,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from lingcore.errors import ConfigError
-from lingcore.media_types import FALLBACK_TEXT_MAX_CHARS, AttachmentKind
+from lingcore.media_types import FALLBACK_TEXT_MAX_CHARS, NativeModality
 from lingcore.modality import DEFAULT_PDF_MAX_CHARS
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -100,13 +100,13 @@ class LLMCfg(BaseModel):
     # on. Defaults to both — today's behavior. Declare fewer for a model that
     # rejects media parts: unsupported attachments then degrade to text via
     # the profile's ``media_fallback`` section instead of erroring mid-turn.
-    modalities: list[AttachmentKind] = Field(
+    modalities: list[NativeModality] = Field(
         default_factory=lambda: ["image", "file"]
     )
 
     @field_validator("modalities")
     @classmethod
-    def _dedup_modalities(cls, v: list[AttachmentKind]) -> list[AttachmentKind]:
+    def _dedup_modalities(cls, v: list[NativeModality]) -> list[NativeModality]:
         return list(dict.fromkeys(v))
 
     def resolve_api_key(self) -> str:

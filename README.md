@@ -23,11 +23,13 @@ OpenAI-compatible endpoint by pointing at a different `base_url`.
   model and a `@tool` decorator. The coding agent ships with file read/write/
   edit, patch, directory listing, search, URL fetch, and a confirmation-gated
   shell.
-- **Multimodal with graceful degradation** — images/PDFs attach via CLI
-  `@path`, the web UI, or the `read_media` tool. A profile registers which
-  modalities its model natively accepts (`llm.modalities`); anything else
-  degrades to text — PDFs via markdown extraction, images via a description
-  from a configured fallback vision model (`media_fallback`).
+- **Multimodal with graceful degradation** — attach any file via CLI `@path`
+  or the web UI; it is copied into the workspace and announced to the model,
+  and the agent can also attach a workspace image/PDF with `read_file`. A
+  profile registers which modalities its model natively accepts
+  (`llm.modalities`); anything else degrades to text — PDFs via markdown
+  extraction, images via a description from a configured fallback vision model
+  (`media_fallback`), and other text files inlined directly.
 - **Session history & resume** — conversations persist to a small SQLite db
   *inside the profile directory* (each profile keeps its own history). Resume
   the latest with `-c`, a specific one with `--resume <id-prefix>`, inspect

@@ -219,3 +219,16 @@ async def test_prepare_is_idempotent():
     first = await adapter.prepare([_pdf_attachment("once")])
     second = await adapter.prepare(first)
     assert second[0] is first[0]  # already prepared: no second conversion
+
+
+async def test_prepare_skips_text_and_binary_kinds():
+    # The adapter only converts image/file. text/binary carry (or will carry)
+    # their own fallbacks from ingest, so prepare leaves them alone even when
+    # fallback_text is still None — never routing them through PDF/vision paths.
+    txt = Attachment(kind="text", media_type="text/plain", data=_b64(b"hello"))
+    binary = Attachment(
+        kind="binary", media_type="application/octet-stream", data=_b64(b"\x00\x01")
+    )
+    out = await MediaAdapter(native=frozenset()).prepare([txt, binary])
+    assert out[0] is txt and out[1] is binary
+    assert out[0].fallback_text is None and out[1].fallback_text is None

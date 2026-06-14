@@ -17,7 +17,7 @@ from lingcore.events import (
     ToolResultEvent,
 )
 from lingcore.io.base import run_session
-from lingcore.io.cli import CLIFrontend
+from lingcore.io.cli import CLIFrontend, _parse_attachments
 from lingcore.message import ToolCall, ToolResult, UserInput
 from tests.fakes import FakeLLMClient, ScriptedTurn
 
@@ -223,3 +223,37 @@ async def test_user_input_frontend_drives_agent(tmp_path):
 
     await run_session(agent, frontend)
     assert agent.memory.messages[0].attachments
+
+
+# --- @path attachment parsing ---------------------------------------------
+
+
+def test_parse_attachments_any_file_type(tmp_path):
+    (tmp_path / "notes.md").write_text("# hi", encoding="utf-8")
+    ui, warnings = _parse_attachments("see @notes.md please", base=tmp_path)
+    assert warnings == []
+    assert len(ui.attachments) == 1
+    assert ui.attachments[0].kind == "text"
+    assert ui.text == "see notes.md please"  # the @ marker is stripped
+
+
+def test_parse_attachments_missing_path_stays_literal_with_warning(tmp_path):
+    ui, warnings = _parse_attachments("look at @missing.png", base=tmp_path)
+    assert ui.attachments == []
+    assert "@missing.png" in ui.text  # the typed token is preserved verbatim
+    assert any("no such file" in w for w in warnings)
+
+
+def test_parse_attachments_bare_mention_is_silent(tmp_path):
+    ui, warnings = _parse_attachments("ping @alice about it", base=tmp_path)
+    assert ui.attachments == []
+    assert "@alice" in ui.text
+    assert warnings == []  # a non-path @mention must not nag
+
+
+def test_parse_attachments_quoted_path_with_spaces(tmp_path):
+    (tmp_path / "my file.txt").write_text("data", encoding="utf-8")
+    ui, warnings = _parse_attachments('read @"my file.txt"', base=tmp_path)
+    assert len(ui.attachments) == 1
+    assert ui.attachments[0].name == "my file.txt"
+    assert ui.text == "read my file.txt"

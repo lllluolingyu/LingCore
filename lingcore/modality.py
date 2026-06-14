@@ -33,6 +33,11 @@ PDF_INSTALL_HINT = (
 
 DEFAULT_PDF_MAX_CHARS = 262_144
 
+# The only attachment kinds MediaAdapter knows how to convert. ``text`` already
+# carries its content (inlined at ingest) and ``binary`` has no text rendition,
+# so both are skipped here — the ingest step owns their fallbacks.
+_CONVERTIBLE_KINDS = frozenset({"image", "file"})
+
 # pymupdf is not thread-safe. Extraction runs in worker threads
 # (``asyncio.to_thread``), so a plain threading.Lock serializes every
 # extraction in the process — across agents and event loops alike.
@@ -147,7 +152,9 @@ class MediaAdapter:
         pending = [
             (i, a)
             for i, a in enumerate(attachments)
-            if a.kind not in self.native and a.fallback_text is None
+            if a.kind in _CONVERTIBLE_KINDS
+            and a.kind not in self.native
+            and a.fallback_text is None
         ]
         if not pending:
             return attachments

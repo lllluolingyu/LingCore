@@ -47,38 +47,39 @@ class ReadArgs(BaseModel):
     path: str = Field(description="File path relative to the workspace root.")
 
 
-@tool(description="Read a UTF-8 text file relative to the workspace root.")
-async def read_file(args: ReadArgs, ctx: ToolContext) -> str:
+@tool(
+    description=(
+        "Read a file from the workspace. Returns UTF-8 text for a text file; "
+        "for an image or PDF it attaches the file so the model can view it "
+        "natively (degrading to extracted/described text when the model "
+        "cannot). Use pdf2md instead to read a PDF as cheap markdown text."
+    )
+)
+async def read_file(args: ReadArgs, ctx: ToolContext) -> str | ToolOutput:
     full = _resolve(ctx, args.path)
     if not full.is_file():
         raise ToolError(f"not a file: {args.path!r}")
+    # An image/PDF (extension + magic bytes agree) is attached, not decoded —
+    # attachment_from_path applies the larger media size caps (5/10 MB).
+    with full.open("rb") as fh:
+        head = fh.read(16)
+    if detect_media(head, full):
+        attachment = attachment_from_path(full)
+        size = full.stat().st_size
+        return ToolOutput(
+            text=f"attached {attachment.name} ({attachment.media_type}, {size} bytes)",
+            attachments=[attachment],
+        )
     data = full.read_bytes()
     if len(data) > _MAX_READ_BYTES:
         raise ToolError(
             f"file too large ({len(data)} bytes; limit {_MAX_READ_BYTES})"
         )
-    if detect_media(data, full):
-        raise ToolError(
-            "media file is not readable as UTF-8 text; use read_media if available"
-        )
     if is_probably_binary(data):
-        raise ToolError("binary file; not readable as text")
+        raise ToolError(
+            "binary file; not readable as text — inspect it with shell tools if available"
+        )
     return data.decode("utf-8", errors="replace")
-
-
-@tool(
-    description="Attach an image or PDF file from the workspace for multimodal model input."
-)
-async def read_media(args: ReadArgs, ctx: ToolContext) -> ToolOutput:
-    full = _resolve(ctx, args.path)
-    if not full.is_file():
-        raise ToolError(f"not a file: {args.path!r}")
-    attachment = attachment_from_path(full)
-    size = full.stat().st_size
-    return ToolOutput(
-        text=f"attached {attachment.name} ({attachment.media_type}, {size} bytes)",
-        attachments=[attachment],
-    )
 
 
 class WriteArgs(BaseModel):

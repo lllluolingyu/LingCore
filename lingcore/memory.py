@@ -55,7 +55,17 @@ class WindowMemory:
         # text. Exact accounting is the API's job; this only drives trimming.
         n = len(self._enc.encode(message.content or ""))
         for attachment in message.attachments:
-            flat = 1_000 if attachment.kind == "image" else 4_000
+            # Floors reflect the wire cost a fallback can't capture: a native
+            # image/PDF part (no fallback_text but real tokens), versus text
+            # (its inlined content *is* the fallback) and binary (a tiny note).
+            if attachment.kind == "image":
+                flat = 1_000
+            elif attachment.kind == "file":
+                flat = 4_000
+            elif attachment.kind == "binary":
+                flat = 64
+            else:  # text — dominated by the inlined fallback length
+                flat = 16
             # A text fallback may be what actually goes on the wire; count
             # whichever estimate is larger (over-counting only trims earlier).
             n += max(flat, len(attachment.fallback_text or "") // 4)

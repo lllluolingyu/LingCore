@@ -226,6 +226,14 @@ def test_modalities_invalid_value_is_loud(tmp_path):
         AgentProfile.load(_write(tmp_path, text))
 
 
+def test_modalities_rejects_non_native_kind(tmp_path):
+    # text/binary are attachment kinds but not *native* modalities; declaring
+    # one in llm.modalities is a loud error, not a silent no-op.
+    text = FIXTURE.replace("  sampling:", "  modalities: [text]\n  sampling:")
+    with pytest.raises(ConfigError, match="invalid profile"):
+        AgentProfile.load(_write(tmp_path, text))
+
+
 def test_media_fallback_section_parses(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_KEY", "sk-xyz")
     text = FIXTURE + (

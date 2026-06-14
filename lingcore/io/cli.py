@@ -27,8 +27,13 @@ from lingcore.events import (
     ToolCallStarted,
     ToolResultEvent,
 )
-from lingcore.media import attachment_from_path, supported_media_type
-from lingcore.message import UserInput
+from lingcore.media import attachment_from_path
+from lingcore.media_types import (
+    MAX_ATTACHMENTS,
+    TOTAL_ATTACHMENT_MAX_BYTES,
+    decoded_payload_size,
+)
+from lingcore.message import Attachment, UserInput
 from lingcore.tools.builtin.shell import allowlist_pattern_for
 
 if TYPE_CHECKING:
@@ -39,29 +44,72 @@ _EXIT_COMMANDS = {"/exit", "/quit", "/q"}
 _ATTACH_RE = re.compile(r'(?<!\S)@("[^"]+"|\S+)')
 
 
-def _parse_attachments(line: str, base: Path | None = None) -> UserInput:
-    """Parse conservative CLI @path media attachments from one line."""
+def _looks_like_path(raw: str) -> bool:
+    """Heuristic for whether an unmatched ``@token`` plausibly meant a file.
+
+    Used only to decide whether to warn: a bare ``@mention`` shouldn't nag,
+    but a mistyped ``@notes.txt`` should not vanish silently.
+    """
+    return "/" in raw or raw.startswith("~") or bool(Path(raw).suffix)
+
+
+def _parse_attachments(
+    line: str, base: Path | None = None
+) -> tuple[UserInput, list[str]]:
+    """Parse ``@path`` CLI attachments from one line.
+
+    A token attaches iff it resolves to an existing file (any type); otherwise
+    the ``@token`` stays in the text verbatim. Returns the parsed input plus
+    warning lines for tokens that looked like a path but couldn't attach (no
+    such file, too large, over the per-message limit) — the typed line is never
+    lost, and caps can never make ``UserInput`` construction raise.
+    """
     base = base or Path.cwd()
-    attachments = []
+    attachments: list[Attachment] = []
+    warnings: list[str] = []
     out: list[str] = []
     pos = 0
+    total = 0
     for match in _ATTACH_RE.finditer(line):
         token = match.group(1)
-        raw_path = token[1:-1] if token.startswith('"') and token.endswith('"') else token
-        if supported_media_type(raw_path) is None:
-            continue
+        raw_path = (
+            token[1:-1] if token.startswith('"') and token.endswith('"') else token
+        )
         path = Path(os.path.expanduser(raw_path))
         if not path.is_absolute():
             path = base / path
         if not path.is_file():
-            raise FileNotFoundError(raw_path)
-        attachment = attachment_from_path(path)
+            if _looks_like_path(raw_path):
+                warnings.append(f"@{raw_path}: no such file; sent as text")
+            continue
+        if len(attachments) >= MAX_ATTACHMENTS:
+            warnings.append(
+                f"@{raw_path}: attachment limit ({MAX_ATTACHMENTS}) reached; "
+                "sent as text"
+            )
+            continue
+        try:
+            attachment = attachment_from_path(path)
+        except Exception as e:
+            warnings.append(
+                f"@{raw_path}: {e}; sent as text — copy it into the workspace "
+                "and ask the agent to read it with tools"
+            )
+            continue
+        size = decoded_payload_size(attachment.data)
+        if total + size > TOTAL_ATTACHMENT_MAX_BYTES:
+            warnings.append(
+                f"@{raw_path}: would exceed the total attachment size limit; "
+                "sent as text"
+            )
+            continue
         attachments.append(attachment)
+        total += size
         out.append(line[pos:match.start()])
         out.append(raw_path)
         pos = match.end()
     out.append(line[pos:])
-    return UserInput(text="".join(out), attachments=attachments)
+    return UserInput(text="".join(out), attachments=attachments), warnings
 
 
 def rel_time(dt: datetime) -> str:
@@ -112,10 +160,13 @@ class CLIFrontend:
         if line.strip() in _EXIT_COMMANDS:
             return None
         try:
-            incoming = _parse_attachments(line)
+            incoming, warnings = _parse_attachments(line)
         except Exception as e:
+            # Parsing must never lose the user's line; fall back to plain text.
             self.console.print(f"[red]attachment error:[/] {escape(str(e))}")
-            return UserInput()
+            return line
+        for warning in warnings:
+            self.console.print(f"[yellow]{escape(warning)}[/]")
         for attachment in incoming.attachments:
             self.console.print(
                 f"[dim]attached {escape(attachment.name or attachment.media_type)}"

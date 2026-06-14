@@ -30,6 +30,7 @@ from lingcore.events import (
     ToolResultEvent,
 )
 from lingcore.guardrails import Guardrail, NoopGuardrail
+from lingcore.ingest import ingest_attachments
 from lingcore.llm import LLMChunk
 from lingcore.media_types import (
     MAX_ATTACHMENTS,
@@ -380,10 +381,22 @@ class Agent:
             incoming = user_input
         text = await self.guardrail.pre_input(incoming.text)
         attachments = incoming.attachments
-        if attachments and self.media_adapter is not None:
-            # Compute text fallbacks once, before the message is committed —
-            # stream retries re-render but never re-pay a conversion.
-            attachments = await self.media_adapter.prepare(attachments)
+        if attachments:
+            # Copy every attachment into <workspace>/attachments/ and announce
+            # where each landed, so workspace-confined tools can reach them.
+            # Runs before prepare(): ingest sets text/binary fallbacks, the
+            # adapter sets image/PDF ones (it skips text/binary). Blocking I/O
+            # goes to a thread so the event loop stays free.
+            attachments, notes = await asyncio.to_thread(
+                ingest_attachments, attachments, self.tool_ctx.workspace
+            )
+            if notes:
+                note_block = "\n".join(notes)
+                text = f"{text}\n{note_block}" if text else note_block
+            if self.media_adapter is not None:
+                # Compute text fallbacks once, before the message is committed —
+                # stream retries re-render but never re-pay a conversion.
+                attachments = await self.media_adapter.prepare(attachments)
         self.memory.add(Message.user(text, attachments=attachments))
 
         for _ in range(self.max_iters):

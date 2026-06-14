@@ -94,6 +94,32 @@ def test_attachment_fallback_text_round_trips(store: SessionStore):
     assert loaded.attachments[0].data == att.data
 
 
+def test_text_and_binary_attachments_round_trip(store: SessionStore):
+    import base64
+
+    sid = new_session_id()
+    txt = Attachment(
+        kind="text",
+        media_type="text/x-python",
+        data=base64.b64encode(b"x = 1\n").decode("ascii"),
+        name="a.py",
+        fallback_text="x = 1\n",
+    )
+    binary = Attachment(
+        kind="binary",
+        media_type="application/octet-stream",
+        data=base64.b64encode(b"\x00\x01\x02\x03").decode("ascii"),
+        name="b.bin",
+        fallback_text="[binary file saved to attachments/b.bin]",
+    )
+    store.append(sid, Message.user("two files", attachments=[txt, binary]))
+    loaded = store.messages(sid)[0]
+    assert loaded.attachments[0].kind == "text"
+    assert loaded.attachments[0].fallback_text == "x = 1\n"
+    assert loaded.attachments[1].kind == "binary"
+    assert base64.b64decode(loaded.attachments[1].data) == b"\x00\x01\x02\x03"
+
+
 def test_messages_salvages_rows_with_stale_attachments(store: SessionStore):
     # A row whose attachments fail *today's* validation (e.g. written before
     # the rules tightened) must not brick the session: the text survives, the

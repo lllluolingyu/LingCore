@@ -212,3 +212,74 @@ def test_fallback_text_is_truncated_never_rejected():
     )
     assert len(att.fallback_text) == FALLBACK_TEXT_MAX_CHARS
     assert att.fallback_text.endswith("[fallback text truncated]")
+
+
+# --------------------------------------------------------------------------- #
+# text / binary attachment kinds                                               #
+# --------------------------------------------------------------------------- #
+
+
+def test_text_attachment_validates_and_inlines_content():
+    att = Attachment(
+        kind="text",
+        media_type="text/x-python",
+        data=_b64(b"print('hi')\n"),
+        name="a.py",
+        fallback_text="print('hi')\n",
+    )
+    wire = Message.user("explain", attachments=[att]).to_openai()
+    # text is never a native modality, so the message collapses to a string
+    # with the file's content inlined.
+    assert isinstance(wire["content"], str)
+    assert "explain" in wire["content"]
+    assert "a.py" in wire["content"]
+    assert "print('hi')" in wire["content"]
+
+
+def test_binary_attachment_renders_its_note_verbatim():
+    note = "[binary file saved to attachments/x.bin (application/octet-stream, 4 bytes)]"
+    att = Attachment(
+        kind="binary",
+        media_type="application/octet-stream",
+        data=_b64(b"\x00\x01\x02\x03"),
+        name="x.bin",
+        fallback_text=note,
+    )
+    wire = Message.user("", attachments=[att]).to_openai()
+    assert wire["content"] == note
+
+
+def test_text_attachment_rejects_nul_bytes():
+    with pytest.raises(ValidationError, match="NUL"):
+        Attachment(kind="text", media_type="text/plain", data=_b64(b"a\x00b"))
+
+
+def test_text_attachment_rejects_malformed_media_type():
+    with pytest.raises(ValidationError, match="invalid media type"):
+        Attachment(kind="text", media_type="not a type", data=_b64(b"hello"))
+
+
+def test_text_and_image_mix_keeps_native_image_plus_inlined_text():
+    img = _png()
+    txt = Attachment(
+        kind="text",
+        media_type="text/plain",
+        data=_b64(b"notes"),
+        name="n.txt",
+        fallback_text="notes",
+    )
+    wire = Message.user("look", attachments=[img, txt]).to_openai()
+    parts = wire["content"]
+    assert [p["type"] for p in parts] == ["text", "image_url"]
+    assert "look" in parts[0]["text"] and "notes" in parts[0]["text"]
+
+
+def test_old_style_image_dict_still_validates():
+    # Back-compat: a stored row carrying only image/file kinds loads unchanged.
+    att = Attachment.model_validate({
+        "kind": "image",
+        "media_type": "image/png",
+        "data": _b64(b"\x89PNG\r\n\x1a\nrest"),
+        "name": "p.png",
+    })
+    assert att.kind == "image" and att.media_type == "image/png"

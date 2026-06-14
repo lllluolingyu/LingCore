@@ -24,7 +24,6 @@ persona:
 
 tools:
   - read_file
-  - read_media
   - pdf2md
   - write_file
   - edit_file

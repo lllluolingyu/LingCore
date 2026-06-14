@@ -20,11 +20,14 @@ from lingcore.media_types import (
     MAX_ATTACHMENTS,
     TOTAL_ATTACHMENT_MAX_BYTES,
     decoded_payload_size,
+    is_valid_media_type,
     kind_for_media_type,
     max_bytes_for,
     sanitize_name,
     supported_media_types,
     validate_base64_payload,
+    validate_binary_payload,
+    validate_text_payload,
 )
 
 Role = Literal["system", "user", "assistant", "tool"]
@@ -40,11 +43,13 @@ class Attachment(BaseModel):
 
     ``data`` is the raw base64 payload without a ``data:`` URI prefix. The wire
     adapter adds that provider-specific wrapper in ``Message.to_openai``.
-    ``fallback_text`` is an optional text stand-in (extracted PDF text, a
-    vision model's description, or a diagnostic note) computed once when the
-    attachment enters a conversation whose model lacks the native modality;
-    the original payload is always kept so a later modality upgrade restores
-    native delivery.
+    There are four ``kind``s: ``image``/``file`` may ride natively when the
+    model accepts them; ``text`` carries a decodable UTF-8 file whose content
+    is inlined as prompt text; ``binary`` is an opaque file the model reaches
+    only through workspace tools. ``fallback_text`` is an optional text
+    stand-in (extracted PDF text, a vision description, an inlined text file,
+    or a diagnostic note) computed once at ingest; the original payload is
+    always kept so a later modality upgrade restores native delivery.
     """
 
     kind: AttachmentKind
@@ -55,19 +60,29 @@ class Attachment(BaseModel):
 
     @model_validator(mode="after")
     def _validate_attachment(self) -> Attachment:
-        expected = kind_for_media_type(self.media_type)
-        if expected is None:
-            raise ValueError(f"unsupported media type: {self.media_type!r}")
-        if self.kind != expected:
-            raise ValueError(
-                f"attachment kind {self.kind!r} does not match media type "
-                f"{self.media_type!r}"
+        if self.kind in ("image", "file"):
+            expected = kind_for_media_type(self.media_type)
+            if expected is None:
+                raise ValueError(f"unsupported media type: {self.media_type!r}")
+            if self.kind != expected:
+                raise ValueError(
+                    f"attachment kind {self.kind!r} does not match media type "
+                    f"{self.media_type!r}"
+                )
+            normalized, _ = validate_base64_payload(
+                self.data,
+                media_type=self.media_type,
+                max_bytes=max_bytes_for(self.kind),
             )
-        normalized, _ = validate_base64_payload(
-            self.data,
-            media_type=self.media_type,
-            max_bytes=max_bytes_for(self.kind),
-        )
+        else:  # text / binary: free-form media type, no magic signature
+            if not is_valid_media_type(self.media_type):
+                raise ValueError(f"invalid media type: {self.media_type!r}")
+            validate = (
+                validate_text_payload
+                if self.kind == "text"
+                else validate_binary_payload
+            )
+            normalized, _ = validate(self.data, max_bytes=max_bytes_for(self.kind))
         self.data = normalized
         if self.name is not None:
             self.name = sanitize_name(self.name)
@@ -255,18 +270,27 @@ def _fallback_block(attachment: Attachment) -> str:
     """Text stand-in for an attachment the model can't receive natively."""
     label = attachment.name or _default_filename(attachment)
     if attachment.fallback_text:
-        return (
-            f"[{attachment.kind} {label!r} ({attachment.media_type}) as text:]\n"
-            f"{attachment.fallback_text}"
+        if attachment.kind == "binary":
+            # The binary fallback is itself a self-contained note (set at
+            # ingest) pointing at the workspace copy — don't re-wrap it.
+            return attachment.fallback_text
+        header = (
+            f"[contents of attached file {label!r} ({attachment.media_type}):]"
+            if attachment.kind == "text"
+            else f"[{attachment.kind} {label!r} ({attachment.media_type}) as text:]"
         )
+        return f"{header}\n{attachment.fallback_text}"
     return (
         f"[{attachment.kind} {label!r} ({attachment.media_type}) is attached, "
-        "but this model does not support that modality and no text fallback "
-        "is available]"
+        "but this model cannot receive it and no text fallback is available]"
     )
 
 
 def _default_filename(attachment: Attachment) -> str:
+    if attachment.kind == "text":
+        return "attachment.txt"
+    if attachment.kind == "binary":
+        return "attachment.bin"
     if attachment.media_type == "application/pdf":
         return "attachment.pdf"
     subtype = (
@@ -293,7 +317,12 @@ def _validate_attachment_list(attachments: list[Attachment]) -> list[Attachment]
         )
     known = supported_media_types()
     for attachment in attachments:
-        if (attachment.kind, attachment.media_type) not in known:
+        # image/file must name a known native media type; text/binary carry a
+        # free-form type already vetted by the per-attachment validator.
+        if (
+            attachment.kind in ("image", "file")
+            and (attachment.kind, attachment.media_type) not in known
+        ):
             raise ValueError(f"unsupported media type: {attachment.media_type!r}")
     return attachments
 
