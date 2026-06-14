@@ -55,11 +55,11 @@ tool_options:
 # `uv sync`). Without an image fallback, attached images become a short
 # "cannot view images" note. To have them described by a vision-capable
 # model on the same endpoint instead, uncomment and name one:
-# media_fallback:
-#   image:
-#     model: qwen3.5-vl
-#     base_url: ${LINGCORE_BASE_URL:-https://luolingyu.com/v1}
-#     api_key_env: ${LINGCORE_API_KEY_ENV:-LLY_API_KEY}
+media_fallback:
+  image:
+    model: Qwen/Qwen3.6-27B
+    base_url: ${LINGCORE_BASE_URL:-https://luolingyu.com/v1}
+    api_key_env: ${LINGCORE_API_KEY_ENV:-LLY_API_KEY}
 
 memory:
   max_messages: 60
