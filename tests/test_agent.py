@@ -84,12 +84,12 @@ async def test_tool_call_then_final(workspace):
     results = [e for e in events if isinstance(e, ToolResultEvent)]
     assert starts[0].call.name == "read_file"
     assert results[0].result.ok is True
-    assert results[0].result.content == "hello"
+    assert results[0].result.content == "1\thello"  # read_file is line-numbered
     assert isinstance(events[-1], Final)
 
     # The model saw the tool result on its second turn.
     second_turn_msgs = llm.calls[1]
-    assert any(m.role == "tool" and m.content == "hello" for m in second_turn_msgs)
+    assert any(m.role == "tool" and m.content == "1\thello" for m in second_turn_msgs)
 
 
 async def test_tool_output_attachments_are_hoisted(workspace):
@@ -294,7 +294,7 @@ async def test_parallel_tool_calls(workspace):
     agent = _agent(llm, workspace)
     events = await _drain(agent, "read both")
     results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert {r.result.content for r in results} == {"hello", "world"}
+    assert {r.result.content for r in results} == {"1\thello", "1\tworld"}
 
 
 async def test_max_iters_emits_error(workspace):

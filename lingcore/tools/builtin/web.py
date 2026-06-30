@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from lingcore.errors import ToolError
 from lingcore.tools import ToolContext, tool
+from lingcore.tools.builtin._offload import DEFAULT_OFFLOAD_OVER_CHARS, offload_text
 
 _MAX_CHARS = 32_000
 _MAX_BYTES = 5_000_000  # hard cap on bytes pulled from the socket before we stop
@@ -218,7 +219,13 @@ async def fetch_url(args: FetchArgs, ctx: ToolContext) -> str:
     if "html" in content_type:
         text = _html_to_text(text)
 
-    if len(text) > _MAX_CHARS:
-        text = text[:_MAX_CHARS] + f"\n... (truncated, {len(text) - _MAX_CHARS} more chars)"
-
-    return f"[{status} {url}]\n\n{text}"
+    # Large pages are staged to a workspace file (read the rest with read_file)
+    # rather than dumped inline; small ones stay inline.
+    body_text = offload_text(
+        ctx,
+        source="fetch",
+        text=text,
+        threshold=int(opts.get("offload_over_chars", DEFAULT_OFFLOAD_OVER_CHARS)),
+        fallback_max_chars=int(opts.get("max_chars", _MAX_CHARS)),
+    )
+    return f"[{status} {url}]\n\n{body_text}"

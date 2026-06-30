@@ -262,26 +262,61 @@ class Agent:
         workspace = profile.workspace_path(base_dir)
         workspace.mkdir(parents=True, exist_ok=True)
 
+        # One effective tool_options dict drives BOTH the ToolContext the tools
+        # see and the auto-compaction injection below — reading the override for
+        # one and the profile for the other would let a caller's override be
+        # silently inverted (profile off + override on wouldn't compact; the
+        # reverse would compact anyway).
+        effective_tool_options = (
+            tool_options if tool_options is not None else dict(profile.tool_options)
+        )
         tool_ctx = ToolContext(
             workspace=workspace,
             confirm=confirm,
-            options=tool_options if tool_options is not None else dict(profile.tool_options),
+            options=effective_tool_options,
             profile_dir=source_dir,
         )
+        # Persistent-memory auto-compaction: inject the summarizer (the main
+        # client, duck-typed) so the memory tool can condense memory.md at its
+        # length limit instead of hard-failing. Opt-in via tool_options.memory.
+        mem_tool_opts = effective_tool_options.get("memory", {})
+        if "memory" in profile.tools and mem_tool_opts.get("auto_compact", False):
+            from lingcore.tools.builtin.memory import MEMORY_SUMMARIZER_KEY
+
+            tool_ctx.options[MEMORY_SUMMARIZER_KEY] = client
         mem = WindowMemory(
             max_messages=profile.memory.max_messages,
             max_tokens=profile.memory.max_tokens,
             model=profile.llm.model,
+            evict_to_ratio=profile.memory.evict_to_ratio,
         )
         memory: ShortTermMemory = mem
+        # Compaction wraps the window when enabled: it summarizes old history
+        # (via the main client, duck-typed) before the window's eviction fires.
+        if profile.memory.compaction.enabled:
+            from lingcore.memory import SummarizingMemory
+
+            cc = profile.memory.compaction
+            memory = SummarizingMemory(
+                mem,
+                summarizer=client,
+                compact_at_ratio=cc.compact_at_ratio,
+                keep_recent_ratio=cc.keep_recent_ratio,
+                max_summary_chars=cc.max_summary_chars,
+            )
         sid = session_id
         restored_turn_index = 0
         if session_store is not None:
             from lingcore.sessions import attach_session
 
             memory, sid, restored_turn_index = attach_session(
-                mem, session_store, session_id
+                memory, session_store, session_id
             )
+        # Prompt-cache routing key: bind same-session requests to one warm node.
+        # Set post-construction now that the session id is known; only on a real
+        # LLMClient we built (a test-injected fake is left untouched).
+        if profile.llm.send_prompt_cache_key and sid and isinstance(client, LLMClient):
+            client._prompt_cache_key = sid
         guardrail = _build_guardrail(profile.guardrail.policy)
 
         # --- Dynamic skill state (only when the activate_skill tool is enabled) ---
@@ -399,6 +434,7 @@ class Agent:
                 attachments = await self.media_adapter.prepare(attachments)
         self.memory.add(Message.user(text, attachments=attachments))
 
+        compacted_this_turn = False
         for _ in range(self.max_iters):
             active = tuple(self.skill_state.active) if self.skill_state else ()
             # Re-compose every iteration so skill activation and memory writes
@@ -410,6 +446,19 @@ class Agent:
                 active_skills=active,
             )
             system_prompt = await self.composer.compose(compose_ctx)
+
+            # Turn-boundary compaction: once per turn, before the first request,
+            # so that request already sees the compacted context. Done here (not
+            # mid tool-loop) so within-turn iterations stay append-only and
+            # cache-stable. The system prompt is passed so the trigger measures
+            # the same footprint the window does. No-op unless a
+            # SummarizingMemory is configured; never raises.
+            if not compacted_this_turn:
+                compacted_this_turn = True
+                compacted = await self.memory.maybe_compact(system_prompt)
+                if compacted is not None:
+                    yield compacted
+
             self._turn_index += 1
 
             messages = self.memory.render(system_prompt)

@@ -23,6 +23,15 @@ OpenAI-compatible endpoint by pointing at a different `base_url`.
   model and a `@tool` decorator. The coding agent ships with file read/write/
   edit, patch, directory listing, search, URL fetch, and a confirmation-gated
   shell.
+- **Cache-aware context** — built so the request prefix stays stable and
+  provider prompt-caching actually hits. Tool output is kept lean and
+  deterministic (`read_file` is paginated + line-numbered; heavy `run_shell` /
+  `fetch_url` output is offloaded to a workspace file and read back on demand);
+  the conversation window evicts in stable chunks instead of sliding every turn;
+  and when it nears full, the oldest history is **compacted** (summarized) rather
+  than dropped. An opt-in `llm.send_prompt_cache_key` pins a session's requests
+  to the same cache node, and the persistent `memory.md` can likewise
+  auto-compact at a size limit instead of refusing writes.
 - **Multimodal with graceful degradation** — attach any file via CLI `@path`
   or the web UI; it is copied into the workspace and announced to the model,
   and the agent can also attach a workspace image/PDF with `read_file`. A
@@ -193,7 +202,7 @@ events.py    AgentEvent union the loop emits
 agent.py     the async run loop + Agent.from_profile  ← the core
 composer.py  PromptComposer seam: per-turn system-prompt assembly
 config.py    AgentProfile + YAML loading with ${ENV} expansion
-memory.py    ShortTermMemory protocol + WindowMemory
+memory.py    ShortTermMemory protocol + WindowMemory (prefix-stable eviction) + SummarizingMemory (compaction)
 sessions.py  SessionStore (SQLite per profile dir) + SessionMemory — history & resume
 skills.py    Skill / SkillState / load_skill_tools — skills, incl. code-shipping
 guardrails.py  Guardrail protocol + NoopGuardrail (pre/post hooks)
@@ -209,7 +218,7 @@ set of invariants.
 ## Development
 
 ```bash
-uv run pytest -q          # full suite (256 tests)
+uv run pytest -q          # full suite (402 tests)
 uv run pytest tests/test_agent.py -q
 ```
 
@@ -221,7 +230,7 @@ suite needs no network or API key.
 `run_shell` executes arbitrary commands. The workspace bounds file tools
 (path-escape is blocked and tested), but it is **not** a sandbox for the shell —
 a command can still reach outside it. The confirmation gate, command timeout,
-and output truncation are the current mitigations; true isolation (containers,
+and output truncation/offload are the current mitigations; true isolation (containers,
 seccomp) is a deliberate next step.
 
 `fetch_url` reduces SSRF risk by resolving each host (and every redirect hop)

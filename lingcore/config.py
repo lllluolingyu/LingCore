@@ -103,6 +103,12 @@ class LLMCfg(BaseModel):
     modalities: list[NativeModality] = Field(
         default_factory=lambda: ["image", "file"]
     )
+    # Send an OpenAI ``prompt_cache_key`` (the session id) with every request so
+    # same-session traffic routes to the same warm cache node — the routing lever
+    # that lifts the realized prompt-cache hit rate on top of a stable prefix.
+    # Off by default: a strict OpenAI-compatible server (Ollama/vLLM/proxy) may
+    # reject the unknown body field. Flip it on for an endpoint that honors it.
+    send_prompt_cache_key: bool = False
 
     @field_validator("modalities")
     @classmethod
@@ -168,11 +174,45 @@ class MediaFallbackCfg(BaseModel):
         return self
 
 
+class CompactionCfg(BaseModel):
+    """Summarize-then-evict policy for a nearly-full window.
+
+    When the working set reaches ``compact_at_ratio`` of ``max_tokens``, the
+    oldest history is summarized by the model into one compact note while the
+    most recent ``keep_recent_ratio`` of context is kept verbatim. If the result
+    still exceeds the hard cap, ``WindowMemory``'s eviction floor takes over.
+    Off by default — compaction costs one summarizer call; enable it per profile.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    compact_at_ratio: float = Field(default=0.85, gt=0, le=1.0)
+    keep_recent_ratio: float = Field(default=0.35, gt=0, lt=1.0)
+    max_summary_chars: int = Field(default=4_000, ge=200)
+
+    @model_validator(mode="after")
+    def _recent_below_trigger(self) -> "CompactionCfg":
+        if self.keep_recent_ratio >= self.compact_at_ratio:
+            raise ValueError(
+                "compaction.keep_recent_ratio must be < compact_at_ratio, else "
+                "compaction could never shrink the window"
+            )
+        return self
+
+
 class MemoryCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_messages: int = 40
     max_tokens: int = 12_000
+    # Fraction of ``max_tokens`` the window keeps after an eviction. Eviction is
+    # chunked down to this low-water mark (hysteresis) only when a hard cap is
+    # breached, so the rendered prefix stays byte-stable across many turns
+    # instead of sliding every request — the key to a high prompt-cache hit
+    # rate. ``1.0`` reproduces the legacy trim-to-the-cap-every-render behavior.
+    evict_to_ratio: float = Field(default=0.5, gt=0, le=1.0)
+    compaction: CompactionCfg = Field(default_factory=CompactionCfg)
 
 
 class LoopCfg(BaseModel):

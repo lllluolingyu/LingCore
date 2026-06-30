@@ -19,6 +19,7 @@ from rich.markup import escape
 
 from lingcore.events import (
     AgentEvent,
+    Compacted,
     Error,
     Final,
     SkillActivated,
@@ -191,6 +192,12 @@ class CLIFrontend:
                 self._break_line()
                 verb = "activated" if active else "deactivated"
                 self.console.print(f"[dim]⚙ skill {verb}: {name}[/]")
+            case Compacted(summarized_messages, before_tokens, after_tokens):
+                self._break_line()
+                self.console.print(
+                    f"[dim]⊞ compacted {summarized_messages} earlier message(s) → "
+                    f"summary (~{before_tokens} → ~{after_tokens} tokens)[/]"
+                )
             case StreamRetry(attempt, max_attempts, reason, discarded_chars):
                 self._break_line()
                 note = " — partial reply above discarded" if discarded_chars else ""

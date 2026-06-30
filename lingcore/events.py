@@ -71,6 +71,22 @@ class SkillActivated:
     active: bool
 
 
+@dataclass(slots=True)
+class Compacted:
+    """Old history was summarized into a compact note at the start of a turn.
+
+    A turn-boundary event: the working set was over ``compact_at_ratio`` of the
+    token budget, so ``summarized_messages`` older messages were replaced by one
+    summary, shrinking the window from ``before_tokens`` to ``after_tokens``.
+    Frontends surface it so a user understands why earlier turns now read as a
+    summary. The full history is still preserved in the session store.
+    """
+
+    summarized_messages: int
+    before_tokens: int
+    after_tokens: int
+
+
 AgentEvent = (
     TextDelta
     | ToolCallStarted
@@ -79,4 +95,5 @@ AgentEvent = (
     | Final
     | Error
     | SkillActivated
+    | Compacted
 )

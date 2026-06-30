@@ -11,6 +11,9 @@ llm:
   model: ${LINGCORE_MODEL:-claude-opus-4-8}
   base_url: ${LINGCORE_BASE_URL:-https://luolingyu.com/v1}
   api_key_env: ${LINGCORE_API_KEY_ENV:-LLY_API_KEY}
+  # Route same-session requests to the same warm prompt-cache node. Turn off if
+  # your endpoint rejects the prompt_cache_key field.
+  send_prompt_cache_key: true
   sampling:
     temperature: 0.2
 
@@ -34,6 +37,10 @@ tool_options:
   run_shell:
     timeout: 60
     require_confirmation: true
+    # Stage shell output longer than this to <workspace>/.lingcore/tool-output/
+    # and return a lean preview + path (read the rest with read_file). Set to 0
+    # to disable and fall back to truncation at max_output_chars.
+    offload_over_chars: 8000
     allow_patterns:
       - "python -m pytest"
       - "python3 -m pytest"
@@ -42,10 +49,27 @@ tool_options:
       - "cat "
       - "git status"
       - "git diff"
+  fetch_url:
+    offload_over_chars: 8000
+  read_file:
+    # Read large files in slices; the model can page with offset/limit.
+    max_lines: 2000
+    max_line_chars: 2000
+  list_dir:
+    max_entries: 200
 
 memory:
   max_messages: 50
   max_tokens: 16000
+  # Evict in one chunk down to 50% of the budget (hysteresis) so the rendered
+  # prefix stays stable across many turns — the key to prompt-cache hits.
+  evict_to_ratio: 0.5
+  # Near-full? Summarize the oldest history first; eviction is the fallback.
+  compaction:
+    enabled: true
+    compact_at_ratio: 0.85
+    keep_recent_ratio: 0.35
+    max_summary_chars: 4000
 
 loop:
   max_iters: 30

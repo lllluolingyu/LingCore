@@ -16,18 +16,32 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from lingcore.errors import ConfigError, ToolError
+from lingcore.message import Message
 from lingcore.tools import ToolContext, tool
 
 # The installed package root — writing memory there is forbidden.
 _PACKAGE_DIR = Path(__file__).parent.parent.parent.resolve()
 
 _DEFAULT_MAX_BYTES = 65_536
+_DEFAULT_COMPACT_AT_RATIO = 0.8
 _HEADING = re.compile(r"^## (.+)$", re.MULTILINE)
+
+# ctx.options key under which from_profile injects the duck-typed summarizer used
+# for auto-compaction (mirrors skill.py's SKILL_STATE_KEY). Absent ⇒ disabled.
+MEMORY_SUMMARIZER_KEY = "_memory_summarizer"
+
+_MEMORY_COMPACT_SYSTEM = (
+    "You condense an AI agent's long-term memory file. Merge duplicate or "
+    "overlapping entries, drop superseded or stale notes, and keep every durable "
+    "fact, decision, and user preference. Preserve the Markdown structure: each "
+    "entry is a '## key' heading followed by its body. Output only the condensed "
+    "memory file — no preamble or commentary."
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -84,6 +98,41 @@ def _serialise(entries: dict[str, str]) -> str:
     if not entries:
         return ""
     return "\n\n".join(f"## {k}\n{v}" for k, v in entries.items()) + "\n"
+
+
+async def _compact_memory(summarizer: Any, content: str, max_bytes: int) -> str | None:
+    """Condense ``memory.md`` via the duck-typed summarizer.
+
+    Returns the condensed file (re-normalized to canonical ``## key`` form and
+    within ``max_bytes``) or ``None`` on any failure — a missing/broken
+    summarizer, an unparseable reply, or one that didn't shrink enough — so the
+    caller can fall back to the hard-cap guard. Never raises (invariant: a tool
+    failure becomes a ToolResult, and compaction must not turn a write into a
+    crash). Reached through the same ``stream`` seam as the rest of the runtime,
+    so this module imports nothing from ``llm.py``.
+    """
+    request = [
+        Message.system(_MEMORY_COMPACT_SYSTEM),
+        Message.user(
+            f"Condense this memory file to well under {max_bytes} bytes, keeping "
+            f"the '## key' + body format:\n\n{content}"
+        ),
+    ]
+    try:
+        parts: list[str] = []
+        async for chunk in summarizer.stream(request, tools=None):
+            if getattr(chunk, "text_delta", ""):
+                parts.append(chunk.text_delta)
+        condensed = "".join(parts).strip()
+    except Exception:
+        return None
+    entries = _parse(condensed)
+    if not entries:
+        return None  # no ## sections parsed → unusable, keep the original
+    normalized = _serialise(entries)  # canonical form; drops any stray preamble
+    if len(normalized.encode()) > max_bytes:
+        return None  # didn't shrink enough
+    return normalized
 
 
 # --------------------------------------------------------------------------- #
@@ -148,8 +197,33 @@ async def memory(args: MemoryArgs, ctx: ToolContext) -> str:
         del entries[args.key]
 
     new_content = _serialise(entries)
+    note = ""
 
-    # Enforce max_bytes on the *final* file content.
+    # Auto-compaction: when the file crosses the soft length limit, condense it
+    # with the injected summarizer instead of hard-failing. memory.md changes
+    # only on write, so this is the precise trigger point. Gated on BOTH the
+    # opt-in flag and an injected summarizer, so a directly-constructed context
+    # (tests, alternate entrypoints) can't compact unless auto_compact is set.
+    # The max_bytes guard below still catches a disabled/unavailable summarizer
+    # or one that didn't shrink the file enough.
+    summarizer = ctx.options.get(MEMORY_SUMMARIZER_KEY)
+    compact_at = int(
+        max_bytes * float(opts.get("compact_at_ratio", _DEFAULT_COMPACT_AT_RATIO))
+    )
+    if (
+        opts.get("auto_compact", False)
+        and summarizer is not None
+        and len(new_content.encode()) > compact_at
+    ):
+        condensed = await _compact_memory(summarizer, new_content, max_bytes)
+        if condensed is not None:
+            before_n = len(new_content.encode())
+            new_content = condensed
+            note = (
+                f" [memory auto-compacted {before_n}→{len(new_content.encode())} bytes]"
+            )
+
+    # Enforce max_bytes on the *final* file content (fallback guard).
     if len(new_content.encode()) > max_bytes:
         raise ToolError(
             f"memory file would exceed max_bytes ({max_bytes}); "
@@ -158,4 +232,4 @@ async def memory(args: MemoryArgs, ctx: ToolContext) -> str:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(new_content, encoding="utf-8")
-    return f"{args.action}: {args.key!r} ok"
+    return f"{args.action}: {args.key!r} ok{note}"

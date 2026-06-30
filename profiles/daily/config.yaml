@@ -45,6 +45,10 @@ tool_options:
     # Persistent notes/preferences, profile-scoped (resolves against this dir).
     path: memory.md
     max_bytes: 65536
+    # When the file passes compact_at_ratio × max_bytes, condense it with the
+    # model (merge/drop stale notes) instead of hard-failing the write.
+    auto_compact: true
+    compact_at_ratio: 0.8
   activate_skill:
     skills_dir: skills
     allow_concurrent: false

@@ -46,7 +46,7 @@ from lingcore.message import Message
 
 if TYPE_CHECKING:
     from lingcore.config import AgentProfile
-    from lingcore.memory import WindowMemory
+    from lingcore.memory import ShortTermMemory, WindowMemory
 
 # The installed package root — a sessions.db inside it is refused (gracefully).
 _PACKAGE_DIR = Path(__file__).parent.resolve()
@@ -340,7 +340,7 @@ class SessionMemory:
     while the store keeps the *full* history regardless of the window.
     """
 
-    def __init__(self, inner: "WindowMemory", store: SessionStore, session_id: str) -> None:
+    def __init__(self, inner: "ShortTermMemory", store: SessionStore, session_id: str) -> None:
         self._inner = inner
         self._store = store
         self._session_id = session_id
@@ -351,6 +351,11 @@ class SessionMemory:
 
     def render(self, system_prompt: str) -> list[Message]:
         return self._inner.render(system_prompt)
+
+    async def maybe_compact(self, system_prompt: str = ""):
+        # Compaction rewrites only the in-memory working set; the store keeps the
+        # full history, so the summary is never persisted (resume replays raw).
+        return await self._inner.maybe_compact(system_prompt)
 
     @property
     def messages(self) -> list[Message]:
@@ -392,7 +397,7 @@ def trim_dangling(messages: list[Message]) -> list[Message]:
 
 
 def attach_session(
-    inner: "WindowMemory", store: SessionStore, session_id: str | None
+    inner: "ShortTermMemory", store: SessionStore, session_id: str | None
 ) -> tuple[SessionMemory, str, int]:
     """Hydrate ``inner`` from the store and wrap it for recording.
 

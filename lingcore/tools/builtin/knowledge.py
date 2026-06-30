@@ -19,9 +19,11 @@ from pydantic import BaseModel, Field
 
 from lingcore.errors import ConfigError, ToolError
 from lingcore.tools import ToolContext, tool
+from lingcore.tools.builtin._offload import RUNTIME_DIRNAME
 
 _MAX_READ_BYTES = 256 * 1024
 _MAX_HITS = 50
+_GREP_LINE_CHARS = 200
 _DEFAULT_SOURCES = ["**/*"]
 
 
@@ -34,17 +36,26 @@ def _iter_source_files(base: Path, sources: list[str]):
         pat = Path(pattern)
         if pat.is_absolute() or any(part == ".." for part in pat.parts):
             raise ToolError(f"knowledge source escapes workspace: {pattern!r}")
-        for p in base.glob(pattern):
+        for p in sorted(base.glob(pattern)):
             try:
                 full = p.resolve()
             except OSError:
                 continue
             if not _confined(base, full) or not full.is_file():
                 continue
+            if RUNTIME_DIRNAME in full.relative_to(base).parts:
+                continue  # skip LingCore's own runtime artifacts
             yield full
 
 
-def _grep(base: Path, sources: list[str], query: str) -> list[str]:
+def _grep(
+    base: Path,
+    sources: list[str],
+    query: str,
+    *,
+    max_hits: int = _MAX_HITS,
+    max_line_chars: int = _GREP_LINE_CHARS,
+) -> list[str]:
     hits: list[str] = []
     try:
         rx = re.compile(query)
@@ -62,9 +73,9 @@ def _grep(base: Path, sources: list[str], query: str) -> list[str]:
         for lineno, line in enumerate(text.splitlines(), start=1):
             matched = (rx.search(line) if rx else False) or (query in line)
             if matched:
-                hits.append(f"{rel}:{lineno}: {line.strip()[:200]}")
-                if len(hits) >= _MAX_HITS:
-                    hits.append(f"... (truncated at {_MAX_HITS} hits)")
+                hits.append(f"{rel}:{lineno}: {line.strip()[:max_line_chars]}")
+                if len(hits) >= max_hits:
+                    hits.append(f"... (truncated at {max_hits} hits)")
                     return hits
     return hits
 
@@ -110,7 +121,13 @@ async def knowledge(args: KnowledgeArgs, ctx: ToolContext) -> str:
             raise ConfigError(
                 f"knowledge backend {backend!r} is not implemented yet; use backend: grep"
             )
-        hits = _grep(base, sources, args.query)
+        hits = _grep(
+            base,
+            sources,
+            args.query,
+            max_hits=int(opts.get("max_hits", _MAX_HITS)),
+            max_line_chars=int(opts.get("max_line_chars", _GREP_LINE_CHARS)),
+        )
         return "\n".join(hits) if hits else "(no matches)"
 
     raise ToolError(f"unknown knowledge action: {args.action!r}")

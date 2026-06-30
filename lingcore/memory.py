@@ -1,22 +1,37 @@
 """Short-term memory.
 
 ``WindowMemory`` keeps the system prompt plus the most recent messages within
-both a message-count and a token budget. The one subtlety that matters for
-correctness: an assistant message carrying ``tool_calls`` and the ``tool``
-messages answering them form an atomic block. OpenAI rejects a ``tool``
-message that does not follow its matching ``tool_calls``, so trimming drops
-whole blocks from the front rather than splitting one.
+both a message-count and a token budget. Two properties matter:
 
-The ``summarize`` policy is a future implementation behind the same Protocol;
-it is intentionally not built yet.
+* **Block-aware trimming.** An assistant message carrying ``tool_calls`` and the
+  ``tool`` messages answering them form an atomic block. OpenAI rejects a
+  ``tool`` message that does not follow its matching ``tool_calls``, so trimming
+  drops whole blocks rather than splitting one.
+* **Prefix-stable eviction.** Eviction is *hysteretic*: a monotonic floor marks
+  how many oldest blocks have been dropped, and it only advances — in one chunk,
+  down to ``evict_to_ratio`` of the budget — when a hard cap is breached.
+  Between evictions the rendered message list is append-only, so consecutive
+  requests share a byte-identical prefix and the model's prompt cache hits. The
+  old behaviour (trim to just under the cap on every render) shifted every
+  surviving message's position and invalidated the cache; ``evict_to_ratio=1.0``
+  restores it.
+
+``SummarizingMemory`` layers an LLM compaction step in front of that eviction:
+when the working set is nearly full it summarizes the oldest history into one
+note (keeping the recent tail verbatim) and only falls back to eviction if the
+result is still over the hard cap. It composes a ``WindowMemory`` so the window
+itself stays free of any LLM dependency (the summarizer is duck-typed, reached
+through the same ``stream`` seam as the rest of the runtime).
 """
 
 from __future__ import annotations
 
-from typing import Protocol
+import json
+from typing import Any, Protocol
 
 import tiktoken
 
+from lingcore.events import Compacted
 from lingcore.message import Message
 
 
@@ -24,6 +39,8 @@ class ShortTermMemory(Protocol):
     def add(self, message: Message) -> None: ...
 
     def render(self, system_prompt: str) -> list[Message]: ...
+
+    async def maybe_compact(self, system_prompt: str = "") -> Compacted | None: ...
 
 
 def _encoding(model: str):
@@ -41,11 +58,20 @@ class WindowMemory:
         max_messages: int = 40,
         max_tokens: int = 12_000,
         model: str = "gpt-4o",
+        evict_to_ratio: float = 0.5,
     ) -> None:
         self.max_messages = max_messages
         self.max_tokens = max_tokens
+        # Low-water mark (tokens) eviction drops down to when a hard cap is
+        # breached. Strictly below max_tokens ⇒ hysteresis: the window refills
+        # before the next eviction, so the prefix stays stable across many
+        # turns. evict_to_ratio == 1.0 reproduces the legacy slide-every-render.
+        self._evict_to_tokens = max(1, int(max_tokens * evict_to_ratio))
         self._enc = _encoding(model)
         self._messages: list[Message] = []
+        # Count of oldest blocks permanently evicted; only ever increases, so
+        # the retained window grows append-only between evictions.
+        self._floor = 0
 
     def add(self, message: Message) -> None:
         self._messages.append(message)
@@ -90,27 +116,186 @@ class WindowMemory:
 
     def render(self, system_prompt: str) -> list[Message]:
         blocks = self._blocks()
-        kept: list[list[Message]] = []
-        msg_count = 0
-        tok_count = len(self._enc.encode(system_prompt))
-
-        # Walk newest-to-oldest, keeping whole blocks until a budget is hit.
-        for block in reversed(blocks):
-            b_msgs = len(block)
-            b_toks = sum(self._tokens(m) for m in block)
-            if kept and (
-                msg_count + b_msgs > self.max_messages
-                or tok_count + b_toks > self.max_tokens
-            ):
-                break
-            kept.append(block)
-            msg_count += b_msgs
-            tok_count += b_toks
-
-        flat = [m for block in reversed(kept) for m in block]
+        sys_tokens = len(self._enc.encode(system_prompt))
+        self._advance_floor(blocks, sys_tokens)
+        flat = [m for block in blocks[self._floor :] for m in block]
         return [Message.system(system_prompt), *flat]
+
+    def _advance_floor(self, blocks: list[list[Message]], sys_tokens: int) -> None:
+        """Advance the monotonic eviction floor only when a hard cap is breached.
+
+        The floor never retreats, so ``blocks[self._floor:]`` is a suffix that
+        grows only by appends between evictions — a stable request prefix. When a
+        cap is breached the floor jumps forward, dropping whole oldest blocks
+        down to the token low-water mark (and within the message cap), always
+        keeping at least one block.
+        """
+        n = len(blocks)
+        if n == 0:
+            self._floor = 0
+            return
+        if self._floor > n - 1:
+            self._floor = n - 1  # defensive; floor should never pass the last block
+        block_toks = [sum(self._tokens(m) for m in b) for b in blocks]
+        block_msgs = [len(b) for b in blocks]
+        toks = sys_tokens + sum(block_toks[self._floor :])
+        msgs = sum(block_msgs[self._floor :])
+        if toks <= self.max_tokens and msgs <= self.max_messages:
+            return  # within budget — prefix stays byte-stable, cache hits
+        while self._floor < n - 1 and (
+            toks > self._evict_to_tokens or msgs > self.max_messages
+        ):
+            toks -= block_toks[self._floor]
+            msgs -= block_msgs[self._floor]
+            self._floor += 1
+
+    async def maybe_compact(self, system_prompt: str = "") -> Compacted | None:
+        """No-op: a plain window only evicts; compaction is SummarizingMemory."""
+        return None
 
     # Convenience for tests / inspection.
     @property
     def messages(self) -> list[Message]:
         return list(self._messages)
+
+
+# Prompt for the compaction summarizer. Kept terse and instruction-only so the
+# summary preserves what an agent needs to continue (decisions, paths, tasks).
+_SUMMARY_SYSTEM = (
+    "You compress conversation history for an AI agent. Produce a terse, "
+    "factual summary that preserves goals, decisions, file paths, code changes, "
+    "important tool results, and still-open tasks. Use compact bullet points. "
+    "Do not add preamble, commentary, or a closing remark."
+)
+
+
+class SummarizingMemory:
+    """``ShortTermMemory`` that compacts old history before falling back to the
+    window's eviction.
+
+    Composes a ``WindowMemory`` (so the pure window stays LLM-free): ``add``,
+    ``render`` and ``messages`` delegate straight to it. ``maybe_compact`` —
+    invoked by the loop once per turn, never mid tool-loop — summarizes the
+    oldest blocks via the duck-typed ``summarizer`` (anything with the
+    ``stream`` shape) when the working set is nearly full, then resets the
+    window's floor so the next render starts a fresh, stable prefix. If the
+    summary still leaves the window over the hard cap, ``render``'s eviction
+    floor finishes the job. The summarizer is reached through the same
+    ``stream`` seam as the main model, so this module imports nothing from
+    ``llm.py``.
+    """
+
+    def __init__(
+        self,
+        window: WindowMemory,
+        summarizer: Any,
+        *,
+        compact_at_ratio: float = 0.85,
+        keep_recent_ratio: float = 0.35,
+        max_summary_chars: int = 4_000,
+    ) -> None:
+        self._w = window
+        self._summarizer = summarizer
+        self._compact_at = compact_at_ratio
+        self._keep_recent = keep_recent_ratio
+        self._max_summary_chars = max_summary_chars
+
+    # --- ShortTermMemory delegation -----------------------------------
+    def add(self, message: Message) -> None:
+        self._w.add(message)
+
+    def render(self, system_prompt: str) -> list[Message]:
+        return self._w.render(system_prompt)
+
+    @property
+    def messages(self) -> list[Message]:
+        return self._w.messages
+
+    # --- compaction ----------------------------------------------------
+    async def maybe_compact(self, system_prompt: str = "") -> Compacted | None:
+        msgs = self._w._messages
+        if not msgs:
+            return None
+        max_tokens = self._w.max_tokens
+        # Count the system prompt too, so the trigger measures the same footprint
+        # the window's eviction floor does (a large system prompt must not let
+        # the floor evict before compaction ever fires).
+        reserved = len(self._w._enc.encode(system_prompt)) if system_prompt else 0
+        before = reserved + sum(self._w._tokens(m) for m in msgs)
+        if before < self._compact_at * max_tokens:
+            return None  # not nearly full
+
+        # Block-aware split: keep the most recent blocks (≥ keep_recent budget)
+        # verbatim as the tail; the older head is what gets summarized.
+        blocks = self._w._blocks()
+        keep_budget = self._keep_recent * max_tokens
+        split = len(blocks)  # index of the first tail block
+        tail_toks = 0
+        for idx in range(len(blocks) - 1, -1, -1):
+            b_toks = sum(self._w._tokens(m) for m in blocks[idx])
+            if split < len(blocks) and tail_toks + b_toks > keep_budget:
+                break
+            split = idx
+            tail_toks += b_toks
+        head_msgs = [m for b in blocks[:split] for m in b]
+        if not head_msgs:
+            return None  # nothing old enough to summarize; eviction will guard
+
+        try:
+            summary = await self._summarize(head_msgs)
+        except Exception:
+            # Summarizer failed (network, bad backend, ...): never crash the
+            # loop — leave the messages alone and let eviction guard the cap.
+            return None
+        if not summary.strip():
+            return None
+
+        summary_msg = Message(
+            role="user",
+            name="summary",
+            content=f"[Earlier conversation, summarized]\n{summary}",
+        )
+        tail_msgs = [m for b in blocks[split:] for m in b]
+        self._w._messages = [summary_msg, *tail_msgs]
+        self._w._floor = 0  # new epoch: render re-evaluates the floor from scratch
+        after = reserved + sum(self._w._tokens(m) for m in self._w._messages)
+        return Compacted(
+            summarized_messages=len(head_msgs),
+            before_tokens=before,
+            after_tokens=after,
+        )
+
+    async def _summarize(self, head_msgs: list[Message]) -> str:
+        transcript = _render_transcript(head_msgs)
+        request = [
+            Message.system(_SUMMARY_SYSTEM),
+            Message.user(
+                "Summarize this earlier conversation so the agent can continue "
+                "without the full text:\n\n" + transcript
+            ),
+        ]
+        parts: list[str] = []
+        async for chunk in self._summarizer.stream(request, tools=None):
+            if getattr(chunk, "text_delta", ""):
+                parts.append(chunk.text_delta)
+        summary = "".join(parts).strip()
+        if len(summary) > self._max_summary_chars:
+            summary = summary[: self._max_summary_chars] + "\n[summary truncated]"
+        return summary
+
+
+def _render_transcript(msgs: list[Message]) -> str:
+    """Flatten messages into a plain transcript for the summarizer."""
+    lines: list[str] = []
+    for m in msgs:
+        if m.role == "user":
+            label = "Summary" if m.name == "summary" else "User"
+            lines.append(f"{label}: {m.content}")
+        elif m.role == "assistant":
+            if m.content:
+                lines.append(f"Assistant: {m.content}")
+            for tc in m.tool_calls:
+                lines.append(f"Assistant called {tc.name}({json.dumps(tc.arguments)})")
+        elif m.role == "tool":
+            lines.append(f"Tool[{m.name}]: {m.content}")
+    return "\n".join(lines)

@@ -112,9 +112,15 @@ class LLMClient:
         timeout: float = 120.0,
         http_client: Any = None,
         modalities: "frozenset[str] | list[str] | None" = None,
+        prompt_cache_key: str | None = None,
     ) -> None:
         self.model = model
         self.sampling = sampling or {}
+        # Optional OpenAI prompt-cache routing key (typically the session id):
+        # sent with every request so same-key traffic prefers the same warm
+        # cache node, lifting the realized hit rate. None ⇒ never sent, so an
+        # OpenAI-compatible server that rejects the field is unaffected.
+        self._prompt_cache_key = prompt_cache_key or None
         # Attachment kinds this model accepts as native content parts
         # (LLMCfg.modalities). The full set normalizes to None so the common
         # all-native case stays on Message.to_openai's default fast path.
@@ -153,6 +159,9 @@ class LLMClient:
         # reject an empty tools array.
         if tools:
             kwargs["tools"] = tools
+        # Route same-session requests to the same warm prompt-cache node.
+        if self._prompt_cache_key is not None:
+            kwargs["prompt_cache_key"] = self._prompt_cache_key
         # The SDK applies the client's retry policy to this request: a transient
         # 429/5xx/connection failure before the stream opens is retried (with
         # backoff that honors Retry-After), and once the stream is yielding

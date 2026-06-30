@@ -110,7 +110,19 @@ async def test_fetch_html_stripped(ctx):
     assert "Content here" in out
 
 
-async def test_fetch_truncates(ctx):
+async def test_fetch_offloads_large_body(ctx):
+    p, _ = _patch_client([_FakeResponse("x" * 40_000)])
+    with p:
+        out = await fetch_url(FetchArgs(url="https://example.com/big"), ctx)
+    assert "full output" in out and ".lingcore/tool-output/fetch-" in out
+    assert "200" in out  # status line stays inline
+
+
+async def test_fetch_truncates_when_offload_disabled(tmp_path):
+    ctx = ToolContext(
+        workspace=tmp_path,
+        options={"fetch_url": {"offload_over_chars": 0, "max_chars": 2000}},
+    )
     p, _ = _patch_client([_FakeResponse("x" * 40_000)])
     with p:
         out = await fetch_url(FetchArgs(url="https://example.com/big"), ctx)

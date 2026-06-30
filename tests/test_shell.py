@@ -134,9 +134,24 @@ async def test_timeout_kills_command(tmp_path):
         await run_shell(ShellArgs(command="sleep 5"), ctx)
 
 
-async def test_output_truncation(tmp_path):
+async def test_output_offloaded_when_large(tmp_path):
     ctx = _ctx(tmp_path, require_confirmation=False)
-    # Emit well over the 16k char cap.
+    # Emit well over the 8k offload threshold.
+    out = await run_shell(
+        ShellArgs(command="for i in $(seq 1 5000); do echo 0123456789; done"),
+        ctx,
+    )
+    assert "full output" in out and ".lingcore/tool-output/shell-" in out
+    assert "(exit code: 0)" in out  # command/exit header stays inline
+
+
+async def test_output_truncation_when_offload_disabled(tmp_path):
+    ctx = _ctx(
+        tmp_path,
+        require_confirmation=False,
+        offload_over_chars=0,
+        max_output_chars=2000,
+    )
     out = await run_shell(
         ShellArgs(command="for i in $(seq 1 5000); do echo 0123456789; done"),
         ctx,

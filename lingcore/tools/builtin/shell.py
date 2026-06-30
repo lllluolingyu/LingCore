@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from lingcore.errors import ToolError
 from lingcore.tools import ToolContext, tool
+from lingcore.tools.builtin._offload import DEFAULT_OFFLOAD_OVER_CHARS, offload_text
 
 _MAX_OUTPUT_CHARS = 16_000
 _DEFAULT_TIMEOUT = 60
@@ -34,13 +35,6 @@ _SHELL_CONTROL_TOKENS = (";", "&&", "||", "|", "<", ">", "\n", "\r", "`", "$(", 
 
 class ShellArgs(BaseModel):
     command: str = Field(description="The shell command to execute in the workspace.")
-
-
-def _truncate(text: str) -> str:
-    if len(text) <= _MAX_OUTPUT_CHARS:
-        return text
-    head = text[: _MAX_OUTPUT_CHARS]
-    return f"{head}\n... (truncated, {len(text) - _MAX_OUTPUT_CHARS} more chars)"
 
 
 def _has_shell_control(command: str) -> bool:
@@ -133,10 +127,21 @@ async def run_shell(args: ShellArgs, ctx: ToolContext) -> str:
             f"command timed out after {timeout:g}s and was killed: {args.command!r}"
         ) from None
 
-    output = _truncate(stdout.decode("utf-8", errors="replace")) if stdout else ""
     code = proc.returncode
     header = f"$ {args.command}\n(exit code: {code})\n"
-    return header + (output if output else "(no output)")
+    raw = stdout.decode("utf-8", errors="replace") if stdout else ""
+    if not raw:
+        return header + "(no output)"
+    # Heavy logs are staged to a workspace file (read the rest with read_file)
+    # so they don't bloat the conversation; small output stays inline.
+    body = offload_text(
+        ctx,
+        source="shell",
+        text=raw,
+        threshold=int(opts.get("offload_over_chars", DEFAULT_OFFLOAD_OVER_CHARS)),
+        fallback_max_chars=int(opts.get("max_output_chars", _MAX_OUTPUT_CHARS)),
+    )
+    return header + body
 
 
 def _kill_tree(proc: asyncio.subprocess.Process) -> None:

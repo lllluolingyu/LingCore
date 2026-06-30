@@ -25,6 +25,7 @@ from lingcore.tools.builtin.fs import (
     search,
     write_file,
 )
+from lingcore.tools.builtin._offload import offload_text
 from lingcore.tools.builtin.pdf import Pdf2MdArgs, pdf2md
 
 
@@ -80,7 +81,39 @@ def test_resolve_rejects_symlink_escape(ctx, tmp_path):
 
 
 async def test_read_file(ctx):
-    assert await read_file(ReadArgs(path="a.txt"), ctx) == "hello world"
+    # Line-numbered output: "<lineno>\t<line>" (single-line file → width 1).
+    assert await read_file(ReadArgs(path="a.txt"), ctx) == "1\thello world"
+
+
+async def test_read_file_offset_and_limit(ctx):
+    (ctx.workspace / "big.txt").write_text(
+        "\n".join(f"line{i}" for i in range(1, 11)), encoding="utf-8"
+    )
+    out = await read_file(ReadArgs(path="big.txt", offset=3, limit=2), ctx)
+    assert out.splitlines()[:2] == ["3\tline3", "4\tline4"]
+    assert "showed lines 3–4 of 10" in out
+
+
+async def test_read_file_default_line_cap(ctx):
+    (ctx.workspace / "big.txt").write_text(
+        "\n".join(f"l{i}" for i in range(1, 21)), encoding="utf-8"
+    )
+    ctx.options["read_file"] = {"max_lines": 5}
+    out = await read_file(ReadArgs(path="big.txt"), ctx)
+    assert len([ln for ln in out.splitlines() if "\t" in ln]) == 5
+    assert "of 20; pass offset/limit for more" in out
+
+
+async def test_read_file_offset_past_eof(ctx):
+    out = await read_file(ReadArgs(path="a.txt", offset=99), ctx)
+    assert "past the end" in out
+
+
+async def test_read_file_long_line_truncated(ctx):
+    (ctx.workspace / "long.txt").write_text("x" * 5000, encoding="utf-8")
+    ctx.options["read_file"] = {"max_line_chars": 100}
+    out = await read_file(ReadArgs(path="long.txt"), ctx)
+    assert "+4900 chars" in out
 
 
 async def test_read_missing(ctx):
@@ -111,7 +144,7 @@ async def test_read_file_rejects_other_binary(ctx):
 
 async def test_read_file_reads_text_with_unknown_extension(ctx):
     (ctx.workspace / "notes.bin").write_text("just text", encoding="utf-8")
-    assert await read_file(ReadArgs(path="notes.bin"), ctx) == "just text"
+    assert await read_file(ReadArgs(path="notes.bin"), ctx) == "1\tjust text"
 
 
 async def test_read_file_rejects_escape(ctx):
@@ -256,6 +289,60 @@ async def test_search_skips_symlink_escape(ctx, tmp_path):
         pytest.skip("symlinks not supported on this platform")
 
     assert await search(SearchArgs(query="SECRET_SEARCH"), ctx) == "(no matches)"
+
+
+# --- lean / deterministic output (cache-friendliness) ---------------------
+
+
+async def test_list_dir_caps_entries(ctx):
+    for i in range(10):
+        (ctx.workspace / f"f{i}.txt").write_text("x", encoding="utf-8")
+    ctx.options["list_dir"] = {"max_entries": 4}
+    out = await list_dir(ListArgs(path="."), ctx)
+    assert "more entries)" in out
+    assert len([ln for ln in out.splitlines() if not ln.startswith("…")]) == 4
+
+
+async def test_search_results_are_sorted(ctx):
+    for name in ("z.txt", "a2.txt", "m.txt"):
+        (ctx.workspace / name).write_text("NEEDLE\n", encoding="utf-8")
+    out = await search(SearchArgs(query="NEEDLE"), ctx)
+    paths = [line.split(":")[0] for line in out.splitlines()]
+    assert paths == sorted(paths)
+
+
+async def test_search_skips_runtime_dir(ctx):
+    rt = ctx.workspace / ".lingcore" / "tool-output"
+    rt.mkdir(parents=True)
+    (rt / "shell-abc.txt").write_text("NEEDLE_RT\n", encoding="utf-8")
+    assert await search(SearchArgs(query="NEEDLE_RT"), ctx) == "(no matches)"
+
+
+def test_offload_inline_below_threshold(ctx):
+    assert offload_text(ctx, source="x", text="small", threshold=1000) == "small"
+
+
+async def test_offload_writes_file_readable_via_read_file(ctx):
+    big = "\n".join(f"row{i}" for i in range(1, 501))
+    out = offload_text(ctx, source="shell", text=big, threshold=100)
+    assert "full output" in out and ".lingcore/tool-output/shell-" in out
+    rel = out.split("→")[1].split(";")[0].strip()
+    content = await read_file(ReadArgs(path=rel, limit=3), ctx)
+    assert "1\trow1" in content
+
+
+def test_offload_filename_is_content_stable(ctx):
+    big = "z" * 5000
+    a = offload_text(ctx, source="shell", text=big, threshold=100)
+    b = offload_text(ctx, source="shell", text=big, threshold=100)
+    assert a == b  # identical content → identical file → identical note
+
+
+def test_offload_disabled_truncates(ctx):
+    out = offload_text(
+        ctx, source="shell", text="z" * 5000, threshold=0, fallback_max_chars=100
+    )
+    assert "truncated" in out and len(out) < 200
 
 
 # --- contract / registry --------------------------------------------------

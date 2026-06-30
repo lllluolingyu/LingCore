@@ -15,9 +15,16 @@ from pydantic import BaseModel, Field
 from lingcore.errors import ToolError
 from lingcore.media import attachment_from_path, detect_media, is_probably_binary
 from lingcore.tools import ToolContext, ToolOutput, tool
+from lingcore.tools.builtin._offload import RUNTIME_DIRNAME
 
 _MAX_READ_BYTES = 256 * 1024
 _MAX_SEARCH_HITS = 100
+# Default read window: keep results targetable and light so re-reads stay cheap
+# and the conversation prefix grows slowly (better prompt-cache behavior).
+_READ_MAX_LINES = 2_000
+_READ_MAX_LINE_CHARS = 2_000
+_LIST_MAX_ENTRIES = 200
+_SEARCH_LINE_CHARS = 200
 
 
 def _resolve(ctx: ToolContext, path: str) -> Path:
@@ -45,14 +52,58 @@ def _validate_search_glob(pattern: str) -> None:
 
 class ReadArgs(BaseModel):
     path: str = Field(description="File path relative to the workspace root.")
+    offset: int = Field(
+        default=1, ge=1, description="1-based line number to start reading from."
+    )
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        description="Maximum number of lines to return (capped by the tool default).",
+    )
+
+
+def _format_lines(
+    text: str, *, offset: int, limit: int | None, max_lines: int, max_line_chars: int
+) -> str:
+    """Render file text as ``<lineno>\\t<line>`` over a bounded window.
+
+    Line numbers are absolute (so a slice references correctly), over-long lines
+    are clipped, and a stable marker announces any remainder — keeping a single
+    read light and re-reads cheap.
+    """
+    lines = text.splitlines()
+    total = len(lines)
+    if total == 0:
+        return "(empty file)"
+    start = offset - 1
+    if start >= total:
+        return f"(file has {total} lines; offset {offset} is past the end)"
+    count = max_lines if limit is None else min(limit, max_lines)
+    end = min(start + count, total)
+    width = len(str(end))
+    out: list[str] = []
+    for i in range(start, end):
+        line = lines[i]
+        if len(line) > max_line_chars:
+            line = line[:max_line_chars] + f"… (+{len(line) - max_line_chars} chars)"
+        out.append(f"{i + 1:>{width}}\t{line}")
+    body = "\n".join(out)
+    if end < total:
+        body += (
+            f"\n… (showed lines {start + 1}–{end} of {total}; "
+            "pass offset/limit for more)"
+        )
+    return body
 
 
 @tool(
     description=(
-        "Read a file from the workspace. Returns UTF-8 text for a text file; "
-        "for an image or PDF it attaches the file so the model can view it "
-        "natively (degrading to extracted/described text when the model "
-        "cannot). Use pdf2md instead to read a PDF as cheap markdown text."
+        "Read a file from the workspace as line-numbered text "
+        "(`<lineno>\\t<line>`), starting at `offset` (1-based) for up to `limit` "
+        "lines — read large files in slices instead of all at once. For an image "
+        "or PDF it attaches the file so the model can view it natively (degrading "
+        "to extracted/described text when the model cannot). Use pdf2md instead "
+        "to read a PDF as cheap markdown text."
     )
 )
 async def read_file(args: ReadArgs, ctx: ToolContext) -> str | ToolOutput:
@@ -79,7 +130,14 @@ async def read_file(args: ReadArgs, ctx: ToolContext) -> str | ToolOutput:
         raise ToolError(
             "binary file; not readable as text — inspect it with shell tools if available"
         )
-    return data.decode("utf-8", errors="replace")
+    opts = ctx.options.get("read_file", {}) if ctx.options else {}
+    return _format_lines(
+        data.decode("utf-8", errors="replace"),
+        offset=args.offset,
+        limit=args.limit,
+        max_lines=int(opts.get("max_lines", _READ_MAX_LINES)),
+        max_line_chars=int(opts.get("max_line_chars", _READ_MAX_LINE_CHARS)),
+    )
 
 
 class WriteArgs(BaseModel):
@@ -133,10 +191,18 @@ async def list_dir(args: ListArgs, ctx: ToolContext) -> str:
     full = _resolve(ctx, args.path)
     if not full.is_dir():
         raise ToolError(f"not a directory: {args.path!r}")
+    opts = ctx.options.get("list_dir", {}) if ctx.options else {}
+    max_entries = int(opts.get("max_entries", _LIST_MAX_ENTRIES))
     entries = sorted(
         f"{p.name}/" if p.is_dir() else p.name for p in full.iterdir()
     )
-    return "\n".join(entries) if entries else "(empty)"
+    if not entries:
+        return "(empty)"
+    shown = entries[:max_entries]
+    out = "\n".join(shown)
+    if len(entries) > len(shown):
+        out += f"\n… ({len(entries) - len(shown)} more entries)"
+    return out
 
 
 class SearchArgs(BaseModel):
@@ -148,9 +214,14 @@ class SearchArgs(BaseModel):
 async def search(args: SearchArgs, ctx: ToolContext) -> str:
     base = ctx.workspace.resolve()
     _validate_search_glob(args.glob)
+    opts = ctx.options.get("search", {}) if ctx.options else {}
+    max_hits = int(opts.get("max_hits", _MAX_SEARCH_HITS))
+    max_line_chars = int(opts.get("max_line_chars", _SEARCH_LINE_CHARS))
     hits: list[str] = []
     try:
-        for p in base.glob(args.glob):
+        # Sorted iteration ⇒ byte-stable results across calls (Path.glob order
+        # is filesystem-dependent otherwise).
+        for p in sorted(base.glob(args.glob)):
             try:
                 full = p.resolve()
             except OSError:
@@ -159,6 +230,9 @@ async def search(args: SearchArgs, ctx: ToolContext) -> str:
                 continue
             if not full.is_file():
                 continue
+            rel = p.relative_to(base)
+            if RUNTIME_DIRNAME in rel.parts:
+                continue  # skip LingCore's own runtime artifacts (offloaded output)
             try:
                 if full.stat().st_size > _MAX_READ_BYTES:
                     continue
@@ -167,10 +241,9 @@ async def search(args: SearchArgs, ctx: ToolContext) -> str:
                 continue
             for lineno, line in enumerate(text.splitlines(), start=1):
                 if args.query in line:
-                    rel = p.relative_to(base)
-                    hits.append(f"{rel}:{lineno}: {line.strip()[:200]}")
-                    if len(hits) >= _MAX_SEARCH_HITS:
-                        hits.append(f"... (truncated at {_MAX_SEARCH_HITS} hits)")
+                    hits.append(f"{rel}:{lineno}: {line.strip()[:max_line_chars]}")
+                    if len(hits) >= max_hits:
+                        hits.append(f"... (truncated at {max_hits} hits)")
                         return "\n".join(hits)
     except (NotImplementedError, ValueError) as e:
         raise ToolError(f"invalid search glob {args.glob!r}: {e}") from None

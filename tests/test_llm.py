@@ -142,6 +142,39 @@ def test_full_modalities_normalize_to_native_fast_path():
 
 
 # --------------------------------------------------------------------------- #
+# prompt_cache_key — opt-in routing hint, passed through to create().          #
+# --------------------------------------------------------------------------- #
+
+
+async def test_prompt_cache_key_sent_when_configured(monkeypatch):
+    client = LLMClient(
+        model="x", api_key="k", base_url="http://localhost/v1", prompt_cache_key="sess-9"
+    )
+    captured: dict = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return make_openai_stream([_Event([_Choice(_Delta(), finish_reason="stop")])])
+
+    monkeypatch.setattr(client._client.chat.completions, "create", fake_create)
+    [c async for c in client.stream(messages=[])]
+    assert captured.get("prompt_cache_key") == "sess-9"
+
+
+async def test_prompt_cache_key_absent_by_default(monkeypatch):
+    client = LLMClient(model="x", api_key="k", base_url="http://localhost/v1")
+    captured: dict = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return make_openai_stream([_Event([_Choice(_Delta(), finish_reason="stop")])])
+
+    monkeypatch.setattr(client._client.chat.completions, "create", fake_create)
+    [c async for c in client.stream(messages=[])]
+    assert "prompt_cache_key" not in captured
+
+
+# --------------------------------------------------------------------------- #
 # Retry — delegated to the SDK, exercised through a mocked HTTP transport.     #
 # `retry-after-ms: 1` (1ms) is honored by the SDK, so retries are effectively  #
 # instant and the suite never really sleeps.                                   #
