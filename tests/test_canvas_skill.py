@@ -144,7 +144,7 @@ async def test_download_sends_token_on_origin(tmp_path):
         if p.endswith("/files"):
             return httpx.Response(200, json=[
                 {"id": 7, "display_name": "lecture.pdf", "folder_id": None,
-                 "size": len(body), "url": "https://canvas.test/files/7/download"},
+                 "size": len(body), "url": "https://canvas.test:443/files/7/download"},
             ])
         if "/files/7/download" in p:
             seen["file_auth"] = request.headers.get("authorization")
@@ -180,7 +180,7 @@ async def test_courses_pagination_follows_next(tmp_path):
         return httpx.Response(
             200,
             json=[{"id": 1, "name": "Bio", "course_code": "BIO"}],
-            headers={"Link": '<https://canvas.test/api/v1/courses?page=2>; rel="next"'},
+            headers={"Link": '<https://canvas.test:443/api/v1/courses?page=2>; rel="next"'},
         )
 
     with _patch_canvas(handler):
@@ -388,6 +388,19 @@ def test_next_link_parsing():
     hdr = '<https://c/api/v1/x?page=2>; rel="next", <https://c/api/v1/x?page=9>; rel="last"'
     assert canvas._next_link(hdr) == "https://c/api/v1/x?page=2"
     assert canvas._next_link('<https://c/x>; rel="last"') is None
+
+
+@pytest.mark.parametrize(
+    ("url", "base_url", "expected"),
+    [
+        ("https://canvas.test:443/x", "https://canvas.test", True),
+        ("https://canvas.test/x", "https://canvas.test:443", True),
+        ("http://canvas.test:80/x", "http://canvas.test", True),
+        ("https://canvas.test:444/x", "https://canvas.test", False),
+    ],
+)
+def test_same_origin_normalizes_default_ports(url, base_url, expected):
+    assert canvas._same_origin(url, base_url) is expected
 
 
 def test_folder_path_reconstruction():

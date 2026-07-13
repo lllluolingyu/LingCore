@@ -5,12 +5,14 @@ The path-escape suite is security-critical and intentionally exhaustive.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
 
 from lingcore.errors import ConfigError, ToolError
+from lingcore.paths import ConfinedDirectory
 from lingcore.tools import ToolContext, ToolRegistry, tool
 from lingcore.tools.builtin.fs import (
     EditArgs,
@@ -336,6 +338,56 @@ def test_offload_filename_is_content_stable(ctx):
     a = offload_text(ctx, source="shell", text=big, threshold=100)
     b = offload_text(ctx, source="shell", text=big, threshold=100)
     assert a == b  # identical content → identical file → identical note
+
+
+def test_offload_final_symlink_is_replaced_not_followed(ctx, tmp_path):
+    big = "sensitive fetched output" * 500
+    digest = hashlib.sha256(big.encode()).hexdigest()[:12]
+    output_dir = ctx.workspace / ".lingcore" / "tool-output"
+    output_dir.mkdir(parents=True)
+    dest = output_dir / f"fetch-{digest}.txt"
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-offload"
+    try:
+        dest.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks not supported on this platform")
+
+    out = offload_text(ctx, source="fetch", text=big, threshold=100)
+
+    assert "full output" in out
+    assert not outside.exists()
+    assert dest.is_file() and not dest.is_symlink()
+    assert dest.read_text(encoding="utf-8") == big
+
+
+def test_offload_parent_swap_cannot_redirect_write(ctx, tmp_path, monkeypatch):
+    """Replacing the opened runtime tree must fail closed, then truncate."""
+    runtime = ctx.workspace / ".lingcore"
+    moved = tmp_path.parent / f"{tmp_path.name}-runtime-held"
+    real_open = ConfinedDirectory.open_exclusive
+    swapped = False
+
+    def swap_then_open(self, name, mode=0o644):
+        nonlocal swapped
+        if name.endswith(".part") and not swapped:
+            runtime.rename(moved)
+            runtime.symlink_to(moved, target_is_directory=True)
+            swapped = True
+        return real_open(self, name, mode)
+
+    monkeypatch.setattr(ConfinedDirectory, "open_exclusive", swap_then_open)
+    big = "z" * 5000
+    out = offload_text(
+        ctx,
+        source="fetch",
+        text=big,
+        threshold=100,
+        fallback_max_chars=100,
+    )
+
+    assert "full output" not in out and "truncated" in out
+    assert not list(moved.rglob("*.txt"))
+    assert not list(moved.rglob("*.part"))
 
 
 def test_offload_disabled_truncates(ctx):

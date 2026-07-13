@@ -216,9 +216,12 @@ async def _read_capped(
         chunk = await proc.stdout.read(65536)
         if not chunk:
             break
-        if len(buf) < cap:
-            buf.extend(chunk[: cap - len(buf)])
-            if len(buf) >= cap:
+        remaining = cap - len(buf)
+        if remaining > 0:
+            buf.extend(chunk[:remaining])
+            # Reaching the cap exactly is not truncation. Mark it only when
+            # this chunk actually contains bytes that were not retained.
+            if len(chunk) > remaining:
                 truncated = True
         else:
             truncated = True

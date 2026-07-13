@@ -18,9 +18,10 @@ degrades to inline truncation, and offload can be disabled per tool (threshold
 from __future__ import annotations
 
 import hashlib
+import secrets
 from typing import TYPE_CHECKING
 
-from lingcore.paths import resolve_confined
+from lingcore.paths import confined_directory
 
 if TYPE_CHECKING:
     from lingcore.tools import ToolContext
@@ -61,19 +62,31 @@ def offload_text(
         return _truncate(text, fallback_max_chars)
     if len(text) <= threshold:
         return text
-    digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
-    rel = f"{RUNTIME_DIRNAME}/{_OFFLOAD_SUBDIR}/{source}-{digest}.txt"
+    payload = text.encode("utf-8", "replace")
+    digest = hashlib.sha256(payload).hexdigest()[:12]
+    directory_rel = f"{RUNTIME_DIRNAME}/{_OFFLOAD_SUBDIR}"
+    filename = f"{source}-{digest}.txt"
+    rel = f"{directory_rel}/{filename}"
     try:
-        # resolve_confined follows symlinks before checking containment, so a
-        # symlinked runtime dir that would redirect the write outside the
-        # workspace raises here and degrades to inline truncation below.
-        dest = resolve_confined(ctx.workspace, rel)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(text, encoding="utf-8")
+        # Hold the validated output directory open across the write and final
+        # rename. A concurrent parent swap therefore fails closed instead of
+        # redirecting this internal artifact outside the workspace, while the
+        # unique temporary entry keeps the published content-hash file atomic.
+        with confined_directory(
+            ctx.workspace, directory_rel, create=True
+        ) as directory:
+            if not directory.same_bytes(filename, payload):
+                part = f".{filename}.{secrets.token_hex(8)}.part"
+                try:
+                    with directory.open_exclusive(part) as fh:
+                        fh.write(payload)
+                    directory.replace(part, filename)
+                finally:
+                    directory.unlink(part, missing_ok=True)
     except Exception:
         return _truncate(text, fallback_max_chars)
     n_lines = text.count("\n") + 1
-    n_bytes = len(text.encode("utf-8", "replace"))
+    n_bytes = len(payload)
     return text[:head_chars] + (
         f"\n… [full output: {n_lines} lines, {n_bytes} bytes → {rel}; "
         "read it with read_file offset/limit]"

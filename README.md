@@ -216,10 +216,64 @@ object (a different backend can drop in), and frontends consume only
 `AgentEvent`s (a web/chat frontend can drop in). See `CLAUDE.md` for the full
 set of invariants.
 
+## Roadmap
+
+The roadmap is ordered by leverage: first make the existing single-agent
+experience more useful and measurable, then expand its integrations and
+workflow model. The version groupings are directional rather than release
+commitments.
+
+1. **Interaction and onboarding**
+   - Add an explicit stop/cancel control to LingChat, with defined behavior for
+     messages submitted while a turn is running.
+   - Add `lingcore profile init/list/doctor` and separate immutable profile
+     templates from writable sessions, memory, and workspaces in the user's
+     application-state directory. A wheel install should be useful without a
+     repository checkout.
+
+2. **v0.2 — Knowledge 1.0**
+   - Finish the existing `knowledge` tool's incremental `index` and `hybrid`
+     backends: stable chunks, content-hash updates, full-text plus embedding
+     ranking, deletion handling, and a provider-independent embedding seam.
+   - Preserve source metadata (path, page, and line range), emit retrieval
+     events, and render verifiable citations in frontends.
+   - Keep explicit tool-driven retrieval as the baseline, then add opt-in
+     `auto_retrieve` prompt injection with a hard context budget.
+   - Ship retrieval evaluations for relevance, stale-index handling, citation
+     validity, and the offline grep fallback.
+
+3. **v0.3 — Tracing and evaluations**
+   - Trace model requests, tools, retrieval, retries, compaction, confirmation
+     decisions, token usage, and latency, with sensitive content excluded by
+     default. Start with local structured traces and offer an optional
+     OpenTelemetry exporter.
+   - Add a `lingcore eval` workflow for profile datasets, tool-trajectory
+     assertions, quality checks, latency/cost reporting, and regression
+     comparisons.
+
+4. **v0.4 — MCP interoperability**
+   - Add an MCP client with stdio and Streamable HTTP transports, initially for
+     tools and later for resources and prompts.
+   - Namespace discovered tools and keep every one beneath the profile's
+     existing `tools` permission ceiling. Server descriptions remain untrusted;
+     consent, cancellation, and progress must map through LingCore's frontend
+     contracts.
+
+5. **v0.5 — Durable workflows**
+   - Let long-running turns survive a browser disconnect and replay their event
+     stream on reconnect; add edit, regenerate, and session-fork controls.
+   - Add schema-validated structured results so agents can participate in
+     application workflows, plus an optional Responses API backend behind the
+     existing `LLMClient` seam without weakening OpenAI-compatible portability.
+
+Multi-agent handoffs, Discord/voice frontends, marketplaces, and additional
+persona profiles remain later possibilities. They should follow retrieval,
+tracing, and evaluations so added autonomy is observable and testable.
+
 ## Development
 
 ```bash
-uv run pytest -q          # full suite (427 tests)
+uv run pytest -q          # full suite (435 tests)
 uv run pytest tests/test_agent.py -q
 ```
 
@@ -238,11 +292,12 @@ matches trailing arguments, while shell control syntax (`;`, `&`, `&&`, pipes,
 redirects, substitutions, and newlines) always falls back to confirmation and
 cannot append another command to an approved prefix.
 
-Security-sensitive workspace creation (attachment ingest and Canvas downloads)
-uses no-follow directory descriptors for every parent component and keeps the
-validated parent open through create/rename. Swapping a checked directory for a
-symlink therefore cannot redirect the write outside the workspace; platforms
-without the required secure descriptor operations fail closed.
+Security-sensitive workspace creation (attachment ingest, Canvas downloads,
+and staged tool output) uses no-follow directory descriptors for every parent
+component and keeps the validated parent open through create/rename. Swapping a
+checked directory for a symlink therefore cannot redirect the write outside the
+workspace; platforms without the required secure descriptor operations fail
+closed.
 
 `fetch_url` reduces SSRF risk by resolving each host (and every redirect hop)
 and refusing any that maps to a loopback, link-local, or private address —

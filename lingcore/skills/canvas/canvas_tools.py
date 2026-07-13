@@ -91,8 +91,22 @@ def _next_link(link_header: str) -> str | None:
 
 def _same_origin(url: str, base_url: str) -> bool:
     """True when ``url`` has the same scheme/host/port as the Canvas base URL."""
-    u, b = urlparse(url), urlparse(base_url)
-    return (u.scheme, u.hostname, u.port) == (b.scheme, b.hostname, b.port)
+    def origin(value: str) -> tuple[str, str, int] | None:
+        try:
+            parsed = urlparse(value)
+            scheme = parsed.scheme.lower()
+            host = parsed.hostname
+            if scheme not in ("http", "https") or host is None:
+                return None
+            port = parsed.port
+        except ValueError:
+            return None
+        if port is None:
+            port = 443 if scheme == "https" else 80
+        return scheme, host.lower(), port
+
+    candidate = origin(url)
+    return candidate is not None and candidate == origin(base_url)
 
 
 async def _canvas_get(

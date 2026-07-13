@@ -192,3 +192,15 @@ async def test_output_truncation_when_offload_disabled(tmp_path):
         ctx,
     )
     assert "truncated" in out
+
+
+@pytest.mark.parametrize(
+    ("output", "expected_truncated"),
+    [("12345", False), ("123456", True)],
+)
+async def test_capture_reports_only_discarded_bytes_as_truncated(
+    tmp_path, output, expected_truncated
+):
+    ctx = _ctx(tmp_path, require_confirmation=False, max_capture_bytes=5)
+    out = await run_shell(ShellArgs(command=f"printf {output}"), ctx)
+    assert ("output exceeded 5 bytes" in out) is expected_truncated
