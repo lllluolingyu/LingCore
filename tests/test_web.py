@@ -140,6 +140,20 @@ async def test_fetch_caps_body_bytes(ctx, monkeypatch):
     assert body == "x" * 50
 
 
+async def test_fetch_respects_max_bytes_option(tmp_path):
+    # tool_options.fetch_url.max_bytes caps the body without touching the module
+    # constant — the daily profile relies on this to bound fetch size.
+    ctx = ToolContext(
+        workspace=tmp_path,
+        options={"fetch_url": {"max_bytes": 20, "offload_over_chars": 0, "max_chars": 5000}},
+    )
+    p, _ = _patch_client([_FakeResponse("y" * 10_000)])
+    with p:
+        out = await fetch_url(FetchArgs(url="https://example.com/big"), ctx)
+    body = out.split("\n\n", 1)[1]
+    assert body == "y" * 20
+
+
 async def test_fetch_pins_connection_to_vetted_ip(ctx):
     # The connection targets the vetted IP, but Host + TLS SNI stay the hostname
     # so DNS can't be rebound between validation and connect.

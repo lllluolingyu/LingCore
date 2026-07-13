@@ -148,6 +148,25 @@ async def test_from_profile_builds_runnable_agent(tmp_path, monkeypatch):
     assert events[-1].__class__.__name__ == "Final"
 
 
+async def test_layered_composer_keeps_inline_system_prompt(tmp_path, monkeypatch):
+    # Enabling the memory tool forces the LayeredComposer path; the inline
+    # persona.system_prompt must still be injected, not silently dropped.
+    monkeypatch.setenv("TEST_KEY", "sk-xyz")
+    monkeypatch.setenv("TEST_WS", str(tmp_path))
+    text = FIXTURE.replace("  - list_dir\n", "  - list_dir\n  - memory\n")
+    prof = AgentProfile.load(_write(tmp_path, text))
+
+    llm = FakeLLMClient([ScriptedTurn(text="ok")])
+    agent = Agent.from_profile(prof, llm=llm, base_dir=tmp_path)
+
+    from lingcore.composer import LayeredComposer
+
+    assert isinstance(agent.composer, LayeredComposer)  # memory forced layering
+    [ev async for ev in agent.run("hi")]
+    system = llm.calls[0][0].content
+    assert "You are a test agent." in system
+
+
 # --------------------------------------------------------------------------- #
 # Workspace resolution                                                         #
 # --------------------------------------------------------------------------- #

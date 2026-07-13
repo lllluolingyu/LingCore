@@ -57,27 +57,28 @@ def _resolve_memory_path(ctx: ToolContext) -> Path:
             raise ConfigError(
                 "memory path is absolute; set allow_absolute_path: true to permit this"
             )
-        return raw.resolve()
+        resolved = raw.resolve()
+    else:
+        if ctx.profile_dir is None:
+            raise ToolError(
+                "memory tool requires a profile directory (profile_dir not set)"
+            )
+        resolved = (ctx.profile_dir / raw).resolve()
+        if not resolved.is_relative_to(ctx.profile_dir.resolve()):
+            raise ConfigError(f"memory path escapes profile directory: {raw}")
 
-    if ctx.profile_dir is None:
-        raise ToolError("memory tool requires a profile directory (profile_dir not set)")
-
-    resolved = (ctx.profile_dir / raw).resolve()
-    if not resolved.is_relative_to(ctx.profile_dir.resolve()):
-        raise ConfigError(f"memory path escapes profile directory: {raw}")
-
-    # Block writes into the installed package tree.
+    # Block writes into the installed package tree — for relative paths (which
+    # resolve against a profile dir that may sit inside the package) *and*
+    # absolute ones (allow_absolute_path must not become a package-write hole).
     try:
         resolved.relative_to(_PACKAGE_DIR)
-        raise ToolError(
-            "cannot write memory into the installed package directory; "
-            "set an explicit absolute path with allow_absolute_path: true, "
-            f"e.g. path: ${{HOME}}/.local/state/lingcore/memory.md"
-        )
     except ValueError:
-        pass  # not under _PACKAGE_DIR — good
-
-    return resolved
+        return resolved  # not under _PACKAGE_DIR — good
+    raise ToolError(
+        "cannot write memory into the installed package directory; "
+        "set an explicit absolute path outside it, "
+        f"e.g. path: ${{HOME}}/.local/state/lingcore/memory.md"
+    )
 
 
 # --------------------------------------------------------------------------- #

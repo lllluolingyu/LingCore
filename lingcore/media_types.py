@@ -181,14 +181,21 @@ def validate_base64_payload(
 
 
 def validate_text_payload(data: str, *, max_bytes: int) -> tuple[str, int]:
-    """Validate+normalize a text payload: decodable, capped, and NUL-free.
+    """Validate+normalize a text payload: decodable, capped, NUL-free, UTF-8.
 
     A NUL byte means the payload is not the UTF-8 text it claims to be — the
-    cheap mislabel guard ``is_probably_binary`` uses.
+    cheap mislabel guard ``is_probably_binary`` uses. Beyond that, the bytes
+    must actually decode as UTF-8: a ``text`` attachment's content is inlined
+    verbatim into the prompt, so a mislabeled binary payload must be rejected
+    here rather than silently degrading to replacement characters downstream.
     """
     normalized, decoded = decode_base64_payload(data, max_bytes=max_bytes)
     if b"\x00" in decoded:
         raise ValueError("text attachment contains NUL bytes (not UTF-8 text)")
+    try:
+        decoded.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("text attachment is not valid UTF-8") from None
     return normalized, len(decoded)
 
 

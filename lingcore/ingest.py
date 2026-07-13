@@ -24,6 +24,7 @@ from pathlib import Path
 
 from lingcore.media_types import TEXT_INLINE_MAX_CHARS, sanitize_name
 from lingcore.message import Attachment
+from lingcore.paths import ConfinedDirectory, PathEscapeError, confined_directory
 
 _ATTACH_DIRNAME = "attachments"
 _MAX_COLLISION_SUFFIX = 99
@@ -79,58 +80,83 @@ def _store(
 ) -> tuple[str | None, str | None]:
     """Save ``data`` under ``<workspace>/attachments/`` with a collision-safe
     name. Returns ``(workspace-relative posix path, None)`` on success or
-    ``(None, error)`` on failure — never raises."""
+    ``(None, error)`` on failure — never raises.
+
+    The attachments directory is opened by descriptor with no-follow traversal,
+    and the descriptor stays open through collision selection and creation. A
+    parent swapped to a symlink after validation therefore cannot redirect the
+    payload; a changed directory anchor makes the write fail closed.
+    """
     try:
-        base = workspace / _ATTACH_DIRNAME
-        base.mkdir(parents=True, exist_ok=True)
-        _ensure_gitignore(base)
-        name = sanitize_name(
-            attachment.name, fallback=_DEFAULT_NAMES.get(attachment.kind, "attachment")
-        )
-        target = _unique_path(base, name, data)
-        if not target.exists():
-            target.write_bytes(data)
-        return f"{_ATTACH_DIRNAME}/{target.name}", None
+        with confined_directory(
+            workspace, _ATTACH_DIRNAME, create=True
+        ) as directory:
+            _ensure_gitignore(directory)
+            name = sanitize_name(
+                attachment.name,
+                fallback=_DEFAULT_NAMES.get(attachment.kind, "attachment"),
+            )
+            target_name = _unique_name(directory, name, data)
+            rel = f"{_ATTACH_DIRNAME}/{target_name}"
+            created = False
+            try:
+                with directory.open_exclusive(target_name) as fh:
+                    created = True
+                    fh.write(data)
+            except FileExistsError:
+                # _unique_name returns an existing name only for byte-identical
+                # dedupe. O_EXCL also catches a name raced in after selection.
+                if not directory.same_bytes(target_name, data):
+                    return None, "destination changed while saving"
+            except OSError:
+                if created:
+                    directory.unlink(target_name, missing_ok=True)
+                raise
+            try:
+                directory.ensure_anchored()
+            except PathEscapeError:
+                if created:
+                    directory.unlink(target_name, missing_ok=True)
+                raise
+            return rel, None
+    except PathEscapeError as e:
+        return None, str(e)
     except OSError as e:
         return None, _summarize(e)
 
 
-def _unique_path(base: Path, name: str, data: bytes) -> Path:
-    """A path under ``base`` for ``name``: reuse a byte-identical existing file,
+def _unique_name(directory: ConfinedDirectory, name: str, data: bytes) -> str:
+    """An entry name under ``directory``: reuse a byte-identical existing file,
     else append ``-2``, ``-3``, … (finally a content hash) to avoid clobbering."""
-    if not (base / name).exists() or _same_bytes(base / name, data):
-        return base / name
+    if not directory.entry_exists(name) or directory.same_bytes(name, data):
+        return name
     stem, dot, suffix = name.partition(".")
     if not stem:  # a dotfile like ".env" — keep it whole, no extension split
         stem, dot, suffix = name, "", ""
     ext = f"{dot}{suffix}" if dot else ""
     for n in range(2, _MAX_COLLISION_SUFFIX + 1):
-        candidate = base / f"{stem}-{n}{ext}"
-        if not candidate.exists() or _same_bytes(candidate, data):
+        candidate = f"{stem}-{n}{ext}"
+        if not directory.entry_exists(candidate) or directory.same_bytes(
+            candidate, data
+        ):
             return candidate
     digest = hashlib.sha256(data).hexdigest()[:8]
-    return base / f"{stem}-{digest}{ext}"
+    return f"{stem}-{digest}{ext}"
 
 
-def _same_bytes(path: Path, data: bytes) -> bool:
+def _ensure_gitignore(directory: ConfinedDirectory) -> None:
+    """Best-effort: keep workspace uploads out of a user's git repo.
+
+    Created exclusively (no-follow): a planted ``.gitignore`` symlink —
+    dangling ones pass an ``exists()`` check — must never redirect this write
+    outside the workspace. Any existing path (or an unwritable dir) just means
+    we skip; ingest never fails over housekeeping.
+    """
     try:
-        return (
-            path.is_file()
-            and path.stat().st_size == len(data)
-            and path.read_bytes() == data
-        )
+        with directory.open_exclusive(".gitignore") as fh:
+            fh.write(b"*\n")
     except OSError:
-        return False
-
-
-def _ensure_gitignore(base: Path) -> None:
-    """Best-effort: keep workspace uploads out of a user's git repo."""
-    gitignore = base / ".gitignore"
-    if not gitignore.exists():
-        try:
-            gitignore.write_text("*\n", encoding="utf-8")
-        except OSError:
-            pass
+        pass
 
 
 def _fallback_for(

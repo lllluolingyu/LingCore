@@ -148,6 +148,10 @@ class CLIFrontend:
         self.console = Console()
         self.agent_name = agent_name
         self._needs_newline = False  # track whether streamed text left us mid-line
+        # Serialize confirmation prompts: with parallel_tools, two tools can call
+        # confirm() at once — without this their console.input threads would race
+        # on stdin and interleave prompts.
+        self._confirm_lock = asyncio.Lock()
         # Shared with the agent's ToolContext so "allow always" writes land live.
         self._tool_options: dict = tool_options if tool_options is not None else {}
 
@@ -181,17 +185,26 @@ class CLIFrontend:
                 if not self._needs_newline:
                     self.console.print(f"[bold green]{self.agent_name} ›[/] ", end="")
                     self._needs_newline = True
-                self.console.print(text, end="", soft_wrap=True)
+                # escape(): streamed model text must never be parsed as Rich
+                # markup, or a model could inject terminal styling/spoofing (or
+                # crash the render on an unbalanced "[").
+                self.console.print(escape(text), end="", soft_wrap=True)
             case ToolCallStarted(call):
                 self._break_line()
-                self.console.print(f"[dim]→ {call.name}({_short(str(call.arguments))})[/]")
+                self.console.print(
+                    f"[dim]→ {escape(call.name)}("
+                    f"{escape(_short(str(call.arguments)))})[/]"
+                )
             case ToolResultEvent(result):
                 status = "[dim]" if result.ok else "[red]"
-                self.console.print(f"{status}← {result.name}: {_short(result.content)}[/]")
+                self.console.print(
+                    f"{status}← {escape(result.name)}: "
+                    f"{escape(_short(result.content))}[/]"
+                )
             case SkillActivated(name, active):
                 self._break_line()
                 verb = "activated" if active else "deactivated"
-                self.console.print(f"[dim]⚙ skill {verb}: {name}[/]")
+                self.console.print(f"[dim]⚙ skill {verb}: {escape(name)}[/]")
             case Compacted(summarized_messages, before_tokens, after_tokens):
                 self._break_line()
                 self.console.print(
@@ -209,7 +222,7 @@ class CLIFrontend:
                 self._break_line()
             case Error(message):
                 self._break_line()
-                self.console.print(f"[bold red]error:[/] {message}")
+                self.console.print(f"[bold red]error:[/] {escape(message)}")
 
     def _break_line(self) -> None:
         if self._needs_newline:
@@ -249,33 +262,39 @@ class CLIFrontend:
                         f"[dim]  {self.agent_name} › {escape(_short(m.content))}[/]"
                     )
                 for tc in m.tool_calls:
+                    # Tool names are model-generated (an unknown-tool call is
+                    # stored verbatim) — escape them like any other model text.
                     self.console.print(
-                        f"[dim]  → {tc.name}({escape(_short(str(tc.arguments)))})[/]"
+                        f"[dim]  → {escape(tc.name)}({escape(_short(str(tc.arguments)))})[/]"
                     )
             else:  # tool result
-                self.console.print(f"[dim]  ← {m.name}: {escape(_short(m.content))}[/]")
+                self.console.print(
+                    f"[dim]  ← {escape(m.name or '')}: {escape(_short(m.content))}[/]"
+                )
 
     async def confirm(self, command: str) -> bool:
-        self._break_line()
-        prompt = (
-            f"[yellow]run shell command?[/] [bold]{command}[/]\n"
-            "[yellow]  [a][/] allow once (default)  [yellow][A][/] allow always  [yellow][d][/] deny\n"
-            "[yellow]choice [a/A/d]:[/] "
-        )
-        answer = (await asyncio.to_thread(self.console.input, prompt)).strip()
-        if answer == "A":
-            # Persist approval for this exact token prefix for the rest of the session.
-            run_shell_opts = self._tool_options.setdefault("run_shell", {})
-            patterns: list[str] = run_shell_opts.setdefault("allow_patterns", [])
-            pattern = allowlist_pattern_for(command)
-            if not pattern:
-                self.console.print("[dim]command was not added to session allowlist[/]")
+        # One prompt at a time: parallel tool calls must not race on stdin.
+        async with self._confirm_lock:
+            self._break_line()
+            prompt = (
+                f"[yellow]run shell command?[/] [bold]{escape(command)}[/]\n"
+                "[yellow]  [a][/] allow once (default)  [yellow][A][/] allow token prefix this session  [yellow][d][/] deny\n"
+                "[yellow]choice [a/A/d]:[/] "
+            )
+            answer = (await asyncio.to_thread(self.console.input, prompt)).strip()
+            if answer == "A":
+                # Persist approval for this exact token prefix for the rest of the session.
+                run_shell_opts = self._tool_options.setdefault("run_shell", {})
+                patterns: list[str] = run_shell_opts.setdefault("allow_patterns", [])
+                pattern = allowlist_pattern_for(command)
+                if not pattern:
+                    self.console.print("[dim]command was not added to session allowlist[/]")
+                    return True
+                if pattern not in patterns:
+                    patterns.append(pattern)
+                    self.console.print(
+                        f"[dim]added {escape(pattern)!r} to session allowlist[/]"
+                    )
                 return True
-            if pattern not in patterns:
-                patterns.append(pattern)
-                self.console.print(
-                    f"[dim]added {pattern!r} to session allowlist[/]"
-                )
-            return True
-        # Empty / Enter, "a", "y", "yes" all mean allow once.
-        return answer.lower() in {"", "a", "y", "yes"}
+            # Empty / Enter, "a", "y", "yes" all mean allow once.
+            return answer.lower() in {"", "a", "y", "yes"}

@@ -124,9 +124,18 @@ class Agent:
         session_id: str | None = None,
         skill_state: "SkillState | None" = None,
         media_adapter: "MediaAdapter | None" = None,
+        initial_tools: "frozenset[str] | None" = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
+        # Tools active without any skill. None ⇒ all of the ceiling (today's
+        # default). A narrower set gates the rest behind skill activation; the
+        # ceiling (``tools``) still bounds what a skill can ever unlock.
+        self.initial_tools: frozenset[str] = (
+            frozenset(initial_tools)
+            if initial_tools is not None
+            else frozenset(tools.names())
+        )
         self.tool_ctx = tool_ctx
         self.composer = composer
         self.memory: ShortTermMemory = memory or WindowMemory()
@@ -237,10 +246,13 @@ class Agent:
             from lingcore.errors import ConfigError
             from lingcore.skills import load_skill_tools, load_skills
 
-            skill_dirs: list[Path] = []
+            # Bundled skills first, profile-local second: load_skills is
+            # last-write-wins on a name collision, so a profile-local skill
+            # shadows a bundled one of the same name (invariant 13) rather than
+            # the reverse.
+            skill_dirs: list[Path] = [Path(__file__).parent / "skills"]
             if source_dir is not None:
                 skill_dirs.append(source_dir / sk_opts.get("skills_dir", "skills"))
-            skill_dirs.append(Path(__file__).parent / "skills")
             loaded_skills = load_skills(skill_dirs)
             for name in profile.skills:
                 if name not in loaded_skills:
@@ -259,6 +271,25 @@ class Agent:
             load_skill_tools(to_import)
 
         tools = REGISTRY.subset(profile.tools)
+        # The initially-enabled subset (None ⇒ all of the ceiling). Skills unlock
+        # the rest, if any, on activation.
+        initial_tools_set = (
+            frozenset(profile.initial_tools)
+            if profile.initial_tools is not None
+            else frozenset(profile.tools)
+        )
+        # A statically-engaged skill (profile ``skills:``) is always on: its
+        # requested tools are granted from the start, exactly like an activated
+        # dynamic skill's — intersected with the ceiling, never beyond it
+        # (invariant 11). Naming the skill in the profile is the operator's
+        # explicit consent, so the high-risk confirmation gate (which guards
+        # *model-initiated* activation) does not apply here.
+        for skill_name in profile.skills:
+            sk = loaded_skills.get(skill_name)
+            if sk is not None:
+                initial_tools_set |= frozenset(sk.requested_tools) & frozenset(
+                    profile.tools
+                )
         workspace = profile.workspace_path(base_dir)
         workspace.mkdir(parents=True, exist_ok=True)
 
@@ -366,10 +397,17 @@ class Agent:
                 for inc in profile.persona.include
                 if (source_dir / inc).is_file()
             ]
-            mem_opts = dict(profile.tool_options).get("memory", {})
+            # Read memory settings from the *effective* options (caller overrides
+            # included), so the injected memory file matches where the memory
+            # tool actually writes. An absolute path is honored only when the
+            # profile opted in — the same gate the tool enforces before writing.
+            mem_opts = effective_tool_options.get("memory", {})
             if "memory" in profile.tools:
                 raw_mem = Path(mem_opts.get("path", "memory.md"))
-                if not raw_mem.is_absolute():
+                if raw_mem.is_absolute():
+                    if mem_opts.get("allow_absolute_path", False):
+                        memory_path = raw_mem.resolve()
+                else:
                     memory_path = (source_dir / raw_mem).resolve()
 
         # Statically-declared skills (profile ``skills:``) inject their
@@ -380,11 +418,26 @@ class Agent:
             for name in profile.skills
             if loaded_skills.get(name) and loaded_skills[name].instructions
         ]
-        all_layers = layers + includes + static_skill_layers
 
-        if all_layers or memory_path is not None or skill_state is not None:
+        # Layer the prompt when there are real layer sources (files, includes,
+        # static skills), a memory file, or dynamic skills. The persona's inline
+        # system_prompt does NOT by itself trigger layering — a bare-prompt agent
+        # stays a zero-overhead StaticComposer.
+        needs_layering = (
+            bool(layers or includes or static_skill_layers)
+            or memory_path is not None
+            or skill_state is not None
+        )
+        if needs_layering:
+            # persona.system_prompt is the inline *fallback* persona: fold it in
+            # as the base layer when no world/role/workflow file supplies one, so
+            # a profile relying on the inline prompt doesn't silently lose it just
+            # because memory or skills forced the layered path.
+            base_layers = layers
+            if not layers and profile.persona.system_prompt.strip():
+                base_layers = [profile.persona.system_prompt]
             composer = LayeredComposer(
-                layers=all_layers,
+                layers=base_layers + includes + static_skill_layers,
                 memory_path=memory_path,
                 skill_instructions=skill_state.instruction_map() if skill_state else {},
             )
@@ -404,6 +457,7 @@ class Agent:
             session_id=sid,
             skill_state=skill_state,
             media_adapter=media_adapter,
+            initial_tools=initial_tools_set,
         )
         agent._turn_index = restored_turn_index
         return agent
@@ -559,12 +613,19 @@ class Agent:
         yield Error(f"reached max iterations ({self.max_iters}) without a final reply")
 
     def _effective_tool_schemas(self) -> list[dict[str, Any]]:
-        """Tool schemas for the current step: base tools plus any tools granted
-        by active skills (intersected with the profile allowlist by SkillState).
+        """Tool schemas for the current step: the initially-enabled tools plus
+        any tools granted by active skills (intersected with the profile
+        allowlist by SkillState).
 
         Computed fresh each iteration; the base ToolRegistry is never mutated.
+        Tools in the ceiling but neither initial nor granted by an active skill
+        are NOT advertised — progressive disclosure (invariant 11).
         """
-        base = self.tools.schemas()
+        base = [
+            self.tools.get(name).json_schema()
+            for name in self.tools.names()
+            if name in self.initial_tools
+        ]
         if self.skill_state is None:
             return base
 
@@ -586,18 +647,20 @@ class Agent:
         seen = {s["function"]["name"] for s in base}
         extra_names = self.skill_state.active_effective_tools() - seen
         for name in sorted(extra_names):
-            try:
-                from lingcore.tools import REGISTRY
-
-                base.append(REGISTRY.get(name).json_schema())
-            except Exception:
-                continue
+            if name in self.tools.names():
+                base.append(self.tools.get(name).json_schema())
         return base
 
     async def _dispatch(self, calls: list[ToolCall]) -> list[ToolResult]:
+        # Authorization is a property of the model request that produced this
+        # batch. Snapshot it before any tool runs: activate_skill/deactivation in
+        # one call must affect only the next loop iteration, never sibling calls
+        # whose schemas were computed under the previous state.
+        authorized = self._authorized_tool_names()
+
         async def run_one(call: ToolCall) -> ToolResult:
             try:
-                tool = self._resolve_tool(call.name)
+                tool = self._resolve_tool(call.name, authorized=authorized)
                 args = tool.validate_args(call.arguments)
                 out = await tool.run(args, self.tool_ctx)
                 if isinstance(out, ToolOutput):
@@ -621,18 +684,27 @@ class Agent:
             return list(await asyncio.gather(*(run_one(c) for c in calls)))
         return [await run_one(c) for c in calls]
 
-    def _resolve_tool(self, name: str):
-        """Look up a tool by name: base subset first, then skill-granted tools.
+    def _authorized_tool_names(self) -> frozenset[str]:
+        """Currently dispatchable tools, bounded by the profile registry."""
+        authorized = self.initial_tools
+        if self.skill_state is not None:
+            authorized |= self.skill_state.active_effective_tools()
+        return authorized & frozenset(self.tools.names())
 
-        A skill-granted tool is only resolvable if it is in the *effective* set
-        (profile ∩ active-skill requested), enforcing the permission ceiling at
-        execution time — not just in the advertised schemas.
+    def _resolve_tool(
+        self, name: str, *, authorized: frozenset[str] | None = None
+    ):
+        """Look up a tool by name, enforcing the permission model at dispatch.
+
+        A tool is dispatchable only when it is currently *authorized*: in the
+        initially-enabled set, or granted by an active skill (profile ∩
+        requested). A ceiling tool that is neither — advertised or not — is
+        refused with the same error an unknown tool would raise, so a model that
+        calls a gated-but-not-active tool can't reach it.
         """
-        if name in self.tools.names():
+        allowed = authorized if authorized is not None else self._authorized_tool_names()
+        if name in allowed:
             return self.tools.get(name)
-        if self.skill_state is not None and name in self.skill_state.active_effective_tools():
-            from lingcore.tools import REGISTRY
+        from lingcore.errors import ToolError
 
-            return REGISTRY.get(name)
-        # Not permitted: raise the same error the registry would.
-        return self.tools.get(name)
+        raise ToolError(f"unknown tool: {name}")

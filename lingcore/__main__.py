@@ -36,7 +36,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--profile",
         "-p",
         default=str(_DEFAULT_PROFILE),
-        help="Path to an agent profile YAML (default: built-in coding profile).",
+        help="Path to an agent profile YAML (default in a repo checkout: "
+        "profiles/coding; installed wheels require --profile).",
     )
     parser.add_argument(
         "--workspace",
@@ -108,6 +109,15 @@ async def _main_async(args: argparse.Namespace) -> int:
         profile = AgentProfile.load(profile_path)
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
+        if args.profile == str(_DEFAULT_PROFILE) and not _DEFAULT_PROFILE.exists():
+            # Wheel installs have no bundled profiles (documented deferral:
+            # packaging them conflicts with the writable-state invariants).
+            print(
+                "note: the default profile only resolves in a repo checkout; "
+                "with an installed package, pass --profile pointing at a "
+                "profile directory (e.g. a checkout's profiles/coding).",
+                file=sys.stderr,
+            )
         return 2
 
     if args.workspace:

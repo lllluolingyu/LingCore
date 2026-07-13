@@ -16,6 +16,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from pydantic import BaseModel, Field
 
+from lingcore import __version__ as _lingcore_version
 from lingcore.errors import ToolError
 from lingcore.tools import ToolContext, tool
 from lingcore.tools.builtin._offload import DEFAULT_OFFLOAD_OVER_CHARS, offload_text
@@ -26,7 +27,7 @@ _TIMEOUT = 20.0
 _DNS_TIMEOUT = 5.0  # DNS has no other deadline until the HTTP client is built
 _MAX_REDIRECTS = 5
 _LOCAL_HOSTS = {"localhost", "localhost.localdomain"}
-_USER_AGENT = "LingCore/0.0.1"
+_USER_AGENT = f"LingCore/{_lingcore_version}"  # tracks the package version
 
 
 def _html_to_text(html: str) -> str:
@@ -154,14 +155,14 @@ def _build_request(client: httpx.AsyncClient, url: str, pinned_ip: str | None) -
     return req
 
 
-async def _read_capped(resp: httpx.Response) -> bytes:
-    """Stream the body, stopping once _MAX_BYTES have been read."""
+async def _read_capped(resp: httpx.Response, max_bytes: int) -> bytes:
+    """Stream the body, stopping once ``max_bytes`` have been read."""
     buf = bytearray()
     async for chunk in resp.aiter_bytes():
         buf.extend(chunk)
-        if len(buf) >= _MAX_BYTES:
+        if len(buf) >= max_bytes:
             break
-    return bytes(buf[:_MAX_BYTES])
+    return bytes(buf[:max_bytes])
 
 
 def _is_redirect(status_code: int) -> bool:
@@ -172,6 +173,10 @@ def _is_redirect(status_code: int) -> bool:
 async def fetch_url(args: FetchArgs, ctx: ToolContext) -> str:
     opts = ctx.options.get("fetch_url", {}) if ctx.options else {}
     allow_private_hosts = bool(opts.get("allow_private_hosts", False))
+    # Cap on bytes pulled from the socket. Honors the profile's
+    # tool_options.fetch_url.max_bytes (falling back to the module default),
+    # so a profile can tighten the fetch size without a code change.
+    max_bytes = int(opts.get("max_bytes", _MAX_BYTES))
     url = args.url
     pinned = await _vet_url(url, allow_private_hosts=allow_private_hosts)
 
@@ -201,7 +206,7 @@ async def fetch_url(args: FetchArgs, ctx: ToolContext) -> str:
                         status = resp.status_code
                         content_type = resp.headers.get("content-type", "")
                         charset = resp.charset_encoding or "utf-8"
-                        body = await _read_capped(resp)
+                        body = await _read_capped(resp, max_bytes)
                         location = None
                 finally:
                     await resp.aclose()

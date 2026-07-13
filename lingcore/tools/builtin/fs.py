@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from lingcore.errors import ToolError
 from lingcore.media import attachment_from_path, detect_media, is_probably_binary
+from lingcore.paths import PathEscapeError, resolve_confined
 from lingcore.tools import ToolContext, ToolOutput, tool
 from lingcore.tools.builtin._offload import RUNTIME_DIRNAME
 
@@ -30,15 +31,15 @@ _SEARCH_LINE_CHARS = 200
 def _resolve(ctx: ToolContext, path: str) -> Path:
     """Resolve ``path`` relative to the workspace, rejecting escapes.
 
-    ``Path.resolve()`` collapses ``..`` and follows symlinks before the
-    containment check, so neither traversal nor a symlink pointing outside
-    the workspace can slip through.
+    Delegates to the shared ``resolve_confined`` guard: ``Path.resolve()``
+    collapses ``..`` and follows symlinks before the containment check, so
+    neither traversal nor a symlink pointing outside the workspace can slip
+    through.
     """
-    base = ctx.workspace.resolve()
-    full = (base / path).resolve()
-    if full != base and not full.is_relative_to(base):
-        raise ToolError(f"path escapes workspace: {path!r}")
-    return full
+    try:
+        return resolve_confined(ctx.workspace, path)
+    except PathEscapeError as e:
+        raise ToolError(str(e)) from None
 
 
 def _validate_search_glob(pattern: str) -> None:

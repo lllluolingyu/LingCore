@@ -53,7 +53,16 @@ async def activate_skill(args: SkillArgs, ctx: ToolContext) -> str:
 
     effective = state.effective_tools(skill)
     risky = effective & state.high_risk_tools
-    if risky and ctx.confirm is not None:
+    if risky:
+        # A skill granting high-risk tools requires human consent. If no
+        # confirmation handler is wired to this frontend, refuse rather than
+        # activate silently (mirrors run_shell's no-handler refusal).
+        if ctx.confirm is None:
+            raise ToolError(
+                f"skill {args.name!r} requests high-risk tools "
+                f"({', '.join(sorted(risky))}) but no confirmation handler is "
+                "available on this frontend; activation refused"
+            )
         approved = await ctx.confirm(
             f"Activate skill {args.name!r}? It requests high-risk tools: "
             f"{', '.join(sorted(risky))}"

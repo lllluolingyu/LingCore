@@ -73,15 +73,49 @@ async def test_no_confirmation_when_disabled(tmp_path):
 
 
 async def test_allowlist_skips_confirmation(tmp_path):
-    # An allowlisted prefix runs even with require_confirmation and no handler.
+    # A multi-token allowlist pattern matches its command plus trailing args and
+    # runs without a confirmation handler.
     ctx = _ctx(
         tmp_path,
         confirm=None,
         require_confirmation=True,
-        allow_patterns=["echo "],
+        allow_patterns=["echo allowed"],
     )
-    out = await run_shell(ShellArgs(command="echo allowed"), ctx)
-    assert "allowed" in out
+    out = await run_shell(ShellArgs(command="echo allowed extra"), ctx)
+    assert "allowed extra" in out
+
+
+async def test_allowlist_single_token_pattern_is_exact(tmp_path):
+    # A bare single-token pattern (e.g. "echo") matches only the exact command
+    # with no arguments — it must never green-light arbitrary arguments.
+    ctx = _ctx(
+        tmp_path,
+        confirm=None,
+        require_confirmation=True,
+        allow_patterns=["echo"],
+    )
+    # Exact bare command: allowed.
+    out = await run_shell(ShellArgs(command="echo"), ctx)
+    assert "exit code: 0" in out
+    # Same program with an argument: NOT covered by the bare pattern -> refused
+    # (no handler), so a generic reader like `cat` can't read files silently.
+    with pytest.raises(ToolError, match="no confirmation handler"):
+        await run_shell(ShellArgs(command="echo leak"), ctx)
+
+
+async def test_allowlist_bare_reader_does_not_leak(tmp_path):
+    # A bare `cat` allowlist entry must not auto-approve reading a file outside
+    # the workspace.
+    secret = tmp_path / "secret.txt"
+    secret.write_text("top secret", encoding="utf-8")
+    ctx = _ctx(
+        tmp_path,
+        confirm=_no,  # would deny if prompted
+        require_confirmation=True,
+        allow_patterns=["cat"],
+    )
+    with pytest.raises(ToolError, match="declined"):
+        await run_shell(ShellArgs(command=f"cat {secret}"), ctx)
 
 
 async def test_allowlist_miss_still_confirms(tmp_path):
@@ -114,6 +148,7 @@ async def test_allowlist_matches_on_prefix_only(tmp_path):
     [
         ("ls; echo unsafe", "ls"),
         ("git status && echo unsafe", "git status"),
+        ("printf approved & printf chained", "printf approved"),
         ("pytestx", "pytest"),
     ],
 )

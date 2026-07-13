@@ -202,6 +202,7 @@ events.py    AgentEvent union the loop emits
 agent.py     the async run loop + Agent.from_profile  ← the core
 composer.py  PromptComposer seam: per-turn system-prompt assembly
 config.py    AgentProfile + YAML loading with ${ENV} expansion
+paths.py     confined path validation + no-follow directory-handle writes
 memory.py    ShortTermMemory protocol + WindowMemory (prefix-stable eviction) + SummarizingMemory (compaction)
 sessions.py  SessionStore (SQLite per profile dir) + SessionMemory — history & resume
 skills.py    Skill / SkillState / load_skill_tools — skills, incl. code-shipping
@@ -218,7 +219,7 @@ set of invariants.
 ## Development
 
 ```bash
-uv run pytest -q          # full suite (402 tests)
+uv run pytest -q          # full suite (427 tests)
 uv run pytest tests/test_agent.py -q
 ```
 
@@ -230,8 +231,18 @@ suite needs no network or API key.
 `run_shell` executes arbitrary commands. The workspace bounds file tools
 (path-escape is blocked and tested), but it is **not** a sandbox for the shell —
 a command can still reach outside it. The confirmation gate, command timeout,
-and output truncation/offload are the current mitigations; true isolation (containers,
-seccomp) is a deliberate next step.
+and output truncation/offload are the current mitigations; true isolation
+(containers, seccomp) is a deliberate next step. No commands are auto-approved
+by the shipped profiles. A configured multi-token allow pattern deliberately
+matches trailing arguments, while shell control syntax (`;`, `&`, `&&`, pipes,
+redirects, substitutions, and newlines) always falls back to confirmation and
+cannot append another command to an approved prefix.
+
+Security-sensitive workspace creation (attachment ingest and Canvas downloads)
+uses no-follow directory descriptors for every parent component and keeps the
+validated parent open through create/rename. Swapping a checked directory for a
+symlink therefore cannot redirect the write outside the workspace; platforms
+without the required secure descriptor operations fail closed.
 
 `fetch_url` reduces SSRF risk by resolving each host (and every redirect hop)
 and refusing any that maps to a loopback, link-local, or private address —

@@ -30,14 +30,21 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, Field
 
+from lingcore import __version__ as _lingcore_version
 from lingcore.errors import ToolError
+from lingcore.paths import (
+    ConfinedDirectory,
+    PathEscapeError,
+    confined_directory,
+    resolve_confined,
+)
 from lingcore.tools import ToolContext, tool
 
 _TIMEOUT = 30.0
 _DOWNLOAD_TIMEOUT = 120.0
 _MAX_FILE_BYTES = 100 * 1024 * 1024  # 100 MB per file
 _DEFAULT_EXT = (".pdf", ".pptx", ".ppt", ".docx")
-_USER_AGENT = "LingCore/0.0.1"
+_USER_AGENT = f"LingCore/{_lingcore_version}"  # tracks the package version
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -82,6 +89,12 @@ def _next_link(link_header: str) -> str | None:
     return None
 
 
+def _same_origin(url: str, base_url: str) -> bool:
+    """True when ``url`` has the same scheme/host/port as the Canvas base URL."""
+    u, b = urlparse(url), urlparse(base_url)
+    return (u.scheme, u.hostname, u.port) == (b.scheme, b.hostname, b.port)
+
+
 async def _canvas_get(
     base_url: str, token: str, path: str, params: dict[str, Any] | None = None
 ) -> Any:
@@ -111,6 +124,14 @@ async def _canvas_get(
             items.extend(data)
             link = resp.headers.get("Link") or resp.headers.get("link") or ""
             next_url = _next_link(link)
+            # Only follow (and re-send the bearer token to) a pagination link on
+            # the configured Canvas origin. A next-link pointing off-origin is
+            # unexpected and would leak credentials to another host, so refuse.
+            if next_url is not None and not _same_origin(next_url, base_url):
+                raise ToolError(
+                    f"Canvas pagination link points off-origin ({next_url!r}); "
+                    "refusing to send credentials off the configured Canvas host"
+                )
             next_params = None  # the next-link URL already carries the query
     return items
 
@@ -129,12 +150,11 @@ def _strip_html(html: str) -> str:
 
 
 def _confined(workspace: Path, rel: str) -> Path:
-    """Resolve ``rel`` under the workspace, rejecting escapes (fs._resolve guard)."""
-    base = workspace.resolve()
-    full = (base / rel).resolve()
-    if full != base and not full.is_relative_to(base):
-        raise ToolError(f"path escapes workspace: {rel!r}")
-    return full
+    """Resolve ``rel`` under the workspace, rejecting escapes (shared guard)."""
+    try:
+        return resolve_confined(workspace, rel)
+    except PathEscapeError as e:
+        raise ToolError(str(e)) from None
 
 
 def _filter_courses(courses: Any, course_ids: Any) -> list[dict[str, Any]]:
@@ -310,7 +330,9 @@ async def canvas_sync(args: SyncArgs, ctx: ToolContext) -> str:
     base_url, token, opts = _canvas_cfg(ctx)
     exts = tuple(str(e).lower() for e in (opts.get("file_ext") or _DEFAULT_EXT))
     dl_dir = str(opts.get("download_dir", "canvas"))
-    _confined(ctx.workspace, dl_dir).mkdir(parents=True, exist_ok=True)
+    # Validate the configured root eagerly; individual file parents are created
+    # later by no-follow directory-descriptor traversal.
+    _confined(ctx.workspace, dl_dir)
 
     courses = await _resolve_courses(base_url, token, opts, args.course_id)
     downloaded: list[str] = []
@@ -345,22 +367,41 @@ async def canvas_sync(args: SyncArgs, ctx: ToolContext) -> str:
                 sub = _folder_path(folder_map.get(f.get("folder_id")), folder_map)
                 rel = Path(dl_dir) / cname / sub / _sanitize(fname)
                 try:
-                    dest = _confined(ctx.workspace, str(rel))
+                    # Resolve only the parent for containment. The final name is
+                    # handled as a no-follow directory entry, so a planted link
+                    # at the destination is replaced rather than traversed.
+                    parent = _confined(ctx.workspace, str(rel.parent))
+                    parent_rel = parent.relative_to(ctx.workspace.resolve())
                 except ToolError as e:
                     errors.append(f"{fname}: {e}")
                     continue
                 size = f.get("size")
-                if dest.exists() and size is not None and dest.stat().st_size == size:
-                    skipped.append(str(rel))
-                    continue
                 url = f.get("url") or f.get("download_url")
                 if not url:
                     errors.append(f"{fname}: no download URL")
                     continue
                 try:
-                    await _download(client, str(url), token, dest)
-                    downloaded.append(str(rel))
+                    with confined_directory(
+                        ctx.workspace, parent_rel, create=True
+                    ) as directory:
+                        if (
+                            size is not None
+                            and directory.regular_size(rel.name) == size
+                        ):
+                            skipped.append(str(rel))
+                            continue
+                        await _download(
+                            client,
+                            str(url),
+                            token,
+                            base_url,
+                            directory,
+                            rel.name,
+                        )
+                        downloaded.append(str(rel))
                 except ToolError as e:
+                    errors.append(f"{fname}: {e}")
+                except (OSError, PathEscapeError) as e:
                     errors.append(f"{fname}: {e}")
 
     summary = (
@@ -378,16 +419,36 @@ async def canvas_sync(args: SyncArgs, ctx: ToolContext) -> str:
 
 
 async def _download(
-    client: httpx.AsyncClient, url: str, token: str, dest: Path
+    client: httpx.AsyncClient,
+    url: str,
+    token: str,
+    base_url: str,
+    directory: ConfinedDirectory,
+    dest_name: str,
 ) -> None:
-    """Stream a Canvas file to ``dest`` (bounded), removing partials on failure."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    headers = {"Authorization": f"Bearer {token}", "User-Agent": _USER_AGENT}
+    """Stream a Canvas file to a confined directory (bounded and atomic).
+
+    The bearer token is attached only when ``url`` is on the Canvas origin:
+    Canvas file URLs commonly point at signed S3/CDN endpoints that carry their
+    own authorization, and forwarding the token there would leak it to a third
+    party. The body streams into a ``.part`` sibling and is atomically renamed
+    into place on success, so a failed/partial download never leaves a
+    truncated file that a size-match resync would treat as complete.
+    """
+    headers = {"User-Agent": _USER_AGENT}
+    if _same_origin(url, base_url):
+        headers["Authorization"] = f"Bearer {token}"
+    tmp_name = dest_name + ".part"
     try:
         written = 0
+        # The .part name is predictable, so it must never be opened through a
+        # pre-existing path. Every operation uses the already-validated parent
+        # descriptor; replacing that parent's pathname with a symlink cannot
+        # redirect the unlink, create, or final rename.
+        directory.unlink(tmp_name, missing_ok=True)
         async with client.stream("GET", url, headers=headers) as resp:
             resp.raise_for_status()
-            with open(dest, "wb") as fh:
+            with directory.open_exclusive(tmp_name) as fh:
                 async for chunk in resp.aiter_bytes(65536):
                     written += len(chunk)
                     if written > _MAX_FILE_BYTES:
@@ -395,9 +456,10 @@ async def _download(
                             f"file exceeds max size ({_MAX_FILE_BYTES} bytes)"
                         )
                     fh.write(chunk)
+        directory.replace(tmp_name, dest_name)
     except ToolError:
-        dest.unlink(missing_ok=True)
+        directory.unlink(tmp_name, missing_ok=True)
         raise
-    except httpx.HTTPError as e:
-        dest.unlink(missing_ok=True)
+    except (httpx.HTTPError, OSError, PathEscapeError) as e:
+        directory.unlink(tmp_name, missing_ok=True)
         raise ToolError(f"download failed: {e}") from None

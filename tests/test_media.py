@@ -124,3 +124,13 @@ def test_classify_nul_bytes_are_binary():
 
 def test_classify_non_utf8_is_binary():
     assert classify_bytes(b"\xff\xfe\x01\x02", "x")[0] == "binary"
+
+
+def test_text_attachment_rejects_invalid_utf8():
+    # A payload declared kind="text" but not valid UTF-8 must be rejected at
+    # validation, not inlined into the prompt as replacement characters.
+    from lingcore.message import Attachment
+
+    bad = base64.b64encode(b"\xff\xfe\x01\x02").decode("ascii")
+    with pytest.raises(ValueError, match="UTF-8"):
+        Attachment(kind="text", media_type="text/plain", data=bad, name="x.txt")

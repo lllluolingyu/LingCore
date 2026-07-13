@@ -129,3 +129,17 @@ def test_floor_is_monotonic():
     mem.add(Message.user("x"))  # tiny add must never retreat the floor
     mem.render("SYS")
     assert mem._floor >= f1
+
+
+def test_evicted_messages_are_physically_pruned():
+    # Eviction must *release* evicted Message objects, not retain them for the
+    # life of the process (bounded memory). Over many turns on a small window,
+    # the retained set stays near the window size instead of growing with the
+    # whole conversation.
+    mem = WindowMemory(max_messages=6, max_tokens=100_000, model="gpt-4o")
+    for i in range(200):
+        mem.add(Message.user(f"message {i}"))
+        mem.render("SYS")
+    assert len(mem.messages) <= 6  # not 200
+    assert mem.messages[-1].content == "message 199"  # newest kept
+    assert mem._floor >= 190  # the rest were counted as evicted

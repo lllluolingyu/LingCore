@@ -20,7 +20,12 @@ llm:
 persona:
   # Inline fallback — role.md / workflow.md are loaded automatically if present.
   system_prompt: |
-    You are a coding assistant operating inside a sandboxed workspace.
+    You are a coding assistant. Your file tools (read_file, write_file,
+    edit_file, patch_file, list_dir, search) are confined to the workspace
+    directory. run_shell, however, executes commands on the host and is NOT
+    sandboxed — it can read and write files outside the workspace. Prefer the
+    file tools for workspace work, and treat shell commands with corresponding
+    care.
 
 tools:
   - read_file
@@ -41,14 +46,17 @@ tool_options:
     # and return a lean preview + path (read the rest with read_file). Set to 0
     # to disable and fall back to truncation at max_output_chars.
     offload_over_chars: 8000
-    allow_patterns:
-      - "python -m pytest"
-      - "python3 -m pytest"
-      - "pytest"
-      - "ls"
-      - "cat "
-      - "git status"
-      - "git diff"
+    # Auto-approved command patterns (no confirmation prompt). A multi-token
+    # pattern matches that command plus ANY trailing arguments; a bare program
+    # name matches only itself with no arguments. None ship by default: even
+    # innocuous-looking prefixes authorize arbitrary behavior through extra
+    # arguments (`git diff --no-index /dev/null /etc/passwd` reads any file;
+    # `python -m pytest /tmp/x.py` runs arbitrary code) — so every pattern here
+    # is an explicit operator decision. Shell control syntax (`;`, `&`, `&&`,
+    # pipes, redirects, substitutions, newlines) is never auto-approved. Example:
+    # allow_patterns:
+    #   - "git status --short"
+    allow_patterns: []
   fetch_url:
     offload_over_chars: 8000
   read_file:

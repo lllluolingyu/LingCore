@@ -149,6 +149,21 @@ def test_cli_renders_all_event_types_without_error():
     # If we got here, all event branches rendered without raising.
 
 
+def test_cli_escapes_model_controlled_markup():
+    # Model/tool text must be escaped, not interpreted as Rich markup — otherwise
+    # a model could spoof terminal styling, and an unbalanced tag would raise.
+    from rich.console import Console
+
+    cli = CLIFrontend(agent_name="t")
+    cli.console = Console(record=True, width=240)
+    cli.render(TextDelta("[bold red]spoof[/] and [unbalanced"))
+    cli.render(ToolResultEvent(ToolResult(call_id="c", name="tool", content="[link=x]y")))
+    out = cli.console.export_text()
+    assert "[bold red]spoof[/]" in out  # rendered literally, not as styling
+    assert "[unbalanced" in out
+    assert "[link=x]y" in out
+
+
 async def test_cli_confirm_allow_once(monkeypatch):
     cli = CLIFrontend()
     cli.console.quiet = True
@@ -157,6 +172,34 @@ async def test_cli_confirm_allow_once(monkeypatch):
         assert await cli.confirm("echo hi") is True
     # "allow once" must NOT persist anything to the allowlist.
     assert cli._tool_options.get("run_shell", {}).get("allow_patterns", []) == []
+
+
+def test_cli_resume_replay_escapes_stored_tool_names():
+    # Session replay renders *persisted* model output: a tool call whose name
+    # carries Rich markup must render literally, exactly like live events.
+    from datetime import datetime, timezone
+
+    from rich.console import Console
+
+    from lingcore.message import Message
+    from lingcore.sessions import SessionMeta
+
+    cli = CLIFrontend(agent_name="t")
+    cli.console = Console(record=True, width=240)
+    now = datetime.now(timezone.utc)
+    meta = SessionMeta(id="abcd1234", title="t", created_at=now, updated_at=now)
+    messages = [
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[ToolCall(id="c", name="[bold red]spoof[/]", arguments={})],
+        ),
+        Message(role="tool", name="[link=x]y", content="out", tool_call_id="c"),
+    ]
+    cli.show_resume(meta, messages)
+    out = cli.console.export_text()
+    assert "[bold red]spoof[/]" in out  # literal, not styled
+    assert "[link=x]y" in out
 
 
 async def test_cli_confirm_deny(monkeypatch):
@@ -187,7 +230,8 @@ async def test_cli_confirm_allow_always_skips_shell_control(monkeypatch):
     cli = CLIFrontend(tool_options=opts)
     cli.console.quiet = True
     monkeypatch.setattr(cli.console, "input", lambda *a, **k: "A")
-    assert await cli.confirm("ls; echo unsafe") is True
+    for command in ("ls; echo unsafe", "printf approved & printf chained"):
+        assert await cli.confirm(command) is True
     assert opts["run_shell"]["allow_patterns"] == []
 
 

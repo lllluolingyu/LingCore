@@ -69,8 +69,10 @@ class WindowMemory:
         self._evict_to_tokens = max(1, int(max_tokens * evict_to_ratio))
         self._enc = _encoding(model)
         self._messages: list[Message] = []
-        # Count of oldest blocks permanently evicted; only ever increases, so
-        # the retained window grows append-only between evictions.
+        # Lifetime count of oldest blocks physically evicted (monotonic, only
+        # ever increases). Evicted messages are *removed* from ``_messages``, so
+        # retention is bounded by the window rather than growing with the whole
+        # conversation — the store keeps full history for resume, not this list.
         self._floor = 0
 
     def add(self, message: Message) -> None:
@@ -115,39 +117,44 @@ class WindowMemory:
         return blocks
 
     def render(self, system_prompt: str) -> list[Message]:
-        blocks = self._blocks()
         sys_tokens = len(self._enc.encode(system_prompt))
-        self._advance_floor(blocks, sys_tokens)
-        flat = [m for block in blocks[self._floor :] for m in block]
-        return [Message.system(system_prompt), *flat]
+        self._evict(sys_tokens)
+        return [Message.system(system_prompt), *self._messages]
 
-    def _advance_floor(self, blocks: list[list[Message]], sys_tokens: int) -> None:
-        """Advance the monotonic eviction floor only when a hard cap is breached.
+    def _evict(self, sys_tokens: int) -> None:
+        """Drop whole oldest blocks from the retained set when a hard cap is
+        breached — *physically*, so evicted messages (and any attachment
+        payloads they carry) are released rather than retained for the life of
+        the process.
 
-        The floor never retreats, so ``blocks[self._floor:]`` is a suffix that
-        grows only by appends between evictions — a stable request prefix. When a
-        cap is breached the floor jumps forward, dropping whole oldest blocks
-        down to the token low-water mark (and within the message cap), always
-        keeping at least one block.
+        Eviction is hysteretic: nothing is dropped while the working set fits
+        both caps, so between evictions ``_messages`` only grows by appends and
+        the rendered prefix stays byte-stable (the prompt cache hits). When a
+        cap is breached, whole oldest blocks are dropped in one chunk down to
+        the token low-water mark (and within the message cap), always keeping at
+        least one block. ``_floor`` accumulates the lifetime count of evicted
+        blocks (monotonic); ``evict_to_ratio == 1.0`` evicts on every render.
         """
+        blocks = self._blocks()
         n = len(blocks)
-        if n == 0:
-            self._floor = 0
-            return
-        if self._floor > n - 1:
-            self._floor = n - 1  # defensive; floor should never pass the last block
+        if n <= 1:
+            return  # keep ≥1 block; nothing is evictable
         block_toks = [sum(self._tokens(m) for m in b) for b in blocks]
         block_msgs = [len(b) for b in blocks]
-        toks = sys_tokens + sum(block_toks[self._floor :])
-        msgs = sum(block_msgs[self._floor :])
+        toks = sys_tokens + sum(block_toks)
+        msgs = sum(block_msgs)
         if toks <= self.max_tokens and msgs <= self.max_messages:
             return  # within budget — prefix stays byte-stable, cache hits
-        while self._floor < n - 1 and (
+        drop = 0
+        while drop < n - 1 and (
             toks > self._evict_to_tokens or msgs > self.max_messages
         ):
-            toks -= block_toks[self._floor]
-            msgs -= block_msgs[self._floor]
-            self._floor += 1
+            toks -= block_toks[drop]
+            msgs -= block_msgs[drop]
+            drop += 1
+        if drop:
+            self._messages = [m for block in blocks[drop:] for m in block]
+            self._floor += drop
 
     async def maybe_compact(self, system_prompt: str = "") -> Compacted | None:
         """No-op: a plain window only evicts; compaction is SummarizingMemory."""
@@ -257,7 +264,7 @@ class SummarizingMemory:
         )
         tail_msgs = [m for b in blocks[split:] for m in b]
         self._w._messages = [summary_msg, *tail_msgs]
-        self._w._floor = 0  # new epoch: render re-evaluates the floor from scratch
+        self._w._floor = 0  # new epoch: reset the lifetime eviction counter
         after = reserved + sum(self._w._tokens(m) for m in self._w._messages)
         return Compacted(
             summarized_messages=len(head_msgs),

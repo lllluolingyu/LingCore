@@ -28,7 +28,7 @@ def _tool_names(schemas) -> set[str]:
     return {s["function"]["name"] for s in (schemas or [])}
 
 
-def _build_agent(llm, workspace: Path, *, profile_tools, skills) -> Agent:
+def _build_agent(llm, workspace: Path, *, profile_tools, skills, initial_tools=None) -> Agent:
     reg = ToolRegistry()
     for name in profile_tools:
         reg.register(REGISTRY.get(name))
@@ -46,6 +46,7 @@ def _build_agent(llm, workspace: Path, *, profile_tools, skills) -> Agent:
         composer=composer,
         memory=WindowMemory(model="gpt-4o"),
         skill_state=state,
+        initial_tools=frozenset(initial_tools) if initial_tools is not None else None,
     )
 
 
@@ -85,7 +86,7 @@ async def test_activation_affects_next_iteration():
 
 
 async def test_skill_granted_tool_appears_next_iteration():
-    # Profile does NOT list read_file directly; the skill grants it.
+    # read_file is in the ceiling but gated (not initial); the skill grants it.
     skill = Skill(
         name="reader",
         description="d",
@@ -100,12 +101,79 @@ async def test_skill_granted_tool_appears_next_iteration():
     agent = _build_agent(
         llm, Path("/tmp"),
         profile_tools=["activate_skill", "read_file"],
+        initial_tools=["activate_skill"],  # read_file gated behind the skill
         skills={"reader": skill},
     )
     await _drain(agent, "go")
 
-    assert "read_file" not in _tool_names(llm.tool_schemas[0]) or True
+    # Pre-activation: read_file is NOT advertised (gated behind the skill).
+    assert "read_file" not in _tool_names(llm.tool_schemas[0])
     # On the second request the skill is active → read_file must be advertised.
+    assert "read_file" in _tool_names(llm.tool_schemas[1])
+
+
+async def test_gated_tool_refused_at_dispatch_before_activation():
+    # A gated tool called before its skill is active is refused at dispatch,
+    # not merely hidden from the schema (defense in depth).
+    call = ToolCall(id="c1", name="read_file", arguments={"path": "x"})
+    llm = FakeLLMClient([
+        ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
+        ScriptedTurn(text="done"),
+    ])
+    agent = _build_agent(
+        llm, Path("/tmp"),
+        profile_tools=["activate_skill", "read_file"],
+        initial_tools=["activate_skill"],
+        skills={},
+    )
+    events = await _drain(agent, "go")
+    results = [
+        e for e in events
+        if isinstance(e, ToolResultEvent) and e.result.name == "read_file"
+    ]
+    assert results and results[0].result.ok is False
+    assert "unknown tool" in results[0].result.content
+
+
+@pytest.mark.parametrize("parallel_tools", [True, False])
+async def test_activation_does_not_unlock_sibling_call_in_same_batch(
+    tmp_path, parallel_tools
+):
+    """A grant applies on the next request, not later within the current batch."""
+    (tmp_path / "x.txt").write_text("secret", encoding="utf-8")
+    skill = Skill(
+        name="reader",
+        description="d",
+        requested_tools=("read_file",),
+        instructions="x",
+    )
+    calls = [
+        ToolCall(id="a", name="activate_skill", arguments={"name": "reader"}),
+        ToolCall(id="r", name="read_file", arguments={"path": "x.txt"}),
+    ]
+    llm = FakeLLMClient([
+        ScriptedTurn(tool_calls=calls, finish_reason="tool_calls"),
+        ScriptedTurn(text="done"),
+    ])
+    agent = _build_agent(
+        llm,
+        tmp_path,
+        profile_tools=["activate_skill", "read_file"],
+        initial_tools=["activate_skill"],
+        skills={"reader": skill},
+    )
+    agent.parallel_tools = parallel_tools
+
+    events = await _drain(agent, "go")
+    results = {
+        e.result.name: e.result
+        for e in events
+        if isinstance(e, ToolResultEvent)
+    }
+    assert results["activate_skill"].ok is True
+    assert results["read_file"].ok is False
+    assert "unknown tool" in results["read_file"].content
+    # Activation still took effect for the next model request.
     assert "read_file" in _tool_names(llm.tool_schemas[1])
 
 
@@ -264,5 +332,4 @@ async def test_memory_layer_does_not_change_tool_schemas(tmp_path):
 
     # Memory content mentions run_shell/write_file but they must NOT appear as tools.
     assert _tool_names(llm.tool_schemas[0]) == {"read_file"}
-
 

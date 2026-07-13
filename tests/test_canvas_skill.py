@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from lingcore.errors import ToolError
+from lingcore.paths import ConfinedDirectory
 from lingcore.tools import ToolContext
 
 import lingcore.tools.builtin  # noqa: F401
@@ -100,6 +101,72 @@ async def test_bearer_token_is_sent(tmp_path):
     with _patch_canvas(handler):
         await canvas.canvas_courses(canvas.CoursesArgs(), _ctx(tmp_path))
     assert seen["auth"] == "Bearer secret-token"
+
+
+async def test_download_omits_token_off_origin(tmp_path):
+    # Canvas file URLs often point at signed S3/CDN hosts; the bearer token must
+    # NOT be forwarded off the configured Canvas origin.
+    body = b"%PDF-1.4 x"
+    seen = {}
+
+    def handler(request):
+        p = request.url.path
+        if p.endswith("/courses"):
+            return httpx.Response(200, json=[{"id": 1, "name": "Bio"}])
+        if p.endswith("/folders"):
+            return httpx.Response(200, json=[])
+        if p.endswith("/files"):
+            return httpx.Response(200, json=[
+                {"id": 7, "display_name": "lecture.pdf", "folder_id": None,
+                 "size": len(body), "url": "https://files.test/lecture.pdf"},
+            ])
+        if request.url.host == "files.test":
+            seen["file_auth"] = request.headers.get("authorization")
+            return httpx.Response(200, content=body)
+        return httpx.Response(404)
+
+    with _patch_canvas(handler):
+        await canvas.canvas_sync(canvas.SyncArgs(), _ctx(tmp_path, download_dir="c"))
+    assert seen["file_auth"] is None
+
+
+async def test_download_sends_token_on_origin(tmp_path):
+    # A same-origin download URL does receive the token.
+    body = b"%PDF-1.4 y"
+    seen = {}
+
+    def handler(request):
+        p = request.url.path
+        if p.endswith("/courses"):
+            return httpx.Response(200, json=[{"id": 1, "name": "Bio"}])
+        if p.endswith("/folders"):
+            return httpx.Response(200, json=[])
+        if p.endswith("/files"):
+            return httpx.Response(200, json=[
+                {"id": 7, "display_name": "lecture.pdf", "folder_id": None,
+                 "size": len(body), "url": "https://canvas.test/files/7/download"},
+            ])
+        if "/files/7/download" in p:
+            seen["file_auth"] = request.headers.get("authorization")
+            return httpx.Response(200, content=body)
+        return httpx.Response(404)
+
+    with _patch_canvas(handler):
+        await canvas.canvas_sync(canvas.SyncArgs(), _ctx(tmp_path, download_dir="c"))
+    assert seen["file_auth"] == "Bearer secret-token"
+
+
+async def test_pagination_off_origin_link_refused(tmp_path):
+    # A next-link pointing off the Canvas origin is refused (credential leak).
+    def handler(request):
+        return httpx.Response(
+            200, json=[{"id": 1, "name": "Bio"}],
+            headers={"Link": '<https://evil.test/api/v1/courses?page=2>; rel="next"'},
+        )
+
+    with _patch_canvas(handler):
+        with pytest.raises(ToolError, match="off-origin"):
+            await canvas.canvas_courses(canvas.CoursesArgs(), _ctx(tmp_path))
 
 
 # --------------------------------------------------------------------------- #
@@ -201,6 +268,95 @@ async def test_sync_downloads_then_skips(tmp_path):
     with _patch_canvas(handler):
         second = await canvas.canvas_sync(canvas.SyncArgs(), ctx)
     assert "0 downloaded" in second and "1 skipped" in second
+
+
+async def test_sync_part_symlink_does_not_redirect_download(tmp_path):
+    # The ``<dest>.part`` temp name is predictable. A pre-planted symlink there
+    # must not receive the download (it once redirected the body outside the
+    # workspace, then got installed as the completed destination). The write
+    # path clears the link and creates its own regular file exclusively.
+    body = b"%PDF-1.4 fake"
+
+    def handler(request):
+        p = request.url.path
+        if p.endswith("/courses"):
+            return httpx.Response(200, json=[{"id": 1, "name": "Bio"}])
+        if p.endswith("/folders"):
+            return httpx.Response(200, json=[])
+        if p.endswith("/files"):
+            return httpx.Response(200, json=[
+                {"id": 7, "display_name": "lecture.pdf", "folder_id": None,
+                 "size": len(body), "url": "https://files.test/lecture.pdf"},
+            ])
+        if "lecture.pdf" in p:
+            return httpx.Response(200, content=body)
+        return httpx.Response(404)
+
+    workspace = tmp_path / "ws"
+    escape_target = tmp_path / "outside-part"  # outside the workspace
+    course_dir = workspace / "canvas" / "Bio"
+    course_dir.mkdir(parents=True)
+    (course_dir / "lecture.pdf.part").symlink_to(escape_target)
+
+    ctx = _ctx(workspace, download_dir="canvas")
+    with _patch_canvas(handler):
+        out = await canvas.canvas_sync(canvas.SyncArgs(), ctx)
+
+    assert "1 downloaded" in out
+    assert not escape_target.exists()  # nothing written through the link
+    dest = course_dir / "lecture.pdf"
+    assert dest.is_file() and not dest.is_symlink()
+    assert dest.read_bytes() == body
+
+
+async def test_sync_parent_swap_cannot_redirect_download(tmp_path, monkeypatch):
+    """A parent replaced after validation cannot redirect the .part create."""
+    body = b"%PDF-1.4 fake"
+
+    def handler(request):
+        p = request.url.path
+        if p.endswith("/courses"):
+            return httpx.Response(200, json=[{"id": 1, "name": "Bio"}])
+        if p.endswith("/folders"):
+            return httpx.Response(200, json=[])
+        if p.endswith("/files"):
+            return httpx.Response(200, json=[
+                {"id": 7, "display_name": "lecture.pdf", "folder_id": None,
+                 "size": len(body), "url": "https://files.test/lecture.pdf"},
+            ])
+        if "lecture.pdf" in p:
+            return httpx.Response(200, content=body)
+        return httpx.Response(404)
+
+    workspace = tmp_path / "ws"
+    canvas_dir = workspace / "canvas"
+    course_dir = canvas_dir / "Bio"
+    course_dir.mkdir(parents=True)
+    # Move the already-open tree outside the workspace, then put a symlink at an
+    # *intermediate* component. A pathname-based anchor check would follow it and
+    # see the same Bio inode; descriptor re-walk with O_NOFOLLOW must refuse it.
+    outside = tmp_path / "outside"
+    real_open = ConfinedDirectory.open_exclusive
+    swapped = False
+
+    def swap_then_open(self, name, mode=0o644):
+        nonlocal swapped
+        if name == "lecture.pdf.part" and not swapped:
+            canvas_dir.rename(outside)
+            canvas_dir.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return real_open(self, name, mode)
+
+    monkeypatch.setattr(ConfinedDirectory, "open_exclusive", swap_then_open)
+
+    with _patch_canvas(handler):
+        out = await canvas.canvas_sync(
+            canvas.SyncArgs(), _ctx(workspace, download_dir="canvas")
+        )
+
+    assert "0 downloaded" in out and "1 errors" in out
+    assert not (outside / "Bio" / "lecture.pdf").exists()
+    assert not (outside / "Bio" / "lecture.pdf.part").exists()
 
 
 async def test_sync_reports_download_error(tmp_path):

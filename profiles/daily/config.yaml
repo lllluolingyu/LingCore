@@ -37,6 +37,20 @@ tools:
   - memory
   - activate_skill
 
+# Least privilege / progressive disclosure: `tools` above is the hard ceiling;
+# only these are enabled before any skill activates. `search` (bulk content
+# grep) stays gated until a skill that requests it — e.g. the bundled
+# code-review skill — is activated, which unlocks it for the session.
+initial_tools:
+  - read_file
+  - pdf2md
+  - write_file
+  - edit_file
+  - list_dir
+  - fetch_url
+  - memory
+  - activate_skill
+
 tool_options:
   fetch_url:
     # Public-web research only; private/loopback targets stay blocked.

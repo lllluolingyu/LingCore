@@ -8,6 +8,7 @@ from pathlib import Path
 from lingcore.ingest import ingest_attachments
 from lingcore.media_types import TEXT_INLINE_MAX_CHARS
 from lingcore.message import Attachment
+from lingcore.paths import ConfinedDirectory
 
 
 def _b64(data: bytes) -> str:
@@ -96,10 +97,10 @@ def test_writes_gitignore_to_shield_user_repo(tmp_path):
 
 def test_copy_failure_degrades_to_note_and_still_inlines_text(tmp_path, monkeypatch):
     # A failed disk write must not raise; ingest notes it and the turn proceeds.
-    def boom(self, data):
+    def boom(self, name, mode=0o644):
         raise OSError("disk full")
 
-    monkeypatch.setattr(Path, "write_bytes", boom)
+    monkeypatch.setattr(ConfinedDirectory, "open_exclusive", boom)
     out, notes = ingest_attachments([_text(b"hello", name="a.txt")], tmp_path)
     assert any("could not be saved" in n for n in notes)
     # Text inlining decodes the in-memory payload, so it survives a copy failure.
@@ -109,3 +110,99 @@ def test_copy_failure_degrades_to_note_and_still_inlines_text(tmp_path, monkeypa
 def test_empty_list_returns_unchanged(tmp_path):
     out, notes = ingest_attachments([], tmp_path)
     assert out == [] and notes == []
+
+
+def test_symlinked_attachments_dir_does_not_escape(tmp_path):
+    # A pre-existing `attachments` symlink pointing outside the workspace must
+    # not redirect the write there; ingest confines it and notes the failure.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "attachments").symlink_to(outside, target_is_directory=True)
+
+    out, notes = ingest_attachments([_image()], workspace)
+
+    # Nothing was written into the escape target.
+    assert list(outside.iterdir()) == []
+    assert any("escapes workspace" in n for n in notes)
+    # Text/binary fallbacks still compute; the attachment object survives.
+    assert len(out) == 1
+
+
+def test_dangling_gitignore_symlink_does_not_escape(tmp_path):
+    # A dangling `.gitignore` symlink passes an exists() check as absent; the
+    # write must refuse to follow it instead of creating its outside target.
+    workspace = tmp_path / "ws"
+    (workspace / "attachments").mkdir(parents=True)
+    escape_target = tmp_path / "outside-gitignore"
+    (workspace / "attachments" / ".gitignore").symlink_to(escape_target)
+
+    ingest_attachments([_image()], workspace)
+
+    assert not escape_target.exists()  # never created through the link
+    # The attachment itself still lands normally.
+    assert (workspace / "attachments" / "p.png").is_file()
+
+
+def test_dangling_attachment_symlink_does_not_escape(tmp_path):
+    # A dangling symlink planted at the attachment's own filename must not
+    # redirect the payload to its outside target.
+    workspace = tmp_path / "ws"
+    (workspace / "attachments").mkdir(parents=True)
+    escape_target = tmp_path / "outside-payload"
+    (workspace / "attachments" / "p.png").symlink_to(escape_target)
+
+    out, notes = ingest_attachments([_image()], workspace)
+
+    assert not escape_target.exists()
+    # The planted name is treated as occupied; collision handling safely chooses
+    # another regular-file entry under the held attachments directory.
+    assert (workspace / "attachments" / "p-2.png").is_file()
+    assert any("attachments/p-2.png" in n for n in notes)
+
+
+def test_inside_workspace_dangling_symlink_is_not_written_through(tmp_path):
+    # A dangling symlink whose target is *inside* the workspace passes the
+    # confinement check (and exists() reports the name as free) — the exclusive
+    # create must still refuse to follow it, or the payload would materialize
+    # at the link's target instead of under attachments/.
+    workspace = tmp_path / "ws"
+    (workspace / "attachments").mkdir(parents=True)
+    target = workspace / "planted.txt"  # does not exist
+    (workspace / "attachments" / "a.txt").symlink_to(target)
+
+    out, notes = ingest_attachments([_text(b"payload")], workspace)
+
+    assert not target.exists()  # never created through the link
+    assert (workspace / "attachments" / "a-2.txt").read_bytes() == b"payload"
+    assert any("attachments/a-2.txt" in n for n in notes)
+
+
+def test_parent_directory_swap_cannot_redirect_payload(tmp_path, monkeypatch):
+    """Replacing the validated parent just before create must fail closed."""
+    workspace = tmp_path / "ws"
+    attachments = workspace / "attachments"
+    attachments.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    held = workspace / "attachments-held"
+
+    real_open = ConfinedDirectory.open_exclusive
+    swapped = False
+
+    def swap_then_open(self, name, mode=0o644):
+        nonlocal swapped
+        if name == "p.png" and not swapped:
+            attachments.rename(held)
+            attachments.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return real_open(self, name, mode)
+
+    monkeypatch.setattr(ConfinedDirectory, "open_exclusive", swap_then_open)
+
+    _, notes = ingest_attachments([_image()], workspace)
+
+    assert not (outside / "p.png").exists()
+    assert not (held / "p.png").exists()
+    assert any("confined directory changed" in n for n in notes)

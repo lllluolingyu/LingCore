@@ -303,6 +303,43 @@ async def test_ceiling_binds_skill_tool_not_in_profile_tools(tmp_path):
     assert res and res[0].result.ok is False and "unknown tool" in res[0].result.content
 
 
+async def test_static_skill_unlocks_gated_requested_tools(tmp_path):
+    # Three-tier contract for *static* skills: with a narrowed initial_tools,
+    # an always-on skill's requested tools (∩ ceiling) are advertised and
+    # dispatchable from turn 0 — while ceiling tools it does not request stay
+    # gated. (A static skill used to be unable to unlock anything: SkillState
+    # only existed for the dynamic activate_skill path.)
+    root = tmp_path / "prof"
+    _write_skill(
+        root / "skills", "readerD", module=None, requested_tools=["read_file"]
+    )
+    (root / "config.yaml").write_text(
+        "name: t\n"
+        "llm:\n  model: gpt-4o\n"
+        "skills:\n  - readerD\n"
+        "tools:\n  - read_file\n  - search\n"
+        "initial_tools: []\n",
+        encoding="utf-8",
+    )
+    llm = FakeLLMClient([
+        ScriptedTurn(
+            tool_calls=[ToolCall(id="c1", name="read_file", arguments={"path": "hello.txt"})],
+            finish_reason="tool_calls",
+        ),
+        ScriptedTurn(text="done"),
+    ])
+    agent = Agent.from_profile(AgentProfile.load(root), llm=llm)
+    # The static grant lands in the initially-enabled set: requested ∩ ceiling.
+    assert agent.initial_tools == frozenset({"read_file"})
+
+    (agent.tool_ctx.workspace / "hello.txt").write_text("hi", encoding="utf-8")
+    events = await _drain(agent, "go")
+    advertised = {s["function"]["name"] for s in (llm.tool_schemas[0] or [])}
+    assert "read_file" in advertised and "search" not in advertised
+    res = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert res and res[0].result.ok is True and "hi" in res[0].result.content
+
+
 def test_unknown_declared_skill_raises(tmp_path):
     root = tmp_path / "prof2"
     root.mkdir()

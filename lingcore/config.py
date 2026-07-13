@@ -262,6 +262,14 @@ class AgentProfile(BaseModel):
     llm: LLMCfg
     persona: PersonaCfg = Field(default_factory=PersonaCfg)
     tools: list[str] = Field(default_factory=list)
+    # Tools enabled WITHOUT any skill active — the "initially enabled" set.
+    # ``None`` (default) means all of ``tools`` are initially enabled (today's
+    # behavior). Set it to a subset to gate the rest behind skill activation
+    # (progressive disclosure / least privilege): ``tools`` stays the hard
+    # ceiling, a skill can unlock any ceiling tool it requests, but a tool that
+    # is neither initial nor granted by an active skill is neither advertised
+    # nor dispatchable.
+    initial_tools: list[str] | None = None
     # Skills the profile *statically engages*: their bundled tool code is loaded
     # and their instructions are injected as a prompt layer (always-on). Distinct
     # from the model-invoked ``activate_skill`` tool (dynamic). A profile may use
@@ -286,6 +294,17 @@ class AgentProfile(BaseModel):
         if v is not None and not v.strip():
             return None
         return v
+
+    @model_validator(mode="after")
+    def _initial_tools_within_ceiling(self) -> "AgentProfile":
+        """initial_tools must be a subset of tools (the hard ceiling)."""
+        if self.initial_tools is not None:
+            extra = [t for t in self.initial_tools if t not in self.tools]
+            if extra:
+                raise ValueError(
+                    f"initial_tools {extra} are not listed in tools (the ceiling)"
+                )
+        return self
 
     @classmethod
     def load(cls, path: str | Path) -> "AgentProfile":

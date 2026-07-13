@@ -20,6 +20,8 @@ from __future__ import annotations
 import hashlib
 from typing import TYPE_CHECKING
 
+from lingcore.paths import resolve_confined
+
 if TYPE_CHECKING:
     from lingcore.tools import ToolContext
 
@@ -62,7 +64,10 @@ def offload_text(
     digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
     rel = f"{RUNTIME_DIRNAME}/{_OFFLOAD_SUBDIR}/{source}-{digest}.txt"
     try:
-        dest = ctx.workspace / rel
+        # resolve_confined follows symlinks before checking containment, so a
+        # symlinked runtime dir that would redirect the write outside the
+        # workspace raises here and degrades to inline truncation below.
+        dest = resolve_confined(ctx.workspace, rel)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(text, encoding="utf-8")
     except Exception:

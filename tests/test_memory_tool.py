@@ -138,6 +138,15 @@ async def test_package_dir_write_blocked(tmp_path):
         await memory(memory.args_model(action="remember", key="k", content="v"), ctx)
 
 
+async def test_absolute_path_inside_package_blocked_even_with_flag(tmp_path):
+    """allow_absolute_path must not become a hole to write into the package."""
+    target = _PACKAGE_DIR / "sneaky" / "mem.md"
+    ctx = _ctx(tmp_path, {"path": str(target), "allow_absolute_path": True})
+    with pytest.raises(ToolError, match="installed package"):
+        await memory(memory.args_model(action="remember", key="k", content="v"), ctx)
+    assert not target.exists()
+
+
 # --------------------------------------------------------------------------- #
 # No profile_dir                                                               #
 # --------------------------------------------------------------------------- #

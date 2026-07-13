@@ -159,6 +159,17 @@ async def test_high_risk_skill_confirmed():
     assert state.active == ["review"]
 
 
+async def test_high_risk_skill_refused_without_confirm_handler():
+    # No confirmation handler (confirm=None) + a high-risk skill must REFUSE
+    # activation, not silently activate (mirrors run_shell's no-handler refusal).
+    state = _state(profile_tools={"read_file", "run_shell"})
+    with pytest.raises(ToolError, match="no confirmation handler"):
+        await activate_skill(
+            activate_skill.args_model(name="review"), _ctx(state, confirm=None)
+        )
+    assert state.active == []
+
+
 async def test_low_risk_skill_no_confirmation():
     state = _state(profile_tools={"read_file"}, skills={"review": _skill(tools=("read_file",))})
 

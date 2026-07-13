@@ -8,7 +8,11 @@ from lingcore.errors import (
 )
 from lingcore.message import Attachment, Conversation, Message, ToolCall, ToolResult, UserInput
 
-__version__ = "0.0.1"
+# Single source of truth for the package version: pyproject.toml declares
+# ``dynamic = ["version"]`` and hatchling reads it from here at build time, so
+# wheel metadata can never drift from what the code (and the HTTP user-agent
+# strings derived from this) reports.
+__version__ = "0.1.0"
 
 __all__ = [
     "Attachment",
