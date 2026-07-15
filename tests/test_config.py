@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,192 @@ def test_env_substitution_uses_set_value(tmp_path, monkeypatch):
     assert prof.llm.model == "from-env"
 
 
+def test_profile_dotenv_loads_before_expansion_and_key_resolution(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("LINGCORE_TEST_DOTENV_MODEL", raising=False)
+    monkeypatch.delenv("LINGCORE_TEST_DOTENV_KEY", raising=False)
+    (tmp_path / ".env").write_text(
+        'LINGCORE_TEST_DOTENV_MODEL="from profile env"\n'
+        "LINGCORE_TEST_DOTENV_KEY=dotenv-secret\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "config.yaml").write_text(
+        """
+llm:
+  model: ${LINGCORE_TEST_DOTENV_MODEL}
+  api_key_env: LINGCORE_TEST_DOTENV_KEY
+""",
+        encoding="utf-8",
+    )
+
+    prof = AgentProfile.load(tmp_path)
+
+    assert prof.llm.model == "from profile env"
+    assert prof.llm.resolve_api_key() == "dotenv-secret"
+    assert "LINGCORE_TEST_DOTENV_KEY" not in os.environ
+    assert "dotenv-secret" not in repr(prof)
+    assert "dotenv-secret" not in repr(prof.llm)
+
+
+def test_profile_dotenv_overrides_process_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("LINGCORE_TEST_DOTENV_PRECEDENCE", "from-process")
+    monkeypatch.setenv("LINGCORE_TEST_KEY_PRECEDENCE", "process-secret")
+    (tmp_path / ".env").write_text(
+        "LINGCORE_TEST_DOTENV_PRECEDENCE=from-file\n"
+        "LINGCORE_TEST_KEY_PRECEDENCE=profile-secret\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "config.yaml").write_text(
+        "llm:\n  model: ${LINGCORE_TEST_DOTENV_PRECEDENCE}\n"
+        "  api_key_env: LINGCORE_TEST_KEY_PRECEDENCE\n",
+        encoding="utf-8",
+    )
+
+    prof = AgentProfile.load(tmp_path)
+
+    assert prof.llm.model == "from-file"
+    assert prof.llm.resolve_api_key() == "profile-secret"
+
+
+def test_empty_profile_dotenv_value_blocks_exported_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("LINGCORE_TEST_EMPTY_OVERRIDE", "process-secret")
+    (tmp_path / ".env").write_text(
+        "LINGCORE_TEST_EMPTY_OVERRIDE=\n", encoding="utf-8"
+    )
+    (tmp_path / "config.yaml").write_text(
+        "llm:\n  model: test-model\n"
+        "  api_key_env: LINGCORE_TEST_EMPTY_OVERRIDE\n",
+        encoding="utf-8",
+    )
+
+    prof = AgentProfile.load(tmp_path)
+
+    with pytest.raises(ConfigError, match="not set"):
+        prof.llm.resolve_api_key()
+
+
+def test_empty_profile_dotenv_value_uses_expansion_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("LINGCORE_TEST_EMPTY_EXPANSION", "exported-model")
+    (tmp_path / ".env").write_text(
+        "LINGCORE_TEST_EMPTY_EXPANSION=\n", encoding="utf-8"
+    )
+    (tmp_path / "config.yaml").write_text(
+        "llm:\n  model: ${LINGCORE_TEST_EMPTY_EXPANSION:-default-model}\n",
+        encoding="utf-8",
+    )
+
+    prof = AgentProfile.load(tmp_path)
+
+    assert prof.llm.model == "default-model"
+
+
+def test_empty_profile_dotenv_value_without_default_errors(tmp_path, monkeypatch):
+    monkeypatch.setenv("LINGCORE_TEST_EMPTY_NO_DEFAULT", "exported-model")
+    (tmp_path / ".env").write_text(
+        "LINGCORE_TEST_EMPTY_NO_DEFAULT=\n", encoding="utf-8"
+    )
+    (tmp_path / "config.yaml").write_text(
+        "llm:\n  model: ${LINGCORE_TEST_EMPTY_NO_DEFAULT}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="not set"):
+        AgentProfile.load(tmp_path)
+
+
+def test_profile_dotenv_values_are_literal_not_interpolated(tmp_path, monkeypatch):
+    monkeypatch.delenv("LINGCORE_TEST_LITERAL_KEY", raising=False)
+    (tmp_path / ".env").write_text(
+        "LINGCORE_TEST_LITERAL_KEY=se${CRET}-with-dollar\n", encoding="utf-8"
+    )
+    (tmp_path / "config.yaml").write_text(
+        "llm:\n  model: test-model\n"
+        "  api_key_env: LINGCORE_TEST_LITERAL_KEY\n",
+        encoding="utf-8",
+    )
+
+    prof = AgentProfile.load(tmp_path)
+
+    assert prof.llm.resolve_api_key() == "se${CRET}-with-dollar"
+
+
+def test_from_profile_carries_dotenv_into_tool_context(tmp_path, monkeypatch):
+    monkeypatch.delenv("LINGCORE_TEST_TOOL_ENV", raising=False)
+    (tmp_path / ".env").write_text(
+        "LINGCORE_TEST_TOOL_ENV=tool-secret\n", encoding="utf-8"
+    )
+    (tmp_path / "config.yaml").write_text(
+        "llm:\n  model: test-model\n",
+        encoding="utf-8",
+    )
+
+    prof = AgentProfile.load(tmp_path)
+    agent = Agent.from_profile(prof, llm=FakeLLMClient([]))
+
+    assert agent.tool_ctx.getenv("LINGCORE_TEST_TOOL_ENV") == "tool-secret"
+    assert "tool-secret" not in repr(agent.tool_ctx)
+
+
+def test_tool_context_getenv_treats_empty_profile_value_as_unset(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LINGCORE_TEST_TOOL_EMPTY", "exported-secret")
+    (tmp_path / ".env").write_text(
+        "LINGCORE_TEST_TOOL_EMPTY=\n", encoding="utf-8"
+    )
+    (tmp_path / "config.yaml").write_text(
+        "llm:\n  model: test-model\n",
+        encoding="utf-8",
+    )
+
+    prof = AgentProfile.load(tmp_path)
+    agent = Agent.from_profile(prof, llm=FakeLLMClient([]))
+
+    # The empty profile value blocks the exported variable (never leaks
+    # through) and behaves as unset: the caller's default is returned.
+    assert agent.tool_ctx.getenv("LINGCORE_TEST_TOOL_EMPTY") is None
+    assert agent.tool_ctx.getenv("LINGCORE_TEST_TOOL_EMPTY", "d") == "d"
+
+
+def test_profile_dotenv_values_are_isolated_between_profiles(tmp_path, monkeypatch):
+    monkeypatch.delenv("LINGCORE_TEST_SHARED_KEY", raising=False)
+    profiles = []
+    for name, secret in (("one", "secret-one"), ("two", "secret-two")):
+        root = tmp_path / name
+        root.mkdir()
+        (root / ".env").write_text(
+            f"LINGCORE_TEST_SHARED_KEY={secret}\n", encoding="utf-8"
+        )
+        (root / "config.yaml").write_text(
+            "llm:\n  model: test-model\n"
+            "  api_key_env: LINGCORE_TEST_SHARED_KEY\n",
+            encoding="utf-8",
+        )
+        profiles.append(AgentProfile.load(root))
+
+    assert profiles[0].llm.resolve_api_key() == "secret-one"
+    assert profiles[1].llm.resolve_api_key() == "secret-two"
+    assert "LINGCORE_TEST_SHARED_KEY" not in os.environ
+
+
+def test_profile_dotenv_does_not_search_cwd_or_parent_dirs(tmp_path, monkeypatch):
+    monkeypatch.delenv("LINGCORE_TEST_PARENT_ENV", raising=False)
+    (tmp_path / ".env").write_text(
+        "LINGCORE_TEST_PARENT_ENV=must-not-load\n", encoding="utf-8"
+    )
+    profile_dir = tmp_path / "nested" / "profile"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "config.yaml").write_text(
+        "llm:\n  model: ${LINGCORE_TEST_PARENT_ENV}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="not set"):
+        AgentProfile.load(profile_dir)
+
+
 def test_missing_env_without_default_errors(tmp_path):
     text = """
 llm:
@@ -70,7 +257,7 @@ llm:
 
 def test_api_key_resolution_missing(tmp_path):
     prof = AgentProfile.load(_write(tmp_path, FIXTURE.replace("api_key_env: TEST_KEY", "api_key_env: NOPE_KEY")))
-    with pytest.raises(ConfigError, match="not set in the environment"):
+    with pytest.raises(ConfigError, match="not set"):
         prof.llm.resolve_api_key()
 
 

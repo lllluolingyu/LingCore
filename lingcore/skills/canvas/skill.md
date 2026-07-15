@@ -40,3 +40,7 @@ Guidance:
   include the raw date so there's no ambiguity.
 - If Canvas isn't configured (missing URL or token), say so plainly and tell the
   student which environment variable to set — don't guess at their coursework.
+  A generic safe template is colocated with this skill as `.env.example`; the
+  bundled teaching profile has its own combined `.env.example`. Real values
+  belong in the engaging profile's gitignored `.env` (or the process
+  environment), never in this skill directory or profile YAML.

@@ -5,20 +5,24 @@ coding agent, a role-play agent, or a psych consultant purely by loading a
 different YAML file. This module defines the validated shape of that file and
 ``Agent.from_profile``'s backing assembly logic.
 
-Secrets never live in the profile. ``llm.api_key_env`` names an environment
-variable; the key is read from the process environment at load time. String
-fields support ``${VAR}`` and ``${VAR:-default}`` expansion so endpoints and
-model names can come from the environment too.
+Secrets never live in profile YAML. ``llm.api_key_env`` names an environment
+variable; its value may be exported by the parent process or kept in the
+selected profile directory's optional ``.env`` file. The selected profile's
+``.env`` wins, and LingCore never searches the CWD or parent directories for another
+``.env``. String fields support ``${VAR}`` and ``${VAR:-default}`` expansion so
+endpoints and model names can come from the same environment too.
 """
 
 from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
+from dotenv import dotenv_values
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from lingcore.errors import ConfigError
@@ -28,14 +32,45 @@ from lingcore.modality import DEFAULT_PDF_MAX_CHARS
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
-def _expand(value: Any) -> Any:
+def _load_profile_env(profile_file: Path) -> dict[str, str]:
+    """Parse only ``<profile dir>/.env`` without mutating ``os.environ``.
+
+    An explicit path is important here: ``python-dotenv`` can discover files by
+    walking parent directories when no path is supplied, which would make a
+    launch depend on the caller's CWD and could import variables from an
+    unrelated checkout. Profile selection is the trust decision, so its exact
+    sibling file is the only implicit source.
+    """
+    env_path = profile_file.parent / ".env"
+    if not env_path.is_file():
+        return {}
+    try:
+        # interpolate=False: this file's primary payload is secrets, and an
+        # opaque token may legally contain ``${``. Composition belongs to the
+        # YAML's own ${VAR} expansion, not to dotenv rewriting values.
+        parsed = dotenv_values(
+            dotenv_path=env_path,
+            encoding="utf-8",
+            interpolate=False,
+        )
+    except (OSError, UnicodeError) as e:
+        raise ConfigError(
+            f"could not read profile environment file {env_path}: {e}"
+        ) from None
+    # A bare key (``NAME`` with no '=') has value None in python-dotenv and is
+    # intentionally ignored, matching load_dotenv's behavior.
+    return {name: value for name, value in parsed.items() if value is not None}
+
+
+def _expand(value: Any, environment: Mapping[str, str] | None = None) -> Any:
     """Recursively expand ${VAR} / ${VAR:-default} in strings."""
+    env = os.environ if environment is None else environment
     if isinstance(value, str):
 
         def repl(m: re.Match[str]) -> str:
             name, default = m.group(1), m.group(2)
-            if name in os.environ:
-                return os.environ[name]
+            if name in env:
+                return env[name]
             if default is not None:
                 return default
             raise ConfigError(
@@ -45,9 +80,9 @@ def _expand(value: Any) -> Any:
 
         return _ENV_PATTERN.sub(repl, value)
     if isinstance(value, dict):
-        return {k: _expand(v) for k, v in value.items()}
+        return {k: _expand(v, env) for k, v in value.items()}
     if isinstance(value, list):
-        return [_expand(v) for v in value]
+        return [_expand(v, env) for v in value]
     return value
 
 
@@ -115,7 +150,9 @@ class LLMCfg(BaseModel):
     def _dedup_modalities(cls, v: list[NativeModality]) -> list[NativeModality]:
         return list(dict.fromkeys(v))
 
-    def resolve_api_key(self) -> str:
+    def resolve_api_key(
+        self, environment: Mapping[str, str] | None = None
+    ) -> str:
         """Read the API key from the named env var.
 
         Returns a harmless placeholder when no env var is named — local
@@ -124,11 +161,19 @@ class LLMCfg(BaseModel):
         """
         if not self.api_key_env:
             return "lingcore-no-key"
-        key = os.environ.get(self.api_key_env)
+        profile_env = (
+            environment
+            if environment is not None
+            else getattr(self, "_profile_env", {})
+        )
+        if self.api_key_env in profile_env:
+            key = profile_env.get(self.api_key_env)
+        else:
+            key = os.environ.get(self.api_key_env)
         if not key:
             raise ConfigError(
                 f"api_key_env names {self.api_key_env!r} but that variable is "
-                "not set in the environment"
+                "not set in the profile .env or process environment"
             )
         return key
 
@@ -308,24 +353,38 @@ class AgentProfile(BaseModel):
 
     @classmethod
     def load(cls, path: str | Path) -> "AgentProfile":
-        """Load and validate a profile YAML, expanding ${ENV} references.
+        """Load a profile's ``.env`` and YAML, then expand ${ENV} references.
 
         ``path`` may be a directory (``config.yaml`` inside is used) or a
-        direct path to any YAML file.  The resolved source directory is stored
-        in ``_source_dir`` for later use (e.g. resolving prompt layer files).
+        direct path to any YAML file. Only ``.env`` beside that selected YAML is
+        considered; its values take precedence over exported variables. The resolved
+        source directory is stored in ``_source_dir`` for later use (e.g.
+        resolving prompt layer files).
         """
         p = Path(path)
         if p.is_dir():
             p = p / "config.yaml"
         if not p.is_file():
             raise ConfigError(f"profile not found: {path}")
+        # Must precede YAML parsing/expansion: .env values may supply `${VAR}`
+        # fields as well as credentials resolved later by providers and tools.
+        profile_env = _load_profile_env(p)
         try:
             raw = yaml.safe_load(p.read_text("utf-8")) or {}
         except yaml.YAMLError as e:
             raise ConfigError(f"invalid YAML in {path}: {e}") from None
         if not isinstance(raw, dict):
             raise ConfigError(f"profile {path} must be a mapping at the top level")
-        expanded = _expand(raw)
+        # The explicitly selected profile overrides ambient variables inherited
+        # from the shell, without copying either source into process globals.
+        # An empty profile value still blocks the exported variable but counts
+        # as unset, so a ${VAR:-default} expansion falls back to its default
+        # (invariant 4) instead of injecting an empty string.
+        effective_env = {**os.environ, **profile_env}
+        for name, value in profile_env.items():
+            if not value:
+                effective_env.pop(name, None)
+        expanded = _expand(raw, effective_env)
         try:
             profile = cls.model_validate(expanded)
         except Exception as e:
@@ -335,6 +394,15 @@ class AgentProfile(BaseModel):
         # Store the directory so callers can resolve sibling files (prompt
         # layers, memory.md, skills/) without knowing the load path.
         object.__setattr__(profile, "_source_dir", p.parent.resolve())
+        object.__setattr__(profile, "_profile_env", profile_env)
+        # Keep the convenient ``profile.llm.resolve_api_key()`` API working
+        # while Agent.from_profile also passes the profile environment
+        # explicitly at the composition boundary.
+        object.__setattr__(profile.llm, "_profile_env", profile_env)
+        if profile.media_fallback.image is not None:
+            object.__setattr__(
+                profile.media_fallback.image, "_profile_env", profile_env
+            )
         return profile
 
     def workspace_path(self, base: Path | None = None) -> Path:

@@ -16,13 +16,20 @@ OpenAI-compatible endpoint by pointing at a different `base_url`.
 ## Features
 
 - **Profile-driven** — model, endpoint, persona, tool list, workspace, memory,
-  and sampling all live in a YAML file. Secrets stay in the environment.
+  and sampling all live in a YAML file. Secrets stay in exported environment
+  variables or an optional profile-local `.env`, never in YAML.
 - **Thin async core** — a small, owned agent loop with streaming, parallel tool
   calls, and a hard iteration cap. No heavyweight orchestration framework.
 - **Pluggable tools** — a tool is an `async` function plus a pydantic args
   model and a `@tool` decorator. The coding agent ships with file read/write/
   edit, patch, directory listing, search, URL fetch, and a confirmation-gated
   shell.
+- **Knowledge retrieval** — the `knowledge` tool keeps offline grep as its
+  no-index default, with opt-in incremental semantic and hybrid retrieval over
+  a local SQLite index. Stable source chunks retain page/line citations,
+  unchanged vectors are reused by content hash, deleted and stale sources are
+  handled explicitly, and remote embedding/reranking credentials stay in the
+  environment.
 - **Cache-aware context** — built so the request prefix stays stable and
   provider prompt-caching actually hits. Tool output is kept lean and
   deterministic (`read_file` is paginated + line-numbered; heavy `run_shell` /
@@ -78,15 +85,32 @@ uv run lingcore --profile profiles/coding_ollama --workspace /path/to/your/proje
 
 ### Keyed provider (OpenAI, etc.)
 
-No file edits — just environment variables:
+For local development, put values in the selected profile's gitignored `.env`:
+
+```dotenv
+# profiles/coding/.env
+LINGCORE_BASE_URL=https://api.openai.com/v1
+LINGCORE_MODEL=gpt-4o
+LINGCORE_API_KEY_ENV=OPENAI_API_KEY   # names the var holding your key
+OPENAI_API_KEY=sk-...
+```
+
+Then launch normally:
 
 ```bash
-export LINGCORE_BASE_URL=https://api.openai.com/v1
-export LINGCORE_MODEL=gpt-4o
-export LINGCORE_API_KEY_ENV=OPENAI_API_KEY   # names the var holding your key
-export OPENAI_API_KEY=sk-...
+uv run lingcore doctor --profile profiles/coding
 uv run lingcore
 ```
+
+`lingcore doctor` is offline and read-only. It validates the profile YAML,
+reports missing/empty required variables and whether each is sourced from the
+profile `.env` or the process environment, checks `.env.example` coverage, and
+exits nonzero for configuration errors. It never prints values, opens sessions,
+creates a workspace, builds the agent, or contacts a provider.
+
+Exporting the same variables remains supported as a fallback when the selected
+profile's `.env` does not define them, which is useful for CI and production
+secret injection.
 
 Type a message; the agent streams its reply and shows each tool call. Shell
 commands prompt for confirmation before running. Type `/exit` to quit.
@@ -125,6 +149,8 @@ prompt-layer files. Four are shipped:
 
 ```
 my-agent/
+  .env           # optional local variables/secrets (gitignored; never commit)
+  .env.example   # secret-free setup template (commit this when env is needed)
   config.yaml    # llm, tools, memory, loop, guardrail, sessions
   world.md       # optional — environment / setting context
   role.md        # optional — persona
@@ -138,9 +164,82 @@ my-agent/
 composed in that order to form the system prompt. `config.yaml` may also set
 `persona.system_prompt` as an inline fallback and `persona.include` for extra files.
 
-`--profile` accepts a directory or a direct path to any YAML file. String values
-support `${VAR}` and `${VAR:-default}` expansion. To create a new agent type, add
-a directory — no code required.
+`--profile` accepts a directory or a direct path to any YAML file. LingCore
+loads only the `.env` beside that selected YAML—never one discovered from the
+current directory or a parent—before expanding `${VAR}` and
+`${VAR:-default}`. Values stay scoped to the loaded profile (they are not copied
+into global `os.environ`) and override same-named variables inherited from the
+launching process. Real `.env` files are gitignored; commit a secret-free
+`.env.example` when a profile or skill needs setup documentation. The shipped
+`coding`, `daily`, and `teaching` profiles include one; keyless
+`coding_ollama` needs none. Run `lingcore doctor --profile <path>` after copying
+or editing one. To create a new agent type, add a directory—no code required.
+
+## Knowledge retrieval
+
+Enable the `knowledge` tool in a profile to search a configured workspace
+corpus. Its default is deliberately offline and embedding-free:
+
+```yaml
+tools:
+  - knowledge
+
+tool_options:
+  knowledge:
+    backend: grep
+    sources: ["docs/**/*.md", "notes/**/*.txt", "papers/**/*.pdf"]
+    embedding:
+      enabled: false  # default even when this block is omitted
+```
+
+`action: query` then searches live files and returns `path:line` matches;
+`action: index` is a no-op. To opt into semantic retrieval, switch to `index`
+(embedding ranking) or `hybrid` (SQLite full-text + embedding ranking), supply
+the named key, and build the index once:
+
+```yaml
+tool_options:
+  knowledge:
+    backend: hybrid
+    sources: ["docs/**/*.md", "papers/**/*.pdf"]
+    embedding:
+      enabled: true
+      provider: siliconflow
+      base_url: https://api.siliconflow.cn/v1
+      api_key_env: SILICONFLOW_API_KEY
+      model: Qwen/Qwen3-VL-Embedding-8B
+      dimensions: 768
+      batch_size: 32
+    reranker:
+      enabled: false  # optional second API call; also off by default
+      provider: siliconflow
+      base_url: https://api.siliconflow.cn/v1
+      api_key_env: SILICONFLOW_API_KEY
+      model: Qwen/Qwen3-VL-Reranker-8B
+```
+
+```dotenv
+# my-agent/.env (or export the same variable)
+SILICONFLOW_API_KEY=...
+```
+
+```bash
+uv run lingcore --profile my-agent --workspace /path/to/corpus
+# Ask the agent to call knowledge with action=index, then action=query.
+```
+
+The index lives at `<workspace>/.lingcore/knowledge.sqlite3` by default and is
+updated incrementally. A full index removes deleted files; `paths` on the
+`index` action updates only selected workspace-relative files/directories/globs.
+Queries never return changed or deleted indexed content: they show a stale-index
+notice until it is rebuilt. UTF-8 text is chunked with line ranges; PDFs are
+extracted page by page when the optional PDF dependency is installed. Retrieval
+output is capped by `max_hits`, `max_excerpt_chars`, and `max_context_chars`.
+The provider adapters follow SiliconFlow's
+[embedding](https://api-docs.siliconflow.cn/docs/api/embeddings-post) and
+[reranking](https://api-docs.siliconflow.cn/docs/api/rerank-post) contracts;
+alternate providers can implement the small `EmbeddingProvider` and
+`RerankingProvider` protocols in `lingcore/knowledge.py`.
 
 ## Skills
 
@@ -151,6 +250,7 @@ always-on) or dynamically via the model-invoked `activate_skill` tool.
 
 ```
 lingcore/skills/canvas/
+  .env.example    # safe declaration of required variables; no real secrets
   skill.md         # name, description, requested_tools, provides, module + guidance
   canvas_tools.py  # @tool functions registered when the skill is engaged
 ```
@@ -164,13 +264,30 @@ by the `teaching` profile) is the worked example: an async Canvas LMS client
 exposing `canvas_courses`, `canvas_assignments`, `canvas_announcements`, and
 `canvas_sync`. Its access token is read from an env var named by
 `tool_options.canvas.token_env` — never stored in YAML — and downloads are
-confined to the workspace.
+confined to the workspace. The required variables are documented beside the
+skill, but the actual values belong to the profile that engages it:
+
+```dotenv
+# profiles/teaching/.env
+CANVAS_URL=https://<school>.instructure.com
+CANVAS_TOKEN=<your-canvas-token>
+```
+
+Start from the teaching profile's combined safe template, then edit the copied
+file and check it before launch:
 
 ```bash
-export CANVAS_URL=https://<school>.instructure.com
-export CANVAS_TOKEN=<your-canvas-token>
+cp profiles/teaching/.env.example profiles/teaching/.env
+uv run lingcore doctor --profile profiles/teaching
 uv run lingcore --profile profiles/teaching   # "what's due this week?"
 ```
+
+Do not put the real token in `lingcore/skills/canvas/`: that directory is
+package code shared by every profile and may be committed or replaced during an
+upgrade. The Canvas template covers the skill's variables only; also set the LLM
+provider key named by the teaching profile if it is not already exported. A
+`CANVAS_TOKEN` in the teaching profile's `.env` overrides an exported value, so
+each profile reliably selects its own Canvas account.
 
 ## Writing a tool
 
@@ -201,8 +318,10 @@ llm.py       async LLMClient over the OpenAI SDK (the loop never imports openai)
 events.py    AgentEvent union the loop emits
 agent.py     the async run loop + Agent.from_profile  ← the core
 composer.py  PromptComposer seam: per-turn system-prompt assembly
-config.py    AgentProfile + YAML loading with ${ENV} expansion
+config.py    AgentProfile + scoped profile .env + YAML ${ENV} expansion
+doctor.py    offline profile/env/.env.example diagnostics (never prints values)
 paths.py     confined path validation + no-follow directory-handle writes
+knowledge.py provider-neutral embedding/reranking seams + SiliconFlow adapters
 memory.py    ShortTermMemory protocol + WindowMemory (prefix-stable eviction) + SummarizingMemory (compaction)
 sessions.py  SessionStore (SQLite per profile dir) + SessionMemory — history & resume
 skills.py    Skill / SkillState / load_skill_tools — skills, incl. code-shipping
@@ -226,17 +345,20 @@ commitments.
 1. **Interaction and onboarding**
    - Add an explicit stop/cancel control to LingChat, with defined behavior for
      messages submitted while a turn is running.
-   - Add `lingcore profile init/list/doctor` and separate immutable profile
-     templates from writable sessions, memory, and workspaces in the user's
-     application-state directory. A wheel install should be useful without a
-     repository checkout.
+   - Implemented: `lingcore doctor` performs offline, secret-safe profile and
+     environment diagnostics. Add `lingcore profile init/list` and separate
+     immutable profile templates from writable sessions, memory, and workspaces
+     in the user's application-state directory. A wheel install should be useful
+     without a repository checkout.
 
 2. **v0.2 — Knowledge 1.0**
-   - Finish the existing `knowledge` tool's incremental `index` and `hybrid`
-     backends: stable chunks, content-hash updates, full-text plus embedding
-     ranking, deletion handling, and a provider-independent embedding seam.
-   - Preserve source metadata (path, page, and line range), emit retrieval
-     events, and render verifiable citations in frontends.
+   - Implemented: the `knowledge` tool's incremental `index` and `hybrid`
+     backends now provide stable chunks, content-hash vector reuse, full-text
+     plus embedding ranking, deletion/stale handling, and provider-independent
+     embedding/reranking seams. Embedding remains explicitly opt-in.
+   - Source path/page/line metadata and verifiable tool-result citations are in
+     place; add structured retrieval events and render them natively in each
+     frontend.
    - Keep explicit tool-driven retrieval as the baseline, then add opt-in
      `auto_retrieve` prompt injection with a hard context budget.
    - Ship retrieval evaluations for relevance, stale-index handling, citation
@@ -273,7 +395,7 @@ tracing, and evaluations so added autonomy is observable and testable.
 ## Development
 
 ```bash
-uv run pytest -q          # full suite (435 tests)
+uv run pytest -q          # full suite (476 tests)
 uv run pytest tests/test_agent.py -q
 ```
 
@@ -292,10 +414,13 @@ matches trailing arguments, while shell control syntax (`;`, `&`, `&&`, pipes,
 redirects, substitutions, and newlines) always falls back to confirmation and
 cannot append another command to an approved prefix.
 
-Security-sensitive workspace creation (attachment ingest, Canvas downloads,
-and staged tool output) uses no-follow directory descriptors for every parent
-component and keeps the validated parent open through create/rename. Swapping a
-checked directory for a symlink therefore cannot redirect the write outside the
+Security-sensitive workspace state (attachment ingest, Canvas downloads,
+staged tool output, and the knowledge index) uses no-follow directory
+descriptors for every parent component and keeps the validated parent open
+through reads and atomic create/rename. The SQLite knowledge database is loaded
+through a bounded no-follow descriptor and serialized back atomically, so it
+never has to reopen an attacker-swappable workspace path. Swapping a checked
+directory for a symlink therefore cannot redirect the operation outside the
 workspace; platforms without the required secure descriptor operations fail
 closed.
 

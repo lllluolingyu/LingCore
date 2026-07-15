@@ -8,8 +8,10 @@ Canvas code is self-contained in this skill directory.
 Design notes:
 - LingCore is async-everywhere, so this is an ``httpx.AsyncClient`` port of the
   reference ``canvas_get``/``sync_canvas`` (which used synchronous ``requests``).
-- The token is read from an env var named by ``tool_options.canvas.token_env``
-  at call time — never stored in profile YAML (invariant 4).
+- The token is read through ``ToolContext.getenv`` from an env var named by
+  ``tool_options.canvas.token_env`` at call time — the selected profile's
+  optional ``.env`` overrides exported variables, and neither source puts
+  secret material in profile YAML (invariants 2 and 4).
 - ``base_url`` is operator-configured (not model-controlled), so the SSRF surface
   is small: the model only supplies course ids / paths.  We still reject
   embedded credentials and non-http(s) schemes.
@@ -21,7 +23,6 @@ Design notes:
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -72,11 +73,16 @@ def _canvas_cfg(ctx: ToolContext) -> tuple[str, str, dict[str, Any]]:
     if parsed.username or parsed.password:
         raise ToolError("Canvas base_url must not embed credentials")
     token_env = str(opts.get("token_env", "CANVAS_TOKEN"))
-    token = os.environ.get(token_env, "")
+    token = ctx.getenv(token_env, "") or ""
     if not token:
+        env_hint = (
+            str(ctx.profile_dir / ".env")
+            if ctx.profile_dir is not None
+            else "the selected profile's .env"
+        )
         raise ToolError(
-            f"Canvas access token env var {token_env!r} is not set; export it "
-            "before launching the agent."
+            f"Canvas access token env var {token_env!r} is not set; add it to "
+            f"{env_hint} or export it before launching the agent."
         )
     return base_url, token, opts
 

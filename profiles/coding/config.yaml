@@ -1,5 +1,6 @@
 # LingCore coding-agent profile (keyed provider).
 # Secrets never live here — api_key_env only *names* the env var holding the key.
+# Copy .env.example to .env for local configuration.
 
 name: coding
 # Where the agent's file tools and shell operate. Unset resolves to

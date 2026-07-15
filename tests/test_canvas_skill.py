@@ -8,6 +8,7 @@ The Canvas module is loaded the same way the framework loads it (importlib via
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -72,8 +73,24 @@ def _token(monkeypatch):
 
 async def test_missing_token_is_toolerror(tmp_path, monkeypatch):
     monkeypatch.delenv("CANVAS_TEST_TOKEN", raising=False)
-    with pytest.raises(ToolError, match="token"):
+    with pytest.raises(ToolError, match=r"token.*\.env"):
         await canvas.canvas_courses(canvas.CoursesArgs(), _ctx(tmp_path))
+
+
+async def test_profile_environment_overrides_exported_token(tmp_path):
+    seen = {}
+
+    def handler(request):
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json=[])
+
+    ctx = _ctx(tmp_path)
+    ctx.environment = {"CANVAS_TEST_TOKEN": "profile-secret"}
+    with _patch_canvas(handler):
+        await canvas.canvas_courses(canvas.CoursesArgs(), ctx)
+
+    assert seen["auth"] == "Bearer profile-secret"
+    assert os.environ["CANVAS_TEST_TOKEN"] == "secret-token"
 
 
 async def test_missing_base_url_is_toolerror(tmp_path):

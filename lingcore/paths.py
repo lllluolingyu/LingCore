@@ -5,13 +5,13 @@ sensitive file creation needs a stronger primitive: resolving a pathname and
 opening it later leaves a window in which an intermediate directory can be
 replaced by a symlink.  ``confined_directory`` walks from the workspace with
 no-follow directory descriptors and keeps the final parent descriptor open;
-``ConfinedDirectory`` then creates, unlinks, stats, and renames entries relative
-to that stable descriptor.
+``ConfinedDirectory`` then reads, creates, unlinks, stats, and renames entries
+relative to that stable descriptor.
 
 The directory-descriptor API deliberately fails closed on platforms that do
 not provide POSIX ``dir_fd`` + ``O_NOFOLLOW`` support.  Attachment ingest
-degrades to a note and Canvas reports a tool error rather than falling back to
-an unsafe pathname write.
+degrades to a note, while Canvas and knowledge indexing report a tool error,
+rather than falling back to unsafe pathname I/O.
 """
 
 from __future__ import annotations
@@ -160,6 +160,59 @@ class ConfinedDirectory:
                 return fh.read(len(data) + 1) == data
         except OSError:
             return False
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+    def read_regular(self, name: str, *, max_bytes: int) -> bytes:
+        """Read one bounded regular-file entry without following symlinks.
+
+        The opened directory and file descriptors stay anchored for the whole
+        read, giving internal state files the same parent/final-component race
+        protection as confined writes.
+        """
+        payload, _ = self.read_regular_with_stat(name, max_bytes=max_bytes)
+        return payload
+
+    def read_regular_with_stat(
+        self, name: str, *, max_bytes: int
+    ) -> tuple[bytes, os.stat_result]:
+        """Return bounded bytes and metadata from the same no-follow fd."""
+        leaf = _leaf_name(name)
+        self.ensure_anchored()
+        fd = -1
+        try:
+            fd = os.open(
+                leaf,
+                os.O_RDONLY
+                | os.O_NOFOLLOW
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=self._fd,
+            )
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise PathEscapeError(
+                    f"confined entry is not a regular file: {leaf!r}"
+                )
+            if info.st_size > max_bytes:
+                raise PathEscapeError(
+                    f"confined entry exceeds the {max_bytes}-byte read limit: "
+                    f"{leaf!r}"
+                )
+            with os.fdopen(fd, "rb") as fh:
+                fd = -1
+                payload = fh.read(max_bytes + 1)
+            if len(payload) > max_bytes:
+                raise PathEscapeError(
+                    f"confined entry changed beyond the {max_bytes}-byte read "
+                    f"limit: {leaf!r}"
+                )
+            return payload, info
+        except OSError as exc:
+            raise PathEscapeError(
+                f"cannot safely read confined file: {leaf!r}"
+            ) from exc
         finally:
             if fd >= 0:
                 os.close(fd)

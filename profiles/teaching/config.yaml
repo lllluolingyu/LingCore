@@ -1,5 +1,7 @@
 # LingCore teaching-assistant profile (keyed provider).
 # Secrets never live here — api_key_env / token_env only *name* env vars.
+# Copy this profile's .env.example to its gitignored .env for local values, or
+# export them before launch. The Canvas skill also carries a generic template.
 #
 # A study companion built around Canvas LMS: it surfaces courses, due dates, and
 # announcements, syncs course files into the workspace, and reads those materials
@@ -46,7 +48,7 @@ tool_options:
     # base_url is operator-configured; ${CANVAS_URL:-} so the profile still loads
     # when Canvas isn't set up yet (tools then return a clear "not configured").
     base_url: ${CANVAS_URL:-}
-    token_env: CANVAS_TOKEN          # NAMES the env var; the secret stays in env
+    token_env: CANVAS_TOKEN          # name only; value comes from .env/export
     course_ids: []                   # optional: restrict to specific course ids
     download_dir: canvas             # under the workspace; sync writes here
     file_ext:

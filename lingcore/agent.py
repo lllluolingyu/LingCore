@@ -195,7 +195,9 @@ class Agent:
 
         client: _LLMLike = llm or LLMClient(
             model=profile.llm.model,
-            api_key=profile.llm.resolve_api_key(),
+            api_key=profile.llm.resolve_api_key(
+                getattr(profile, "_profile_env", {})
+            ),
             base_url=profile.llm.base_url,
             sampling=profile.llm.sampling.as_kwargs(),
             max_retries=profile.llm.max_retries,
@@ -217,7 +219,9 @@ class Agent:
                 # accepts images.
                 vision = LLMClient(
                     model=fb.image.model,
-                    api_key=fb.image.resolve_api_key(),
+                    api_key=fb.image.resolve_api_key(
+                        getattr(profile, "_profile_env", {})
+                    ),
                     base_url=fb.image.base_url,
                     sampling=fb.image.sampling.as_kwargs(),
                     max_retries=fb.image.max_retries,
@@ -306,6 +310,7 @@ class Agent:
             confirm=confirm,
             options=effective_tool_options,
             profile_dir=source_dir,
+            environment=dict(getattr(profile, "_profile_env", {})),
         )
         # Persistent-memory auto-compaction: inject the summarizer (the main
         # client, duck-typed) so the memory tool can condense memory.md at its

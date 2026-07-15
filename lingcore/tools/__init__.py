@@ -12,6 +12,8 @@ concurrent sessions with different workspaces stay isolated.
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
@@ -44,6 +46,19 @@ class ToolContext:
     confirm: ConfirmFn | None = None
     options: dict[str, Any] = field(default_factory=dict)
     profile_dir: Path | None = None
+    # Parsed values from the selected profile's .env. Kept out of ``options``
+    # so callers cannot accidentally serialize or echo secrets with tool config.
+    environment: Mapping[str, str] = field(default_factory=dict, repr=False)
+
+    def getenv(self, name: str, default: str | None = None) -> str | None:
+        """Resolve this profile's ``.env``, then the process environment.
+
+        An empty profile value blocks the exported variable but is treated as
+        unset (invariant 4): the caller's ``default`` is returned instead.
+        """
+        if name in self.environment:
+            return self.environment[name] or default
+        return os.environ.get(name, default)
 
 
 @dataclass(slots=True)

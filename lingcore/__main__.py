@@ -1,4 +1,4 @@
-"""``python -m lingcore --profile <path>`` — launch an agent over the CLI.
+"""Launch a profile over the CLI or inspect it with ``lingcore doctor``.
 
 This is the composition root: it parses args, loads the profile, opens the
 profile's session store (history + resume), builds the CLI frontend, wires the
@@ -30,7 +30,7 @@ _DEFAULT_PROFILE = Path(__file__).resolve().parents[1] / "profiles" / "coding"
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="lingcore",
-        description="Run a LingCore agent from a profile over an interactive CLI.",
+        description="Run or diagnose a LingCore agent profile.",
     )
     parser.add_argument(
         "--profile",
@@ -38,6 +38,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=str(_DEFAULT_PROFILE),
         help="Path to an agent profile YAML (default in a repo checkout: "
         "profiles/coding; installed wheels require --profile).",
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("doctor",),
+        help="Run an offline profile configuration check and exit.",
     )
     parser.add_argument(
         "--workspace",
@@ -122,6 +128,13 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     if args.workspace:
         profile.workspace = args.workspace
+
+    if args.command == "doctor":
+        from lingcore.doctor import diagnose_profile, print_doctor_report
+
+        report = diagnose_profile(profile)
+        print_doctor_report(report)
+        return report.exit_code
 
     try:
         store, notice = (None, None) if args.no_session else open_store(profile)

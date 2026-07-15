@@ -138,7 +138,9 @@ celerybeat.pid
 *.sage.py
 
 # Environments
+# Profile-local secrets. Commit a .env.example template, never the real file.
 .env
+!.env.example
 .envrc
 .venv
 env/
@@ -217,3 +219,6 @@ style.css
 /profiles/*/sessions.db*
 /profiles/*/memory.md
 /profiles/*/workspace/
+
+# One-off local implementation guides may contain live provider credentials.
+/temporary-guide.md
