@@ -87,6 +87,17 @@ class Compacted:
     after_tokens: int
 
 
+@dataclass(slots=True)
+class TurnCancelled:
+    """The active turn was explicitly stopped by its frontend.
+
+    Cancellation is distinct from a model/tool error: the frontend requested
+    it, any partial assistant text is void, and no ``Final`` event follows.
+    """
+
+    reason: str = "stopped by user"
+
+
 AgentEvent = (
     TextDelta
     | ToolCallStarted
@@ -96,4 +107,5 @@ AgentEvent = (
     | Error
     | SkillActivated
     | Compacted
+    | TurnCancelled
 )

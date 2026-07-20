@@ -91,6 +91,40 @@ async def test_run_session_ends_on_none(tmp_path, monkeypatch):
     assert frontend.events == []
 
 
+async def test_run_session_closes_turn_when_render_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("SMOKE_WS", str(tmp_path))
+    prof = _profile(tmp_path)
+    llm = FakeLLMClient([
+        ScriptedTurn(text="discarded"),
+        ScriptedTurn(text="recovered"),
+    ])
+    agent = Agent.from_profile(prof, llm=llm, base_dir=tmp_path)
+
+    class FailingFrontend(ScriptedFrontend):
+        def __init__(self) -> None:
+            super().__init__(["first", "second"])
+            self._fail_render = True
+
+        def render(self, event) -> None:
+            if self._fail_render:
+                self._fail_render = False
+                raise RuntimeError("renderer failed")
+            super().render(event)
+
+    frontend = FailingFrontend()
+    with pytest.raises(RuntimeError, match="renderer failed"):
+        await run_session(agent, frontend)
+
+    # Cleanup is complete before the exception escapes; immediate reuse cannot
+    # observe the abandoned turn lease. The accepted first user row is kept.
+    assert agent._turn_checkpoint is None
+    assert [message.content for message in agent.memory.messages] == ["first"]
+
+    await run_session(agent, frontend)
+    assert isinstance(frontend.events[-1], Final)
+    assert frontend.events[-1].content == "recovered"
+
+
 async def test_session_shell_confirm_flows_to_frontend(tmp_path, monkeypatch):
     monkeypatch.setenv("SMOKE_WS", str(tmp_path))
     prof = _profile(tmp_path)
@@ -200,6 +234,29 @@ def test_cli_resume_replay_escapes_stored_tool_names():
     out = cli.console.export_text()
     assert "[bold red]spoof[/]" in out  # literal, not styled
     assert "[link=x]y" in out
+
+
+def test_cli_resume_labels_compaction_summary_as_derived_state():
+    from datetime import datetime, timezone
+
+    from rich.console import Console
+
+    from lingcore.message import Message
+    from lingcore.sessions import SessionMeta
+
+    cli = CLIFrontend(agent_name="t")
+    cli.console = Console(record=True, width=240)
+    now = datetime.now(timezone.utc)
+    meta = SessionMeta(id="abcd1234", title="t", created_at=now, updated_at=now)
+
+    cli.show_resume(
+        meta,
+        [Message(role="user", name="summary", content="earlier facts")],
+    )
+
+    out = cli.console.export_text()
+    assert "earlier summary › earlier facts" in out
+    assert "you › earlier facts" not in out
 
 
 async def test_cli_confirm_deny(monkeypatch):

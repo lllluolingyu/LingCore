@@ -197,6 +197,23 @@ async def _main_async(args: argparse.Namespace) -> int:
 
         try:
             await run_session(agent, frontend)
+        except asyncio.CancelledError:
+            # asyncio.Runner implements Ctrl-C by cancelling the main task.
+            # Agent.run deliberately retains its checkpoint on cancellation;
+            # repair it before the store closes, then let Runner translate the
+            # cancellation to KeyboardInterrupt (main returns exit status 130).
+            if agent._turn_checkpoint is not None:
+                try:
+                    frontend.render(
+                        agent.finalize_cancelled_turn(reason="interrupted")
+                    )
+                except Exception as exc:
+                    frontend.console.print(
+                        f"failed to clean up interrupted turn: {exc}",
+                        style="red",
+                        markup=False,
+                    )
+            raise
         except KeyboardInterrupt:
             frontend.console.print("\n[dim]interrupted[/]")
 

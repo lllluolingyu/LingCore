@@ -157,6 +157,14 @@ async def test_high_risk_skill_confirmed():
         activate_skill.args_model(name="review"), _ctx(state, confirm=confirm)
     )
     assert state.active == ["review"]
+    assert state.approved_high_risk == {"review": frozenset({"run_shell"})}
+    assert "run_shell" in state.active_effective_tools()
+
+
+def test_active_skill_cannot_grant_unapproved_high_risk_tool():
+    state = _state(profile_tools={"read_file", "run_shell"})
+    state.active.append("review")
+    assert state.active_effective_tools() == frozenset({"read_file"})
 
 
 async def test_high_risk_skill_refused_without_confirm_handler():

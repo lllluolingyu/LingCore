@@ -5,6 +5,7 @@ Driven entirely by a scripted FakeLLMClient — no network, no API cost.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from lingcore.events import (
     TextDelta,
     ToolCallStarted,
     ToolResultEvent,
+    TurnCancelled,
 )
 from lingcore.llm import LLMChunk
 from lingcore.memory import WindowMemory
@@ -69,6 +71,27 @@ async def test_simple_text_reply_streams(workspace):
     assert "".join(d.text for d in deltas) == "Hi there!"
     finals = [e for e in events if isinstance(e, Final)]
     assert len(finals) == 1 and finals[0].content == "Hi there!"
+
+
+async def test_legacy_system_prompt_constructor_stays_compatible(workspace):
+    llm = FakeLLMClient(
+        [ScriptedTurn(text="first"), ScriptedTurn(text="second")]
+    )
+    agent = Agent(
+        llm,
+        ToolRegistry(),
+        ToolContext(workspace=workspace),
+        system_prompt="legacy prompt",
+    )
+
+    first = await _drain(agent, "hello")
+    assert isinstance(first[-1], Final)
+    assert llm.calls[0][0] == Message.system("legacy prompt")
+
+    agent.system_prompt = "updated prompt"
+    second = await _drain(agent, "again")
+    assert isinstance(second[-1], Final)
+    assert llm.calls[1][0] == Message.system("updated prompt")
 
 
 async def test_tool_call_then_final(workspace):
@@ -218,6 +241,7 @@ async def test_modality_fallback_prepares_user_attachments(workspace):
     events = await _drain(agent, UserInput(text="read this", attachments=[att]))
     assert isinstance(events[-1], Final)
     user = [m for m in agent.memory.messages if m.role == "user"][0]
+    assert user.input_text == "read this"
     assert "hidden rent figure" in user.attachments[0].fallback_text
     # The model-facing copy carried it too (FakeLLM records Message objects).
     assert llm.calls[0][-1].attachments[0].fallback_text
@@ -383,11 +407,13 @@ async def test_midstream_retries_exhausted_ends_with_error(workspace, no_backoff
     assert not any(isinstance(e, Final) for e in events)
     # The failed turn left no assistant message behind...
     assert [m.role for m in agent.memory.messages] == ["user"]
+    assert agent._turn_index == 0
 
     # ...and the loop is still alive: the next turn completes normally.
     llm._turns.append(ScriptedTurn(text="recovered"))
     events2 = await _drain(agent, "again")
     assert isinstance(events2[-1], Final) and events2[-1].content == "recovered"
+    assert agent._turn_index == 1
 
 
 async def test_stream_retries_zero_disables_recovery(workspace, no_backoff):
@@ -423,7 +449,248 @@ async def test_foreign_llm_exception_contained(workspace):
     events = await _drain(agent, "hello")
     assert isinstance(events[-1], Error)
     assert "ValueError" in events[-1].message
+    assert agent._turn_index == 0
     # Still usable afterwards.
     agent.llm = FakeLLMClient([ScriptedTurn(text="fine")])
     events2 = await _drain(agent, "again")
     assert isinstance(events2[-1], Final) and events2[-1].content == "fine"
+
+
+async def test_guardrail_exception_releases_turn_lease(workspace):
+    class FailOnceGuardrail:
+        def __init__(self):
+            self.failed = False
+
+        async def pre_input(self, text):
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("guardrail broke")
+            return text
+
+        async def post_output(self, text):
+            return text
+
+    agent = _agent(
+        FakeLLMClient([ScriptedTurn(text="recovered")]),
+        workspace,
+        guardrail=FailOnceGuardrail(),
+    )
+
+    failed = await _drain(agent, "hello")
+    assert len(failed) == 1
+    assert isinstance(failed[0], Error)
+    assert "RuntimeError: guardrail broke" in failed[0].message
+    assert agent.memory.messages == []
+    assert agent._turn_checkpoint is None
+    assert agent.cancel_turn() is False
+
+    recovered = await _drain(agent, "again")
+    assert isinstance(recovered[-1], Final)
+    assert recovered[-1].content == "recovered"
+
+
+async def test_aclose_rolls_back_partial_turn_and_releases_lease(workspace):
+    agent = _agent(FakeLLMClient([ScriptedTurn(text="partial reply")]), workspace)
+    stream = agent.run("please answer")
+
+    first = await anext(stream)
+    assert isinstance(first, TextDelta)
+    assert agent._turn_index == 1
+    await stream.aclose()
+
+    assert agent._turn_checkpoint is None
+    assert agent._turn_index == 0
+    assert [(m.role, m.content) for m in agent.memory.messages] == [
+        ("user", "please answer")
+    ]
+    assert agent.cancel_turn() is False
+
+    agent.llm = FakeLLMClient([ScriptedTurn(text="recovered")])
+    recovered = await _drain(agent, "try again")
+    assert isinstance(recovered[-1], Final)
+    assert recovered[-1].content == "recovered"
+
+
+async def test_stale_terminal_stream_cannot_roll_back_new_turn(workspace):
+    agent = _agent(
+        FakeLLMClient(
+            [ScriptedTurn(text="first reply"), ScriptedTurn(text="second reply")]
+        ),
+        workspace,
+    )
+    old_stream = agent.run("first question")
+    while not isinstance(await anext(old_stream), Final):
+        pass
+
+    # The terminal event releases the public turn slot, but its generator is
+    # still suspended at the yield until the consumer exhausts or closes it.
+    new_stream = agent.run("second question")
+    while not isinstance(await anext(new_stream), TextDelta):
+        pass
+    checkpoint = agent._turn_checkpoint
+    lease = agent._turn_lease
+    turn_index = agent._turn_index
+
+    await old_stream.aclose()
+
+    assert agent._turn_checkpoint is checkpoint
+    assert agent._turn_lease is lease
+    assert agent._turn_index == turn_index
+    remaining = [event async for event in new_stream]
+    assert isinstance(remaining[-1], Final)
+    assert [message.content for message in agent.memory.messages] == [
+        "first question",
+        "first reply",
+        "second question",
+        "second reply",
+    ]
+
+
+async def test_explicit_cancellation_rolls_back_partial_turn(workspace):
+    class BlockingLLM:
+        def __init__(self):
+            self.waiting = asyncio.Event()
+
+        async def stream(self, messages, tools=None):
+            yield LLMChunk(text_delta="partial")
+            self.waiting.set()
+            await asyncio.Event().wait()
+
+    llm = BlockingLLM()
+    agent = _agent(llm, workspace)
+    streamed = []
+
+    async def drive():
+        async for event in agent.run("please answer"):
+            streamed.append(event)
+
+    task = asyncio.create_task(drive())
+    await llm.waiting.wait()
+    assert any(isinstance(event, TextDelta) for event in streamed)
+    with pytest.raises(RuntimeError, match="before its driver task stops"):
+        agent.finalize_cancelled_turn()
+    assert agent.cancel_turn() is True
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # A stopped driver is not a free turn slot until rollback has repaired its
+    # checkpoint and durable branch.
+    blocked = await _drain(agent, "too soon")
+    assert len(blocked) == 1
+    assert isinstance(blocked[0], Error)
+    assert "another turn" in blocked[0].message
+
+    cancelled = agent.finalize_cancelled_turn()
+    assert isinstance(cancelled, TurnCancelled)
+    assert cancelled.reason == "stopped by user"
+    assert agent._turn_index == 0
+    # Partial assistant output is void, but the user's submitted prompt remains
+    # valid context for a follow-up or an edit.
+    assert [(m.role, m.content) for m in agent.memory.messages] == [
+        ("user", "please answer")
+    ]
+    assert agent.cancel_turn() is False
+
+    agent.llm = FakeLLMClient([ScriptedTurn(text="recovered")])
+    events = await _drain(agent, "try again")
+    assert isinstance(events[-1], Final)
+    assert agent.cancel_turn() is False
+
+
+async def test_cancelled_driver_can_finalize_in_its_own_handler(workspace):
+    class BlockingLLM:
+        def __init__(self):
+            self.waiting = asyncio.Event()
+
+        async def stream(self, messages, tools=None):
+            self.waiting.set()
+            await asyncio.Event().wait()
+            yield LLMChunk(finish_reason="stop")
+
+    llm = BlockingLLM()
+    agent = _agent(llm, workspace)
+
+    async def drive():
+        try:
+            async for _ in agent.run("please answer"):
+                pass
+        except asyncio.CancelledError:
+            return agent.finalize_cancelled_turn(reason="interrupted")
+
+    task = asyncio.create_task(drive())
+    await llm.waiting.wait()
+    assert agent.cancel_turn() is True
+
+    event = await task
+    assert isinstance(event, TurnCancelled)
+    assert event.reason == "interrupted"
+    assert agent._turn_checkpoint is None
+    assert [(message.role, message.content) for message in agent.memory.messages] == [
+        ("user", "please answer")
+    ]
+
+
+async def test_cancel_tracks_task_driving_each_generator_step(workspace):
+    class YieldThenBlockLLM:
+        def __init__(self):
+            self.blocking = asyncio.Event()
+
+        async def stream(self, messages, tools=None):
+            yield LLMChunk(text_delta="partial")
+            self.blocking.set()
+            await asyncio.Event().wait()
+
+    llm = YieldThenBlockLLM()
+    agent = _agent(llm, workspace)
+    stream = agent.run("please answer")
+
+    # Each anext is intentionally driven by a different short-lived task.
+    first_task = asyncio.create_task(anext(stream))
+    assert isinstance(await first_task, TextDelta)
+    assert first_task.done()
+    with pytest.raises(RuntimeError, match="no cancelled turn"):
+        agent.finalize_cancelled_turn()
+    second_task = asyncio.create_task(anext(stream))
+    await llm.blocking.wait()
+
+    assert agent.cancel_turn() is True
+    with pytest.raises(asyncio.CancelledError):
+        await second_task
+    event = agent.finalize_cancelled_turn()
+
+    assert isinstance(event, TurnCancelled)
+    assert agent._turn_checkpoint is None
+    assert [(message.role, message.content) for message in agent.memory.messages] == [
+        ("user", "please answer")
+    ]
+
+
+async def test_cancel_during_frontend_work_preserves_finalize_handshake(workspace):
+    frontend_busy = asyncio.Event()
+
+    async def drive(agent):
+        async for event in agent.run("please answer"):
+            if isinstance(event, TextDelta):
+                frontend_busy.set()
+                await asyncio.Event().wait()
+
+    agent = _agent(
+        FakeLLMClient([ScriptedTurn(text="partial reply")]),
+        workspace,
+    )
+    task = asyncio.create_task(drive(agent))
+    await frontend_busy.wait()
+
+    assert agent.cancel_turn() is True
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # Give the loop a chance to finalize the abandoned async generator before
+    # the frontend performs its explicit second-stage repair.
+    await asyncio.sleep(0)
+    event = agent.finalize_cancelled_turn()
+
+    assert isinstance(event, TurnCancelled)
+    assert agent._turn_checkpoint is None
+    assert [(message.role, message.content) for message in agent.memory.messages] == [
+        ("user", "please answer")
+    ]

@@ -38,9 +38,14 @@ from lingcore.message import Message
 class ShortTermMemory(Protocol):
     def add(self, message: Message) -> None: ...
 
+    def replace(self, messages: list[Message]) -> None: ...
+
     def render(self, system_prompt: str) -> list[Message]: ...
 
     async def maybe_compact(self, system_prompt: str = "") -> Compacted | None: ...
+
+    @property
+    def messages(self) -> list[Message]: ...
 
 
 def _encoding(model: str):
@@ -77,6 +82,11 @@ class WindowMemory:
 
     def add(self, message: Message) -> None:
         self._messages.append(message)
+
+    def replace(self, messages: list[Message]) -> None:
+        """Replace the retained working set and begin a fresh cache epoch."""
+        self._messages = list(messages)
+        self._floor = 0
 
     def _tokens(self, message: Message) -> int:
         # Approximate but stable: encode content plus any tool-call argument
@@ -210,6 +220,9 @@ class SummarizingMemory:
     # --- ShortTermMemory delegation -----------------------------------
     def add(self, message: Message) -> None:
         self._w.add(message)
+
+    def replace(self, messages: list[Message]) -> None:
+        self._w.replace(messages)
 
     def render(self, system_prompt: str) -> list[Message]:
         return self._w.render(system_prompt)

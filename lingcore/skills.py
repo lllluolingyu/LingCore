@@ -227,18 +227,25 @@ class SkillState:
     active: list[str] = field(default_factory=list)
     allow_concurrent: bool = False
     high_risk_tools: frozenset[str] = DEFAULT_HIGH_RISK_TOOLS
+    # High-risk grants covered by the confirmation that activated each skill.
+    # This travels with durable session state so a changed profile/skill cannot
+    # silently widen an old activation into newly dangerous capabilities.
+    approved_high_risk: dict[str, frozenset[str]] = field(default_factory=dict)
 
     def effective_tools(self, skill: Skill) -> frozenset[str]:
         """Tools a skill actually gets: profile ceiling ∩ requested."""
         return self.profile_tools & frozenset(skill.requested_tools)
 
     def active_effective_tools(self) -> frozenset[str]:
-        """Union of effective tools across all active skills."""
+        """Union active grants, never exceeding recorded risky consent."""
         out: frozenset[str] = frozenset()
         for name in self.active:
             skill = self.skills.get(name)
             if skill:
-                out |= self.effective_tools(skill)
+                effective = self.effective_tools(skill)
+                risky = effective & self.high_risk_tools
+                approved = self.approved_high_risk.get(name, frozenset())
+                out |= (effective - risky) | (risky & approved)
         return out
 
     def instruction_map(self) -> dict[str, str]:

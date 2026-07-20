@@ -10,8 +10,8 @@ Built directly on the OpenAI SDK (chat-completions + tool calling), so it works
 against OpenAI, local servers like **Ollama** and **vLLM**, or any
 OpenAI-compatible endpoint by pointing at a different `base_url`.
 
-> Status: MVP. The coding agent runs over a CLI. Role-play / teaching / psych
-> profiles are the intended next step on the same runtime.
+> Status: MVP. The coding agent runs over the CLI or the sibling LingChat web
+> app. Role-play / teaching / psych profiles use the same runtime.
 
 ## Features
 
@@ -50,18 +50,39 @@ OpenAI-compatible endpoint by pointing at a different `base_url`.
   *inside the profile directory* (each profile keeps its own history). Resume
   the latest with `-c`, a specific one with `--resume <id-prefix>`, inspect
   with `--list-sessions`, or opt out with `--no-session` /
-  `sessions.enabled: false`.
-- **Frontend-agnostic** — the loop emits events; the CLI renders them today, and
-  a web or chat frontend can render the same events later without touching core.
+  `sessions.enabled: false`. Stable message sequences and explicit rewind/
+  truncate primitives let frontends stop a turn safely or edit an earlier user
+  message and regenerate its branch. Compacted working-set snapshots and
+  dynamic skill state are durable too: restart restores the newest valid
+  snapshot plus its raw tail and re-enables only skills still allowed by the
+  current profile, without widening an old approval to newly high-risk tools.
+  Snapshot tails are checked against the canonical transcript, and only two
+  full snapshot bodies are retained; older event metadata remains available.
+  Both are recorded as message-anchored events with monotonic replay cursors;
+  rewinding a branch removes its derived events as well. A
+  validated transcript prefix can also be forked atomically into a new session,
+  carrying compatible snapshots/skill state with fresh cursors while preserving
+  parent/root provenance.
+- **Frontend-agnostic** — the loop emits events consumed by both the CLI and the
+  sibling LingChat web app; another frontend can render the same contract
+  without touching core.
 
 ## Install
 
 Requires Python ≥3.11. Uses [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone <your-repo-url> LingCore
+git clone https://github.com/lllluolingyu/LingCore.git
 cd LingCore
 uv sync
+```
+
+The source checkout includes the example profiles used below. Wheels contain
+the runtime package but not those repo-root, writable profile directories, so
+an installed `lingcore` command must be given an external profile explicitly:
+
+```bash
+lingcore --profile /path/to/my-agent
 ```
 
 PDF text extraction (the `pdf2md` tool and the automatic PDF→text fallback)
@@ -140,7 +161,7 @@ notice.
 ## Profiles
 
 A profile is a **directory** containing a `config.yaml` and optional Markdown
-prompt-layer files. Four are shipped:
+prompt-layer files. The source repository includes four examples:
 
 - `profiles/coding/` — default profile, targets a keyed provider via env vars.
 - `profiles/coding_ollama/` — keyless variant for local Ollama/vLLM.
@@ -170,7 +191,7 @@ current directory or a parent—before expanding `${VAR}` and
 `${VAR:-default}`. Values stay scoped to the loaded profile (they are not copied
 into global `os.environ`) and override same-named variables inherited from the
 launching process. Real `.env` files are gitignored; commit a secret-free
-`.env.example` when a profile or skill needs setup documentation. The shipped
+`.env.example` when a profile or skill needs setup documentation. The example
 `coding`, `daily`, and `teaching` profiles include one; keyless
 `coding_ollama` needs none. Run `lingcore doctor --profile <path>` after copying
 or editing one. To create a new agent type, add a directory—no code required.
@@ -323,7 +344,7 @@ doctor.py    offline profile/env/.env.example diagnostics (never prints values)
 paths.py     confined path validation + no-follow directory-handle writes
 knowledge.py provider-neutral embedding/reranking seams + SiliconFlow adapters
 memory.py    ShortTermMemory protocol + WindowMemory (prefix-stable eviction) + SummarizingMemory (compaction)
-sessions.py  SessionStore (SQLite per profile dir) + SessionMemory — history & resume
+sessions.py  SessionStore + SessionMemory — transcript, snapshots, replay, rewind, fork
 skills.py    Skill / SkillState / load_skill_tools — skills, incl. code-shipping
 guardrails.py  Guardrail protocol + NoopGuardrail (pre/post hooks)
 tools/       Tool / @tool / ToolRegistry / ToolContext, plus builtin tools
@@ -343,8 +364,17 @@ workflow model. The version groupings are directional rather than release
 commitments.
 
 1. **Interaction and onboarding**
-   - Add an explicit stop/cancel control to LingChat, with defined behavior for
-     messages submitted while a turn is running.
+   - Implemented: LingCore exposes an explicit cancellation lifecycle and
+     stop-safe session truncation; LingChat adds Stop, rejects concurrent turns,
+     and lets users edit any stored user message to rewind and regenerate that
+     branch while preserving its attachments.
+   - Implemented: the additive session-schema v2 persists compaction snapshots
+     and dynamic skill state as message-anchored runtime events. Resume restores
+     snapshot + raw tail, LingChat replays compaction/skill transitions after a
+     restart, and monotonic cursors support incremental event consumers.
+   - Implemented: atomic session-prefix forks preserve the source branch, remint
+     copied event cursors, and record parent/root provenance. LingChat can fork
+     and regenerate from a user message or continue from a final assistant reply.
    - Implemented: `lingcore doctor` performs offline, secret-safe profile and
      environment diagnostics. Add `lingcore profile init/list` and separate
      immutable profile templates from writable sessions, memory, and workspaces
@@ -382,8 +412,11 @@ commitments.
      contracts.
 
 5. **v0.5 — Durable workflows**
-   - Let long-running turns survive a browser disconnect and replay their event
-     stream on reconnect; add edit, regenerate, and session-fork controls.
+   - Build a detached turn runner so an *in-flight* model/tool task can survive a
+     browser disconnect. Durable completed-state replay is now in place; task
+     ownership, leases, progress events, and reconnect attachment remain.
+   - Build on the implemented edit/fork flows with regenerate-without-edit and
+     explicit merge/export controls where real workflows need them.
    - Add schema-validated structured results so agents can participate in
      application workflows, plus an optional Responses API backend behind the
      existing `LLMClient` seam without weakening OpenAI-compatible portability.
@@ -395,7 +428,7 @@ tracing, and evaluations so added autonomy is observable and testable.
 ## Development
 
 ```bash
-uv run pytest -q          # full suite (476 tests)
+uv run pytest -q          # full suite
 uv run pytest tests/test_agent.py -q
 ```
 

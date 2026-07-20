@@ -45,6 +45,7 @@ async def activate_skill(args: SkillArgs, ctx: ToolContext) -> str:
     if not args.active:
         if args.name in state.active:
             state.active.remove(args.name)
+            state.approved_high_risk.pop(args.name, None)
             return f"deactivated skill {args.name!r}"
         return f"skill {args.name!r} was not active"
 
@@ -72,7 +73,9 @@ async def activate_skill(args: SkillArgs, ctx: ToolContext) -> str:
 
     if not state.allow_concurrent:
         state.active.clear()
+        state.approved_high_risk.clear()
     state.active.append(args.name)
+    state.approved_high_risk[args.name] = frozenset(risky)
 
     granted = ", ".join(sorted(effective)) or "(none)"
     return f"activated skill {args.name!r}; tools available: {granted}"

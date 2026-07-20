@@ -8,6 +8,7 @@ that is the whole point of routing everything through ``AgentEvent``.
 
 from __future__ import annotations
 
+from contextlib import aclosing
 from typing import Protocol
 
 from lingcore.agent import Agent
@@ -43,5 +44,11 @@ async def run_session(agent: Agent, frontend: Frontend) -> None:
         incoming = user_input if isinstance(user_input, UserInput) else UserInput(text=user_input)
         if not incoming.text.strip() and not incoming.attachments:
             continue
-        async for event in agent.run(incoming):
-            frontend.render(event)
+        turn = agent.run(incoming)
+        # ``async for`` does not guarantee immediate async-generator closure
+        # when code in its body raises. Own the stream explicitly so a broken
+        # renderer cannot leave Agent's turn checkpoint leased until a later
+        # garbage-collection pass.
+        async with aclosing(turn):
+            async for event in turn:
+                frontend.render(event)

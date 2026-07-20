@@ -118,7 +118,7 @@ def test_attachment_rejects_invalid_payloads():
         Attachment(
             kind="file",
             media_type="application/pdf",
-            data=f"data:image/png;base64,{_b64(b'%PDF-1.4\n')}",
+            data="data:image/png;base64," + _b64(b"%PDF-1.4\n"),
         )
 
 

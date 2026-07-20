@@ -27,6 +27,7 @@ from lingcore.events import (
     TextDelta,
     ToolCallStarted,
     ToolResultEvent,
+    TurnCancelled,
 )
 from lingcore.media import attachment_from_path
 from lingcore.media_types import (
@@ -218,6 +219,9 @@ class CLIFrontend:
                     f"[yellow]⟲ {escape(reason)}; "
                     f"retrying ({attempt}/{max_attempts}){note}[/]"
                 )
+            case TurnCancelled(reason):
+                self._break_line()
+                self.console.print(f"[yellow]■ {escape(reason)}[/]")
             case Final(_):
                 self._break_line()
             case Error(message):
@@ -252,9 +256,16 @@ class CLIFrontend:
                 summary = _attachment_summary(m)
                 if m.name == "media":
                     self.console.print(f"[dim]  ↥ media{escape(summary)}[/]")
-                else:
+                elif m.name == "summary":
                     self.console.print(
-                        f"[dim]  you › {escape(_short(m.content))}{escape(summary)}[/]"
+                        f"[dim]  ≋ earlier summary › "
+                        f"{escape(_short(m.content))}[/]"
+                    )
+                else:
+                    text = m.input_text if m.input_text is not None else m.content
+                    self.console.print(
+                        f"[dim]  you › "
+                        f"{escape(_short(text))}{escape(summary)}[/]"
                     )
             elif m.role == "assistant":
                 if m.content:

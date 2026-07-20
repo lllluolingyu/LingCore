@@ -12,7 +12,7 @@ from lingcore.message import Attachment, Conversation, Message, ToolCall, ToolRe
 # ``dynamic = ["version"]`` and hatchling reads it from here at build time, so
 # wheel metadata can never drift from what the code (and the HTTP user-agent
 # strings derived from this) reports.
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Attachment",

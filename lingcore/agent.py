@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+from contextlib import aclosing
 from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol
 
 from lingcore.composer import ComposeContext, PromptComposer, StaticComposer
@@ -28,6 +29,7 @@ from lingcore.events import (
     TextDelta,
     ToolCallStarted,
     ToolResultEvent,
+    TurnCancelled,
 )
 from lingcore.guardrails import Guardrail, NoopGuardrail
 from lingcore.ingest import ingest_attachments
@@ -115,7 +117,7 @@ class Agent:
         llm: _LLMLike,
         tools: ToolRegistry,
         tool_ctx: ToolContext,
-        composer: PromptComposer,
+        composer: PromptComposer | str | None = None,
         memory: ShortTermMemory | None = None,
         guardrail: Guardrail | None = None,
         max_iters: int = 25,
@@ -125,7 +127,20 @@ class Agent:
         skill_state: "SkillState | None" = None,
         media_adapter: "MediaAdapter | None" = None,
         initial_tools: "frozenset[str] | None" = None,
+        session_store: "SessionStore | None" = None,
+        system_prompt: str | None = None,
     ) -> None:
+        # v0.1 accepted a static prompt as the fourth positional argument or
+        # as ``system_prompt=``. Keep both forms while routing new code through
+        # the composer seam introduced in v0.2.
+        if system_prompt is not None:
+            if composer is not None:
+                raise ValueError("pass either composer or system_prompt, not both")
+            composer = system_prompt
+        if isinstance(composer, str):
+            composer = StaticComposer(composer)
+        if composer is None:
+            raise TypeError("Agent requires a composer or system_prompt")
         self.llm = llm
         self.tools = tools
         # Tools active without any skill. None ⇒ all of the ceiling (today's
@@ -149,7 +164,37 @@ class Agent:
         # Text-fallback adapter for attachment kinds the model lacks
         # (None — the all-native default — costs nothing).
         self.media_adapter = media_adapter
+        self._session_store = session_store
+        if session_store is not None and (
+            session_id is None or not hasattr(self.memory, "last_sequence")
+        ):
+            raise ValueError(
+                "session_store requires a session id and sequence-reporting memory"
+            )
         self._turn_index: int = 0
+        # Explicit frontend cancellation is a two-step contract: cancel the
+        # task driving ``run()``, then call ``finalize_cancelled_turn()`` after
+        # that task has stopped. The checkpoint keeps the working conversation
+        # valid even if cancellation interrupted a tool-call block.
+        self._active_turn_task: asyncio.Task[Any] | None = None
+        # Identity token for the generator that owns the mutable checkpoint.
+        # A terminal event releases the public turn slot before its generator
+        # is necessarily exhausted; a later ``aclose()`` from that stale
+        # generator must never roll back a newer owner.
+        self._turn_lease: object | None = None
+        self._turn_checkpoint: list[Message] | None = None
+        self._turn_user_message: Message | None = None
+        self._turn_index_checkpoint: int | None = None
+        self._turn_skills_checkpoint: list[str] | None = None
+        self._turn_skill_approvals_checkpoint: (
+            dict[str, frozenset[str]] | None
+        ) = None
+        self._turn_message_seq: int | None = None
+        self._turn_cancel_requested = False
+        # If durable rollback fails after the in-memory lease is released, no
+        # later turn may append behind that uncommitted branch. Retried at the
+        # start of every subsequent run until the store is reconciled.
+        self._pending_turn_message_seq: int | None = None
 
     # ------------------------------------------------------------------
     # Convenience accessor kept for tests that still read .system_prompt
@@ -161,6 +206,11 @@ class Agent:
             return self.composer.text
         # LayeredComposer: no single static string; return empty sentinel.
         return ""
+
+    @system_prompt.setter
+    def system_prompt(self, value: str) -> None:
+        """Back-compatible mutation of the v0.1 static prompt attribute."""
+        self.composer = StaticComposer(value)
 
     @classmethod
     def from_profile(
@@ -381,6 +431,31 @@ class Agent:
                 high_risk_tools=frozenset(high_risk) if high_risk is not None
                 else SkillState.high_risk_tools,
             )
+            if session_store is not None and sid is not None:
+                persisted = session_store.active_skill_state(sid)
+                restored = [
+                    name
+                    for name in persisted.active
+                    if name in skill_state.skills
+                    and (
+                        skill_state.effective_tools(skill_state.skills[name])
+                        & skill_state.high_risk_tools
+                    )
+                    <= (
+                        persisted.approvals_for(name)
+                        & skill_state.high_risk_tools
+                    )
+                ]
+                if not skill_state.allow_concurrent and len(restored) > 1:
+                    restored = restored[-1:]
+                skill_state.active[:] = restored
+                skill_state.approved_high_risk = {
+                    name: (
+                        persisted.approvals_for(name)
+                        & skill_state.high_risk_tools
+                    )
+                    for name in restored
+                }
             # Share the live state object with the activate_skill tool.
             tool_ctx.options[SKILL_STATE_KEY] = skill_state
 
@@ -463,17 +538,235 @@ class Agent:
             skill_state=skill_state,
             media_adapter=media_adapter,
             initial_tools=initial_tools_set,
+            session_store=session_store,
         )
         agent._turn_index = restored_turn_index
         return agent
 
+    def cancel_turn(self) -> bool:
+        """Request cancellation of the task currently driving ``run``.
+
+        Returns ``False`` when no turn is active. The caller must await the
+        driver task and then call :meth:`finalize_cancelled_turn` to repair the
+        working set and obtain the lifecycle event to render.
+        """
+        task = self._active_turn_task
+        if task is None or task.done():
+            return False
+        cancelled = task.cancel()
+        if cancelled:
+            self._turn_cancel_requested = True
+        return cancelled
+
+    def finalize_cancelled_turn(
+        self, reason: str = "stopped by user"
+    ) -> TurnCancelled | Error:
+        """Restore the pre-turn state while retaining the submitted user input.
+
+        A durable-store cleanup failure is returned as an :class:`Error` and
+        retried before the next turn; it never leaves the in-process lease held.
+        """
+        task = self._active_turn_task
+        if task is not None and not task.done():
+            raise RuntimeError(
+                "cannot finalize a cancelled turn before its driver task stops"
+            )
+        if self._turn_checkpoint is None or not self._turn_cancel_requested:
+            raise RuntimeError("no cancelled turn is ready to finalize")
+        try:
+            self._rollback_turn()
+        except Exception as exc:
+            # In-memory state and the running lease are already repaired. A
+            # failed durable truncate is recorded for retry before the next
+            # turn; surface it as an event instead of crashing Stop handling.
+            return Error(
+                f"turn cancelled, but rollback is pending: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        return TurnCancelled(reason=reason)
+
+    def _rollback_turn(self, lease: object | None = None) -> None:
+        """Restore the turn checkpoint and always release its lease."""
+        if lease is not None and self._turn_lease is not lease:
+            return
+        try:
+            if self._turn_checkpoint is not None:
+                restored = list(self._turn_checkpoint)
+                if self._turn_user_message is not None:
+                    restored.append(self._turn_user_message)
+                self.memory.replace(restored)
+            if self._turn_index_checkpoint is not None:
+                self._turn_index = self._turn_index_checkpoint
+            if (
+                self.skill_state is not None
+                and self._turn_skills_checkpoint is not None
+            ):
+                self.skill_state.active[:] = self._turn_skills_checkpoint
+                self.skill_state.approved_high_risk = dict(
+                    self._turn_skill_approvals_checkpoint or {}
+                )
+            if (
+                self._session_store is not None
+                and self._session_id is not None
+                and self._turn_message_seq is not None
+            ):
+                message_seq = self._turn_message_seq
+                try:
+                    self._session_store.truncate_after(
+                        self._session_id, message_seq
+                    )
+                except BaseException:
+                    self._pending_turn_message_seq = message_seq
+                    raise
+                else:
+                    self._pending_turn_message_seq = None
+        finally:
+            # A failed repair (for example, the same SQLite outage that ended
+            # the turn) must not leave the in-process turn lease wedged.
+            self._clear_turn_state(lease)
+
+    def _clear_turn_state(self, lease: object | None = None) -> None:
+        """Release turn state only when ``lease`` still owns it."""
+        if lease is not None and self._turn_lease is not lease:
+            return
+        self._active_turn_task = None
+        self._turn_lease = None
+        self._turn_checkpoint = None
+        self._turn_user_message = None
+        self._turn_index_checkpoint = None
+        self._turn_skills_checkpoint = None
+        self._turn_skill_approvals_checkpoint = None
+        self._turn_message_seq = None
+        self._turn_cancel_requested = False
+
+    def _retry_pending_turn_cleanup(self) -> None:
+        """Reconcile a durable tail whose earlier rollback failed."""
+        message_seq = self._pending_turn_message_seq
+        if message_seq is None:
+            return
+        if self._session_store is None or self._session_id is None:
+            raise RuntimeError("pending turn cleanup has no session store")
+        self._session_store.truncate_after(self._session_id, message_seq)
+        self._pending_turn_message_seq = None
+
     async def run(self, user_input: str | UserInput) -> AsyncIterator[AgentEvent]:
         """Drive one user turn to completion, yielding events as they happen."""
+        # The checkpoint marks an active turn and the identity token owns it.
+        # In particular, a cancelled driver task is already ``done`` but its
+        # partial state is still live until ``finalize_cancelled_turn`` has
+        # repaired both memory and durable history.
+        if self._turn_checkpoint is not None:
+            yield Error("another turn is already running")
+            return
+        try:
+            self._retry_pending_turn_cleanup()
+        except Exception as exc:
+            yield Error(
+                "cannot start turn until durable rollback succeeds: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return
+        # Snapshot into locals first. No await separates the lease check from
+        # assignment, while a custom memory/state getter that raises cannot
+        # leave a half-acquired lease behind.
+        # The protocol does not rely on an implementation returning a copy:
+        # snapshot explicitly so an append cannot alias and mutate rollback
+        # state in a custom memory implementation.
+        turn_checkpoint = list(self.memory.messages)
+        turn_index_checkpoint = self._turn_index
+        turn_skills_checkpoint = (
+            list(self.skill_state.active) if self.skill_state is not None else None
+        )
+        turn_skill_approvals_checkpoint = (
+            dict(self.skill_state.approved_high_risk)
+            if self.skill_state is not None
+            else None
+        )
+        lease = object()
+        self._active_turn_task = asyncio.current_task()
+        self._turn_lease = lease
+        self._turn_checkpoint = turn_checkpoint
+        self._turn_user_message = None
+        self._turn_index_checkpoint = turn_index_checkpoint
+        self._turn_skills_checkpoint = turn_skills_checkpoint
+        self._turn_skill_approvals_checkpoint = turn_skill_approvals_checkpoint
+        self._turn_message_seq = None
+        self._turn_cancel_requested = False
+
+        turn = self._run_turn(user_input, lease)
+        try:
+            # Closing the public stream also closes the implementation stream,
+            # so abandoned frontends release any nested model/tool generators.
+            async with aclosing(turn):
+                while True:
+                    # An async generator may be advanced by a different task on
+                    # each ``anext`` call. Track the task driving this specific
+                    # step so cancel/finalize cannot target a completed former
+                    # consumer while another task is inside the turn.
+                    if self._turn_lease is not lease:
+                        break
+                    self._active_turn_task = asyncio.current_task()
+                    try:
+                        event = await anext(turn)
+                    except StopAsyncIteration:
+                        break
+                    yield event
+        except asyncio.CancelledError:
+            # Cancellation alone deliberately retains the checkpoint for the
+            # frontend's cancel -> await -> finalize handshake. Mark the
+            # generator stopped before propagating so a same-task driver (the
+            # CLI under asyncio.run) can finalize from its cancellation handler.
+            if self._turn_lease is lease:
+                self._turn_cancel_requested = True
+                self._active_turn_task = None
+            raise
+        except GeneratorExit:
+            owner = self._active_turn_task
+            cancelled_owner = owner is not None and owner.cancelled()
+            if self._turn_lease is lease and (
+                self._turn_cancel_requested or cancelled_owner
+            ):
+                # Cancellation can land while the consumer awaits frontend
+                # work in the async-for body, outside Agent.run. Async-generator
+                # finalization must preserve the checkpoint for the documented
+                # explicit finalize handshake instead of racing it.
+                self._turn_cancel_requested = True
+                self._active_turn_task = None
+            else:
+                # Unsolicited ``aclose()`` cannot yield an Error event, but it
+                # must repair the abandoned turn. Durable cleanup failures are
+                # pending and retried before a later turn.
+                try:
+                    self._rollback_turn(lease)
+                except Exception:
+                    pass
+            raise
+        except Exception as exc:
+            message = f"agent turn failed: {type(exc).__name__}: {exc}"
+            try:
+                self._rollback_turn(lease)
+            except Exception as rollback_exc:
+                message += (
+                    "; rollback failed: "
+                    f"{type(rollback_exc).__name__}: {rollback_exc}"
+                )
+            yield Error(message)
+        except BaseException:
+            # Do not turn process-level exits into ordinary agent events, but
+            # do release the lease before allowing them to propagate.
+            self._rollback_turn(lease)
+            raise
+
+    async def _run_turn(
+        self, user_input: str | UserInput, lease: object
+    ) -> AsyncIterator[AgentEvent]:
+        """Run the acquired turn; :meth:`run` owns failure containment."""
         if isinstance(user_input, str):
             incoming = UserInput(text=user_input)
         else:
             incoming = user_input
         text = await self.guardrail.pre_input(incoming.text)
+        input_text = text
         attachments = incoming.attachments
         if attachments:
             # Copy every attachment into <workspace>/attachments/ and announce
@@ -491,7 +784,23 @@ class Agent:
                 # Compute text fallbacks once, before the message is committed —
                 # stream retries re-render but never re-pay a conversion.
                 attachments = await self.media_adapter.prepare(attachments)
-        self.memory.add(Message.user(text, attachments=attachments))
+        user_message = Message.user(
+            text, attachments=attachments, input_text=input_text
+        )
+        self.memory.add(user_message)
+        self._turn_user_message = user_message
+        if self._session_store is not None and self._session_id is not None:
+            # SessionMemory captures the sequence returned by the same SQLite
+            # transaction that appended this exact row. A pre-append MAX(seq)
+            # estimate could retain/delete the wrong row if another process
+            # wrote to the session between those operations.
+            message_seq = getattr(self.memory, "last_sequence", None)
+            if isinstance(message_seq, int) and not isinstance(message_seq, bool):
+                self._turn_message_seq = message_seq
+            else:  # guarded at construction; fail closed if a wrapper misbehaves
+                raise RuntimeError(
+                    "session-backed memory did not report the committed user sequence"
+                )
 
         compacted_this_turn = False
         for _ in range(self.max_iters):
@@ -510,10 +819,15 @@ class Agent:
             # so that request already sees the compacted context. Done here (not
             # mid tool-loop) so within-turn iterations stay append-only and
             # cache-stable. The system prompt is passed so the trigger measures
-            # the same footprint the window does. No-op unless a
-            # SummarizingMemory is configured; never raises.
+            # the same footprint the window does. Plain window memory is a
+            # no-op; session snapshot failures are contained by run().
             if not compacted_this_turn:
                 compacted_this_turn = True
+                set_turn_index = getattr(
+                    self.memory, "set_compaction_turn_index", None
+                )
+                if callable(set_turn_index):
+                    set_turn_index(self._turn_index)
                 compacted = await self.memory.maybe_compact(system_prompt)
                 if compacted is not None:
                     yield compacted
@@ -550,6 +864,10 @@ class Agent:
                             if e.retryable and self.stream_retries
                             else ""
                         )
+                        # This request produced no committed assistant message;
+                        # keep the runtime counter aligned with durable replay.
+                        self._turn_index -= 1
+                        self._clear_turn_state(lease)
                         yield Error(f"model request failed{spent}: {e}")
                         return
                     yield StreamRetry(
@@ -562,6 +880,8 @@ class Agent:
                 except Exception as e:
                     # A duck-typed backend may raise anything; without a
                     # retryable classification, surface it and end the turn.
+                    self._turn_index -= 1
+                    self._clear_turn_state(lease)
                     yield Error(f"model request failed: {type(e).__name__}: {e}")
                     return
 
@@ -572,13 +892,22 @@ class Agent:
 
             if not assistant.tool_calls:
                 final = await self.guardrail.post_output(assistant.content)
+                self._clear_turn_state(lease)
                 yield Final(final)
                 return
 
             for call in assistant.tool_calls:
                 yield ToolCallStarted(call)
 
-            before = set(self.skill_state.active) if self.skill_state else set()
+            before_active = (
+                list(self.skill_state.active) if self.skill_state else []
+            )
+            before = set(before_active)
+            before_approvals = (
+                dict(self.skill_state.approved_high_risk)
+                if self.skill_state
+                else {}
+            )
             results = await self._dispatch(assistant.tool_calls)
             for result in results:
                 self.memory.add(Message.from_tool_result(result))
@@ -609,12 +938,39 @@ class Agent:
 
             # Surface skill activation/deactivation changes as events.
             if self.skill_state is not None:
+                after_active = list(self.skill_state.active)
                 after = set(self.skill_state.active)
-                for name in sorted(after - before):
+                activated = sorted(after - before)
+                deactivated = sorted(before - after)
+                state_changed = (
+                    after_active != before_active
+                    or self.skill_state.approved_high_risk != before_approvals
+                )
+                if (
+                    state_changed
+                    and self._session_store is not None
+                    and self._session_id is not None
+                ):
+                    self._session_store.save_skill_state(
+                        self._session_id,
+                        active=list(self.skill_state.active),
+                        activated=activated,
+                        deactivated=deactivated,
+                        approved_high_risk={
+                            name: sorted(
+                                self.skill_state.approved_high_risk.get(
+                                    name, frozenset()
+                                )
+                            )
+                            for name in self.skill_state.active
+                        },
+                    )
+                for name in activated:
                     yield SkillActivated(name=name, active=True)
-                for name in sorted(before - after):
+                for name in deactivated:
                     yield SkillActivated(name=name, active=False)
 
+        self._clear_turn_state(lease)
         yield Error(f"reached max iterations ({self.max_iters}) without a final reply")
 
     def _effective_tool_schemas(self) -> list[dict[str, Any]]:

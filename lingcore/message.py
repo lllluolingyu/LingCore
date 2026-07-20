@@ -164,6 +164,11 @@ class Message(BaseModel):
 
     role: Role
     content: str = ""
+    # Accepted user text before LingCore appends model-facing attachment ingest
+    # notes. ``None`` for legacy rows and non-user/synthetic messages. Keeping
+    # this beside the enriched content lets frontends edit what the user wrote
+    # without duplicating derived notes when attachments are regenerated.
+    input_text: str | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
     tool_call_id: str | None = None
     name: str | None = None
@@ -181,9 +186,18 @@ class Message(BaseModel):
 
     @classmethod
     def user(
-        cls, content: str, attachments: list[Attachment] | None = None
+        cls,
+        content: str,
+        attachments: list[Attachment] | None = None,
+        *,
+        input_text: str | None = None,
     ) -> Message:
-        return cls(role="user", content=content, attachments=attachments or [])
+        return cls(
+            role="user",
+            content=content,
+            input_text=input_text,
+            attachments=attachments or [],
+        )
 
     @classmethod
     def assistant(

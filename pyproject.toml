@@ -6,6 +6,16 @@ description = "A lightweight, config-driven async agent framework"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
+keywords = ["ai", "agents", "llm", "openai", "tool-calling"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
 dependencies = [
     "openai==2.41.0",
     "pydantic==2.13.4",
@@ -23,6 +33,11 @@ pdf = ["pymupdf==1.27.2.3"]
 
 [project.scripts]
 lingcore = "lingcore.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/lllluolingyu/LingCore"
+Repository = "https://github.com/lllluolingyu/LingCore.git"
+Issues = "https://github.com/lllluolingyu/LingCore/issues"
 
 [dependency-groups]
 dev = [
