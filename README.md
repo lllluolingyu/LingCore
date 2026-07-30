@@ -63,9 +63,12 @@ OpenAI-compatible endpoint by pointing at a different `base_url`.
   validated transcript prefix can also be forked atomically into a new session,
   carrying compatible snapshots/skill state with fresh cursors while preserving
   parent/root provenance.
-- **Frontend-agnostic** — the loop emits events consumed by both the CLI and the
-  sibling LingChat web app; another frontend can render the same contract
-  without touching core.
+- **Frontend-agnostic** — the loop emits events consumed by the CLI, official
+  Telegram channel, and sibling LingChat web app; another
+  frontend can render the same contract without touching core.
+- **First-party Telegram channel** — an allowlisted private-chat Bot API
+  frontend with streaming, attachments, confirmations, Stop, session
+  switching, per-user workspaces/memory/history, polling, and webhook runners.
 
 ## Install
 
@@ -93,6 +96,16 @@ via `uv sync` (dev group); a plain install opts in with:
 ```bash
 pip install 'lingcore[pdf]'
 ```
+
+Telegram support is shipped in the main wheel but its runtime dependency is an
+opt-in extra:
+
+```bash
+pip install "lingcore[telegram]"
+```
+
+The extra pins `python-telegram-bot[rate-limiter,webhooks]==22.8`; it supports
+the same Python 3.11–3.14 matrix and shares LingCore's `httpx==0.28.1`.
 
 ## Quick start
 
@@ -132,6 +145,81 @@ creates a workspace, builds the agent, or contacts a provider.
 Exporting the same variables remains supported as a fallback when the selected
 profile's `.env` does not define them, which is useful for CI and production
 secret injection.
+
+### Telegram
+
+Telegram is a conversational Bot API frontend (not a broadcast-channel
+publisher). Install the extra, copy the safe example into the selected profile,
+and fill the *named* variable in that profile's `.env`:
+
+```bash
+pip install "lingcore[telegram]"
+cp telegram.yaml.example profiles/coding/telegram.yaml
+cp profiles/coding/.env.example profiles/coding/.env  # if needed
+```
+
+```dotenv
+# profiles/coding/.env
+TELEGRAM_BOT_TOKEN=<token from BotFather>
+TELEGRAM_WEBHOOK_SECRET=<long random value>  # webhook mode only
+```
+
+Add your numeric Telegram user ID to `allowed_user_ids`, then diagnose and run:
+
+```bash
+lingcore doctor --profile profiles/coding \
+  --telegram-config profiles/coding/telegram.yaml
+lingcore telegram --profile profiles/coding
+```
+
+Use `--telegram-config <path>` to select a different file and
+`--telegram-mode polling|webhook` for a one-run mode override. Telegram mode
+does not accept the interactive CLI's `--continue`, `--resume`, `--no-session`,
+`--list-sessions`, or `--workspace` flags; users switch sessions in chat with
+`/new`, `/sessions`, and `/resume <id-prefix>`, and cancel with `/stop`.
+
+Only allowlisted numeric users in private chats reach an Agent. Each user has a
+separate workspace, memory file, session database, live Agent/profile copy, and
+mutable tool options:
+
+```text
+<state_dir>/
+  bridge.sqlite3
+  users/<telegram-user-id>/
+    workspace/
+    memory.md
+    sessions.db
+```
+
+`bridge.sqlite3` durably records the explicitly active session, so a `/resume`
+selection survives a silent restart. An invalid stored selection is ignored and
+replaced with a fresh session after its runtime builds successfully. Inbound
+update and album deduplication is bounded in memory and therefore does **not**
+survive a process restart. Telegram deployments are single-process;
+cross-process leases and a durable update queue are not provided.
+
+Polling retains pending updates:
+
+```bash
+lingcore telegram --profile /path/to/profile --telegram-mode polling
+```
+
+For webhook deployment, set `mode: webhook`, an externally reachable HTTPS
+`webhook.public_url`, and `webhook.secret_token_env`. LingCore derives the
+listener path from that URL, validates Telegram's secret header through PTB,
+and listens on plain HTTP at `webhook.listen:webhook.port`; terminate TLS at a
+trusted reverse proxy:
+
+```bash
+lingcore telegram --profile /path/to/profile --telegram-mode webhook
+```
+
+Telegram accepts text/captions with one photo or document (5 MiB image and
+10 MiB file limits). Albums, voice, video, stickers, and other media are
+rejected. Streaming output is plain text; tool activity shows tool names and
+success/failure only, never full result bodies. PTB rate-limits requests and
+retries one `RetryAfter`; if rendering still fails, LingCore keeps the completed
+turn and makes a best-effort plain-message delivery instead of rolling it back.
 
 Type a message; the agent streams its reply and shows each tool call. Shell
 commands prompt for confirmation before running. Type `/exit` to quit.
@@ -349,6 +437,7 @@ skills.py    Skill / SkillState / load_skill_tools — skills, incl. code-shippi
 guardrails.py  Guardrail protocol + NoopGuardrail (pre/post hooks)
 tools/       Tool / @tool / ToolRegistry / ToolContext, plus builtin tools
 io/          Frontend protocol + run_session driver + Rich CLI
+integrations/telegram/  PTB-light bridge/state/rendering + thin PTB adapter
 ```
 
 Two seams keep the design open: the loop talks only to an `LLMClient`-shaped
@@ -364,6 +453,9 @@ workflow model. The version groupings are directional rather than release
 commitments.
 
 1. **Interaction and onboarding**
+   - Implemented: the official Telegram Bot API channel provides private-chat
+     allowlisting, per-user state isolation, streaming, attachments,
+     confirmations, session commands, polling, and single-process webhooks.
    - Implemented: LingCore exposes an explicit cancellation lifecycle and
      stop-safe session truncation; LingChat adds Stop, rejects concurrent turns,
      and lets users edit any stored user message to rewind and regenerate that
@@ -465,6 +557,13 @@ verification stay on the hostname), so DNS rebinding can't redirect the request
 after the check. DNS resolution and downloaded body size are bounded. Profiles
 can opt into private hosts with `tool_options.fetch_url.allow_private_hosts:
 true` for trusted local workflows (e.g. a local Ollama or an internal API).
+
+Telegram refuses to start a profile that enables `run_shell` unless
+`require_confirmation` is true and `allow_patterns` is empty. Every shell call
+therefore needs an inline, user-bound approval; approvals time out, cannot be
+reused by another user/chat, and are denied on Stop or shutdown. This is still
+consent, not sandboxing—the bot process retains the operating-system access of
+its account, so deploy it as a minimally privileged user.
 
 ## License
 

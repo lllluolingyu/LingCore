@@ -569,9 +569,12 @@ async def test_explicit_cancellation_rolls_back_partial_turn(workspace):
     assert any(isinstance(event, TextDelta) for event in streamed)
     with pytest.raises(RuntimeError, match="before its driver task stops"):
         agent.finalize_cancelled_turn()
+    assert agent.turn_pending_finalization is False
     assert agent.cancel_turn() is True
+    assert agent.turn_pending_finalization is False
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert agent.turn_pending_finalization is True
 
     # A stopped driver is not a free turn slot until rollback has repaired its
     # checkpoint and durable branch.
@@ -582,6 +585,7 @@ async def test_explicit_cancellation_rolls_back_partial_turn(workspace):
 
     cancelled = agent.finalize_cancelled_turn()
     assert isinstance(cancelled, TurnCancelled)
+    assert agent.turn_pending_finalization is False
     assert cancelled.reason == "stopped by user"
     assert agent._turn_index == 0
     # Partial assistant output is void, but the user's submitted prompt remains

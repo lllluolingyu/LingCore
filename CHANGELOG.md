@@ -3,6 +3,33 @@
 Notable user-facing changes to LingCore are documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- First-party Telegram Bot API channel in the main package, installable with
+  `lingcore[telegram]`, with polling and single-process webhook runners.
+- Allowlisted private-chat routing, per-user workspaces/memory/session stores,
+  durable active-session selection, streaming reconciliation, bounded
+  attachment downloads, rate-limited delivery, confirmation callbacks, Stop,
+  and graceful shutdown.
+- PTB-free Telegram configuration diagnostics through
+  `lingcore doctor --telegram-config`.
+
+### Changed
+
+- The CLI dispatches Telegram synchronously before `asyncio.run`, allowing PTB
+  to own its event loop and signal handlers.
+- `Agent.turn_pending_finalization` exposes the cancellation readiness check as
+  a public read-only lifecycle predicate.
+
+### Fixed
+
+- Telegram delivery failures no longer abort and roll back an otherwise valid
+  Agent turn; terminal replies use a best-effort plain-message fallback.
+- Invalid active-session selections self-heal to a fresh session instead of
+  permanently blocking messages and `/new`.
+
 ## [0.2.0] - 2026-07-20
 
 ### Added

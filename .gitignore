@@ -219,6 +219,7 @@ style.css
 /profiles/*/sessions.db*
 /profiles/*/memory.md
 /profiles/*/workspace/
+/profiles/*/.lingcore/
 
 # One-off local implementation guides may contain live provider credentials.
 /temporary-guide.md

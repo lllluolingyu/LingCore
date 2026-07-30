@@ -9,7 +9,7 @@ never include values.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -190,8 +190,18 @@ def _example_findings(path: Path, required: set[str]) -> list[DoctorFinding]:
     return [DoctorFinding("ok", f".env.example documents {len(required)} variable(s)")]
 
 
-def diagnose_profile(profile: AgentProfile) -> DoctorReport:
-    """Inspect one loaded profile without side effects or provider calls."""
+def diagnose_profile(
+    profile: AgentProfile,
+    *,
+    additional_environment_requirements: (
+        Mapping[str, str | Iterable[str]] | None
+    ) = None,
+) -> DoctorReport:
+    """Inspect one loaded profile without side effects or provider calls.
+
+    Integrations may add named environment requirements without changing
+    ordinary doctor behavior. Values are consumer labels, never secret values.
+    """
     source_dir = getattr(profile, "_source_dir", None)
     profile_env: Mapping[str, str] = getattr(profile, "_profile_env", {})
     findings: list[DoctorFinding] = [
@@ -214,6 +224,23 @@ def diagnose_profile(profile: AgentProfile) -> DoctorReport:
             )
 
     requirements, example_names, config_errors = _profile_requirements(profile)
+    for raw_name, raw_consumers in (
+        additional_environment_requirements or {}
+    ).items():
+        name = raw_name.strip()
+        if not name:
+            config_errors.append(
+                "an additional environment requirement has an empty name"
+            )
+            continue
+        consumers = (
+            [raw_consumers]
+            if isinstance(raw_consumers, str)
+            else list(raw_consumers)
+        )
+        for consumer in consumers:
+            _add_requirement(requirements, name, str(consumer))
+        example_names.add(name)
     findings.extend(DoctorFinding("error", message) for message in config_errors)
     for name, consumers in sorted(requirements.items()):
         used_by = ", ".join(sorted(consumers))

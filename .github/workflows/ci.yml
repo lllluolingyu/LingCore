@@ -41,3 +41,47 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: uv run python -c 'import os, lingcore; expected = f"v{lingcore.__version__}"; actual = os.environ["RELEASE_TAG"]; assert actual == expected, f"tag {actual} does not match package {expected}"'
+
+  base-wheel:
+    name: Base wheel stays Telegram-optional
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.13
+      - run: uv build
+      - name: Install wheel without extras
+        run: |
+          uv venv --python 3.13 /tmp/lingcore-base
+          uv pip install --python /tmp/lingcore-base/bin/python dist/*.whl
+      - name: Verify base imports, CLI, doctor, and Telegram dependency error
+        run: |
+          /tmp/lingcore-base/bin/python -c 'import lingcore'
+          /tmp/lingcore-base/bin/lingcore --help
+          work="$(mktemp -d)"
+          mkdir "$work/profile"
+          printf '%s\n' \
+            'name: base-wheel' \
+            'llm:' \
+            '  model: local-test' \
+            '  base_url: http://localhost:11434/v1' \
+            'tools: []' > "$work/profile/config.yaml"
+          printf '%s\n' \
+            'token_env: TELEGRAM_BOT_TOKEN' \
+            'allowed_user_ids: [1]' > "$work/profile/telegram.yaml"
+          printf '%s\n' 'TELEGRAM_BOT_TOKEN=' > "$work/profile/.env.example"
+          /tmp/lingcore-base/bin/lingcore --profile "$work/profile" --list-sessions
+          set +e
+          /tmp/lingcore-base/bin/lingcore doctor --profile "$work/profile" \
+            --telegram-config "$work/profile/telegram.yaml"
+          doctor_status=$?
+          set -e
+          test "$doctor_status" -eq 1
+          output="$work/telegram-error"
+          if /tmp/lingcore-base/bin/lingcore telegram \
+            --profile "$work/profile" >"$output" 2>&1; then
+            exit 1
+          fi
+          grep -F 'pip install "lingcore[telegram]"' "$output"

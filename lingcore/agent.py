@@ -212,6 +212,22 @@ class Agent:
         """Back-compatible mutation of the v0.1 static prompt attribute."""
         self.composer = StaticComposer(value)
 
+    @property
+    def turn_pending_finalization(self) -> bool:
+        """Whether a cancelled checkpoint is ready for frontend finalization.
+
+        This intentionally exposes no mutable checkpoint state. A frontend may
+        finalize only after cancellation was requested and the task driving the
+        generator has stopped.
+        """
+        task = self._active_turn_task
+        driver_stopped = task is None or task.done()
+        return (
+            self._turn_checkpoint is not None
+            and self._turn_cancel_requested
+            and driver_stopped
+        )
+
     @classmethod
     def from_profile(
         cls,

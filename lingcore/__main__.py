@@ -27,6 +27,19 @@ from lingcore.sessions import SessionMeta, SessionStore, open_store
 _DEFAULT_PROFILE = Path(__file__).resolve().parents[1] / "profiles" / "coding"
 
 
+def _telegram_dependency_missing(exc: ModuleNotFoundError) -> bool:
+    name = exc.name or ""
+    return name == "telegram" or name.startswith("telegram.") or name == "tornado"
+
+
+def _print_telegram_install_hint() -> None:
+    print(
+        'Telegram support is not installed. Install it with:\n'
+        'pip install "lingcore[telegram]"',
+        file=sys.stderr,
+    )
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="lingcore",
@@ -42,8 +55,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("doctor",),
-        help="Run an offline profile configuration check and exit.",
+        choices=("doctor", "telegram"),
+        help="Run offline diagnostics or the first-party Telegram channel.",
     )
     parser.add_argument(
         "--workspace",
@@ -74,7 +87,39 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="List stored sessions for this profile and exit.",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--telegram-config",
+        default=None,
+        help="Telegram YAML path (default: <profile>/telegram.yaml).",
+    )
+    parser.add_argument(
+        "--telegram-mode",
+        choices=("polling", "webhook"),
+        default=None,
+        help="Override the Telegram config's polling/webhook mode.",
+    )
+    args = parser.parse_args(argv)
+    if args.command == "telegram":
+        conflicts = []
+        if args.continue_:
+            conflicts.append("--continue")
+        if args.resume:
+            conflicts.append("--resume")
+        if args.no_session:
+            conflicts.append("--no-session")
+        if args.list_sessions:
+            conflicts.append("--list-sessions")
+        if args.workspace is not None:
+            conflicts.append("--workspace")
+        if conflicts:
+            parser.error(
+                "Telegram mode does not accept " + ", ".join(conflicts)
+            )
+    elif args.telegram_config is not None and args.command != "doctor":
+        parser.error("--telegram-config is only valid with doctor or telegram")
+    if args.telegram_mode is not None and args.command != "telegram":
+        parser.error("--telegram-mode is only valid with telegram")
+    return args
 
 
 def _print_sessions(store: SessionStore | None, notice: str | None) -> int:
@@ -132,7 +177,33 @@ async def _main_async(args: argparse.Namespace) -> int:
     if args.command == "doctor":
         from lingcore.doctor import diagnose_profile, print_doctor_report
 
-        report = diagnose_profile(profile)
+        additional_requirements = None
+        if args.telegram_config is not None:
+            from lingcore.integrations.telegram import load_telegram_config
+
+            try:
+                telegram = load_telegram_config(
+                    profile,
+                    args.telegram_config,
+                    require_secrets=False,
+                )
+            except ConfigError as e:
+                print(f"config error: {e}", file=sys.stderr)
+                return 2
+            additional_requirements = {
+                telegram.token_env: "telegram.token_env",
+            }
+            if (
+                telegram.mode == "webhook"
+                and telegram.webhook.secret_token_env is not None
+            ):
+                additional_requirements[
+                    telegram.webhook.secret_token_env
+                ] = "telegram.webhook.secret_token_env"
+        report = diagnose_profile(
+            profile,
+            additional_environment_requirements=additional_requirements,
+        )
         print_doctor_report(report)
         return report.exit_code
 
@@ -202,7 +273,7 @@ async def _main_async(args: argparse.Namespace) -> int:
             # Agent.run deliberately retains its checkpoint on cancellation;
             # repair it before the store closes, then let Runner translate the
             # cancellation to KeyboardInterrupt (main returns exit status 130).
-            if agent._turn_checkpoint is not None:
+            if agent.turn_pending_finalization:
                 try:
                     frontend.render(
                         agent.finalize_cancelled_turn(reason="interrupted")
@@ -231,6 +302,32 @@ async def _main_async(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    if args.command == "telegram":
+        try:
+            # This import is deliberately after command selection. Ordinary
+            # LingCore and PTB-free doctor runs never import python-telegram-bot.
+            from lingcore.integrations.telegram.application import run_telegram
+        except ModuleNotFoundError as exc:
+            if _telegram_dependency_missing(exc):
+                _print_telegram_install_hint()
+                return 2
+            raise
+        try:
+            return run_telegram(
+                args.profile,
+                telegram_config_path=args.telegram_config,
+                mode=args.telegram_mode,
+            )
+        except ConfigError as e:
+            print(f"config error: {e}", file=sys.stderr)
+            return 2
+        except ModuleNotFoundError as exc:
+            if _telegram_dependency_missing(exc):
+                _print_telegram_install_hint()
+                return 2
+            raise
+        except KeyboardInterrupt:
+            return 130
     try:
         return asyncio.run(_main_async(args))
     except KeyboardInterrupt:
