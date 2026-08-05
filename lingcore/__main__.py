@@ -19,12 +19,17 @@ from lingcore.config import AgentProfile
 from lingcore.errors import ConfigError, LingCoreError, SessionError
 from lingcore.io.base import run_session
 from lingcore.io.cli import CLIFrontend, rel_time
+from lingcore.profiles import (
+    PROFILE_TEMPLATE_FILES,
+    default_profile_path,
+    initialize_profile,
+    user_profiles_dir,
+)
 from lingcore.sessions import SessionMeta, SessionStore, open_store
 
-# Bundled profiles live at the repo root — outside the package tree — so their
-# sessions.db / memory.md are writable. The default only resolves in a repo
-# checkout; wheel installs must pass --profile.
-_DEFAULT_PROFILE = Path(__file__).resolve().parents[1] / "profiles" / "coding"
+# Source checkouts use their repository example; installed wheels use the
+# writable copy created by ``lingcore profile init`` in the user state dir.
+_DEFAULT_PROFILE = default_profile_path()
 
 
 def _telegram_dependency_missing(exc: ModuleNotFoundError) -> bool:
@@ -34,7 +39,7 @@ def _telegram_dependency_missing(exc: ModuleNotFoundError) -> bool:
 
 def _print_telegram_install_hint() -> None:
     print(
-        'Telegram support is not installed. Install it with:\n'
+        "Telegram support is not installed. Install it with:\n"
         'pip install "lingcore[telegram]"',
         file=sys.stderr,
     )
@@ -43,20 +48,20 @@ def _print_telegram_install_hint() -> None:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="lingcore",
-        description="Run or diagnose a LingCore agent profile.",
+        description="Run, diagnose, or initialize a LingCore agent profile.",
     )
     parser.add_argument(
         "--profile",
         "-p",
         default=str(_DEFAULT_PROFILE),
-        help="Path to an agent profile YAML (default in a repo checkout: "
-        "profiles/coding; installed wheels require --profile).",
+        help="Path to an agent profile YAML (default: repository coding "
+        "profile, or the user copy created by `lingcore profile init`).",
     )
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("doctor", "telegram"),
-        help="Run offline diagnostics or the first-party Telegram channel.",
+        choices=("doctor", "telegram", "profile"),
+        help="Run diagnostics, Telegram, or manage installed profile templates.",
     )
     parser.add_argument(
         "--workspace",
@@ -99,6 +104,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Override the Telegram config's polling/webhook mode.",
     )
     args = parser.parse_args(argv)
+    if args.command == "profile":
+        parser.error("use profile management as `lingcore profile init|list`")
     if args.command == "telegram":
         conflicts = []
         if args.continue_:
@@ -112,14 +119,69 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if args.workspace is not None:
             conflicts.append("--workspace")
         if conflicts:
-            parser.error(
-                "Telegram mode does not accept " + ", ".join(conflicts)
-            )
+            parser.error("Telegram mode does not accept " + ", ".join(conflicts))
     elif args.telegram_config is not None and args.command != "doctor":
         parser.error("--telegram-config is only valid with doctor or telegram")
     if args.telegram_mode is not None and args.command != "telegram":
         parser.error("--telegram-mode is only valid with telegram")
     return args
+
+
+def _profile_command(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="lingcore profile",
+        description="List templates or initialize a writable agent profile.",
+    )
+    commands = parser.add_subparsers(dest="profile_command", required=True)
+    init = commands.add_parser(
+        "init", help="Copy an immutable template into writable user state."
+    )
+    init.add_argument(
+        "template",
+        nargs="?",
+        choices=tuple(PROFILE_TEMPLATE_FILES),
+        default="coding",
+        help="Template to copy (default: coding).",
+    )
+    target = init.add_mutually_exclusive_group()
+    target.add_argument(
+        "--name",
+        help="Name under the user profiles directory (default: template name).",
+    )
+    target.add_argument(
+        "--destination",
+        "-d",
+        help="Explicit destination directory instead of the user state dir.",
+    )
+    commands.add_parser("list", help="List the immutable templates in this wheel.")
+    args = parser.parse_args(argv)
+    if args.profile_command == "list":
+        print("Available profile templates:")
+        for name in PROFILE_TEMPLATE_FILES:
+            print(f"  {name}")
+        print(f"Writable profiles directory: {user_profiles_dir()}")
+        return 0
+    try:
+        destination = initialize_profile(
+            args.template,
+            name=args.name,
+            destination=args.destination,
+        )
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
+    print(f"Initialized {args.template!r} profile at {destination}")
+    if (destination / ".env.example").is_file():
+        print("Next: copy .env.example to .env, fill the required values, and run:")
+    else:
+        print("Run it with:")
+    if destination == _DEFAULT_PROFILE:
+        print("  lingcore doctor")
+        print("  lingcore")
+    else:
+        print(f"  lingcore doctor --profile {destination}")
+        print(f"  lingcore --profile {destination}")
+    return 0
 
 
 def _print_sessions(store: SessionStore | None, notice: str | None) -> int:
@@ -161,12 +223,10 @@ async def _main_async(args: argparse.Namespace) -> int:
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         if args.profile == str(_DEFAULT_PROFILE) and not _DEFAULT_PROFILE.exists():
-            # Wheel installs have no bundled profiles (documented deferral:
-            # packaging them conflicts with the writable-state invariants).
             print(
-                "note: the default profile only resolves in a repo checkout; "
-                "with an installed package, pass --profile pointing at a "
-                "profile directory (e.g. a checkout's profiles/coding).",
+                "note: initialize the wheel's default writable profile with "
+                "`lingcore profile init`, or pass --profile pointing at an "
+                "existing profile directory.",
                 file=sys.stderr,
             )
         return 2
@@ -197,9 +257,9 @@ async def _main_async(args: argparse.Namespace) -> int:
                 telegram.mode == "webhook"
                 and telegram.webhook.secret_token_env is not None
             ):
-                additional_requirements[
-                    telegram.webhook.secret_token_env
-                ] = "telegram.webhook.secret_token_env"
+                additional_requirements[telegram.webhook.secret_token_env] = (
+                    "telegram.webhook.secret_token_env"
+                )
         report = diagnose_profile(
             profile,
             additional_environment_requirements=additional_requirements,
@@ -275,9 +335,7 @@ async def _main_async(args: argparse.Namespace) -> int:
             # cancellation to KeyboardInterrupt (main returns exit status 130).
             if agent.turn_pending_finalization:
                 try:
-                    frontend.render(
-                        agent.finalize_cancelled_turn(reason="interrupted")
-                    )
+                    frontend.render(agent.finalize_cancelled_turn(reason="interrupted"))
                 except Exception as exc:
                     frontend.console.print(
                         f"failed to clean up interrupted turn: {exc}",
@@ -289,7 +347,9 @@ async def _main_async(args: argparse.Namespace) -> int:
             frontend.console.print("\n[dim]interrupted[/]")
 
         if store is not None:
-            sid: str = agent.memory.session_id  # SessionMemory when a store is wired
+            sid = getattr(agent.memory, "session_id", None)
+            if not isinstance(sid, str):
+                raise RuntimeError("session-backed memory did not expose its id")
             if store.get(sid) is not None:  # row exists only if something was said
                 frontend.console.print(
                     f"[dim]session [/][cyan]{sid[:8]}[/][dim] saved — resume with: lingcore -c[/]"
@@ -301,7 +361,10 @@ async def _main_async(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] == "profile":
+        return _profile_command(raw_argv[1:])
+    args = _parse_args(raw_argv)
     if args.command == "telegram":
         try:
             # This import is deliberately after command selection. Ordinary

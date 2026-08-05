@@ -88,9 +88,7 @@ def _store(
     payload; a changed directory anchor makes the write fail closed.
     """
     try:
-        with confined_directory(
-            workspace, _ATTACH_DIRNAME, create=True
-        ) as directory:
+        with confined_directory(workspace, _ATTACH_DIRNAME, create=True) as directory:
             _ensure_gitignore(directory)
             name = sanitize_name(
                 attachment.name,

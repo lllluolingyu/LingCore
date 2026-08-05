@@ -10,6 +10,20 @@ permissions:
   contents: read
 
 jobs:
+  quality:
+    name: Lint, format, and typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.13
+      - run: uv sync --locked --all-extras --python 3.13
+      - run: uv run ruff check lingcore tests
+      - run: uv run ruff format --check lingcore tests
+      - run: uv run mypy
+
   test:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
@@ -25,6 +39,27 @@ jobs:
       - run: uv python install ${{ matrix.python-version }}
       - run: uv sync --locked --all-extras --python ${{ matrix.python-version }}
       - run: uv run --python ${{ matrix.python-version }} pytest -q
+
+  lingchat-compatibility:
+    name: LingChat main compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out LingCore
+        uses: actions/checkout@v6
+      - name: Check out LingChat main
+        uses: actions/checkout@v6
+        with:
+          repository: lllluolingyu/LingChat
+          ref: main
+          path: LingChat
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.13
+      - run: uv sync --locked --python 3.13
+        working-directory: LingChat
+      - run: uv run --python 3.13 pytest -q
+        working-directory: LingChat
 
   package:
     name: Build package
@@ -61,27 +96,24 @@ jobs:
           /tmp/lingcore-base/bin/python -c 'import lingcore'
           /tmp/lingcore-base/bin/lingcore --help
           work="$(mktemp -d)"
-          mkdir "$work/profile"
-          printf '%s\n' \
-            'name: base-wheel' \
-            'llm:' \
-            '  model: local-test' \
-            '  base_url: http://localhost:11434/v1' \
-            'tools: []' > "$work/profile/config.yaml"
+          export LINGCORE_STATE_HOME="$work/state"
+          /tmp/lingcore-base/bin/lingcore profile list
+          /tmp/lingcore-base/bin/lingcore profile init coding_ollama --name coding
+          /tmp/lingcore-base/bin/lingcore --list-sessions
+          profile="$work/state/profiles/coding"
           printf '%s\n' \
             'token_env: TELEGRAM_BOT_TOKEN' \
-            'allowed_user_ids: [1]' > "$work/profile/telegram.yaml"
-          printf '%s\n' 'TELEGRAM_BOT_TOKEN=' > "$work/profile/.env.example"
-          /tmp/lingcore-base/bin/lingcore --profile "$work/profile" --list-sessions
+            'allowed_user_ids: [1]' > "$profile/telegram.yaml"
+          printf '%s\n' 'TELEGRAM_BOT_TOKEN=' > "$profile/.env.example"
           set +e
-          /tmp/lingcore-base/bin/lingcore doctor --profile "$work/profile" \
-            --telegram-config "$work/profile/telegram.yaml"
+          /tmp/lingcore-base/bin/lingcore doctor \
+            --telegram-config "$profile/telegram.yaml"
           doctor_status=$?
           set -e
           test "$doctor_status" -eq 1
           output="$work/telegram-error"
           if /tmp/lingcore-base/bin/lingcore telegram \
-            --profile "$work/profile" >"$output" 2>&1; then
+            --profile "$profile" >"$output" 2>&1; then
             exit 1
           fi
           grep -F 'pip install "lingcore[telegram]"' "$output"

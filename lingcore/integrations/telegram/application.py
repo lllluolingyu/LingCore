@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import io
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
+
 # All PTB imports intentionally live below lingcore.integrations.telegram.
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.error import InvalidToken
@@ -19,6 +20,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from typing_extensions import Buffer
 
 from lingcore.config import AgentProfile
 from lingcore.errors import ConfigError, ToolError
@@ -48,8 +50,8 @@ class _BoundedBuffer(io.BytesIO):
         super().__init__()
         self.max_bytes = max_bytes
 
-    def write(self, data: bytes | bytearray) -> int:
-        if self.tell() + len(data) > self.max_bytes:
+    def write(self, data: Buffer) -> int:
+        if self.tell() + memoryview(data).nbytes > self.max_bytes:
             raise ToolError(
                 f"file too large (download exceeded limit {self.max_bytes})"
             )
@@ -156,17 +158,13 @@ class PTBSender(TelegramSender):
     async def delete_message(self, chat_id: int, message_id: int) -> Any:
         return await self.bot.delete_message(chat_id=chat_id, message_id=message_id)
 
-    async def send_photo(
-        self, chat_id: int, data: bytes, *, filename: str
-    ) -> Any:
+    async def send_photo(self, chat_id: int, data: bytes, *, filename: str) -> Any:
         return await self.bot.send_photo(
             chat_id=chat_id,
             photo=InputFile(io.BytesIO(data), filename=filename),
         )
 
-    async def send_document(
-        self, chat_id: int, data: bytes, *, filename: str
-    ) -> Any:
+    async def send_document(self, chat_id: int, data: bytes, *, filename: str) -> Any:
         return await self.bot.send_document(
             chat_id=chat_id,
             document=InputFile(io.BytesIO(data), filename=filename),
@@ -277,11 +275,7 @@ def _normalize_message(update: Any) -> TelegramMessage | None:
         and getattr(message, "effective_attachment", None) is not None
     ):
         unsupported = "media"
-    text = (
-        getattr(message, "text", None)
-        or getattr(message, "caption", None)
-        or ""
-    )
+    text = getattr(message, "text", None) or getattr(message, "caption", None) or ""
     return TelegramMessage(
         update_id=update.update_id,
         user_id=getattr(user, "id", None),
@@ -336,10 +330,10 @@ def create_telegram_application(
     builder = Application.builder().concurrent_updates(False)
     if bot is None:
         builder = builder.token(telegram_config.resolve_token()).rate_limiter(
-            AIORateLimiter(max_retries=1)
+            AIORateLimiter(max_retries=1)  # type: ignore[arg-type]
         )
     else:
-        builder = builder.bot(bot)
+        builder = builder.bot(bot)  # type: ignore[arg-type]
     # post_stop runs before the Bot is shut down (so confirmation buttons can
     # still be removed); post_shutdown covers manual lifecycle usage too.
     builder = builder.post_stop(close_bridge).post_shutdown(close_bridge)
@@ -373,7 +367,7 @@ def run_telegram(
     profile_path: str | Path,
     *,
     telegram_config_path: str | Path | None = None,
-    mode: str | None = None,
+    mode: Literal["polling", "webhook"] | None = None,
 ) -> int:
     """Synchronously run polling/webhook so PTB owns loop and signal handling."""
     profile = AgentProfile.load(profile_path)

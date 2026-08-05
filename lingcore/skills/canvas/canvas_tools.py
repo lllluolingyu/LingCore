@@ -97,6 +97,7 @@ def _next_link(link_header: str) -> str | None:
 
 def _same_origin(url: str, base_url: str) -> bool:
     """True when ``url`` has the same scheme/host/port as the Canvas base URL."""
+
     def origin(value: str) -> tuple[str, str, int] | None:
         try:
             parsed = urlparse(value)
@@ -178,7 +179,11 @@ def _confined(workspace: Path, rel: str) -> Path:
 
 
 def _filter_courses(courses: Any, course_ids: Any) -> list[dict[str, Any]]:
-    out = [c for c in courses if isinstance(c, dict) and c.get("id") is not None]
+    if not isinstance(courses, list):
+        return []
+    out: list[dict[str, Any]] = [
+        c for c in courses if isinstance(c, dict) and c.get("id") is not None
+    ]
     if course_ids:
         wanted = {str(i) for i in course_ids}
         out = [c for c in out if str(c.get("id")) in wanted]
@@ -193,10 +198,10 @@ async def _resolve_courses(
     courses = await _canvas_get(
         base_url, token, "/courses", {"enrollment_state": "active", "per_page": 50}
     )
-    courses = _filter_courses(courses, opts.get("course_ids"))
+    filtered = _filter_courses(courses, opts.get("course_ids"))
     if course_id is not None:
-        courses = [c for c in courses if str(c.get("id")) == str(course_id)]
-    return courses
+        filtered = [c for c in filtered if str(c.get("id")) == str(course_id)]
+    return filtered
 
 
 def _folder_path(folder: Any, all_folders: dict[Any, Any]) -> Path:
@@ -331,7 +336,9 @@ async def canvas_announcements(args: AnnouncementsArgs, ctx: ToolContext) -> str
             msg = _strip_html(a.get("message") or "")
             if len(msg) > 280:
                 msg = msg[:280] + "…"
-            out.append(f"- [{cname}] {title} ({posted})" + (f"\n    {msg}" if msg else ""))
+            out.append(
+                f"- [{cname}] {title} ({posted})" + (f"\n    {msg}" if msg else "")
+            )
     return "Announcements:\n" + "\n".join(out) if out else "No announcements found."
 
 
@@ -375,9 +382,7 @@ async def canvas_sync(args: SyncArgs, ctx: ToolContext) -> str:
             except ToolError as e:
                 errors.append(f"{cname}: {e}")
                 continue
-            folder_map = {
-                f.get("id"): f for f in folders if isinstance(f, dict)
-            }
+            folder_map = {f.get("id"): f for f in folders if isinstance(f, dict)}
             for f in files:
                 if not isinstance(f, dict):
                     continue

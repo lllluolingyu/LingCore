@@ -35,7 +35,7 @@ from lingcore.message import Attachment
 class ConfirmFn(Protocol):
     """A frontend-supplied callback gating risky actions (e.g. run_shell)."""
 
-    def __call__(self, prompt: str) -> Awaitable[bool]: ...
+    def __call__(self, prompt: str, /) -> Awaitable[bool]: ...
 
 
 @dataclass(slots=True)
@@ -69,7 +69,7 @@ class ToolOutput:
     attachments: list[Attachment] = field(default_factory=list)
 
 
-ToolFn = Callable[[BaseModel, ToolContext], Awaitable[str | ToolOutput]]
+ToolFn = Callable[..., Awaitable[str | ToolOutput]]
 
 
 @dataclass(slots=True)

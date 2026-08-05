@@ -187,9 +187,7 @@ class MediaAdapter:
                 "PDF text fallback is disabled (media_fallback.pdf: none)]"
             )
         data = base64.b64decode(attachment.data)
-        return await asyncio.to_thread(
-            extract_pdf_markdown, data, self.pdf_max_chars
-        )
+        return await asyncio.to_thread(extract_pdf_markdown, data, self.pdf_max_chars)
 
     async def _describe_image(self, attachment: Attachment) -> str:
         if self.vision is None:

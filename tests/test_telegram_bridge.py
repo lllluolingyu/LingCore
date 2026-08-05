@@ -51,14 +51,10 @@ class FakeSender:
         self.sent.append((chat_id, text))
         return Sent(mid)
 
-    async def edit_message(
-        self, chat_id, message_id, text, *, reply_markup=None
-    ):
+    async def edit_message(self, chat_id, message_id, text, *, reply_markup=None):
         self.messages[message_id] = text
 
-    async def edit_reply_markup(
-        self, chat_id, message_id, *, reply_markup=None
-    ):
+    async def edit_reply_markup(self, chat_id, message_id, *, reply_markup=None):
         return None
 
     async def delete_message(self, chat_id, message_id):
@@ -79,9 +75,7 @@ class FakeSender:
             raise ValueError("too large")
         return data
 
-    async def answer_callback(
-        self, callback_query_id, *, text=None, show_alert=False
-    ):
+    async def answer_callback(self, callback_query_id, *, text=None, show_alert=False):
         self.callback_answers.append((callback_query_id, text, show_alert))
 
 
@@ -113,12 +107,11 @@ stream_edit_interval: 0
 
     monkeypatch.setattr("lingcore.agent.asyncio.to_thread", direct_to_thread)
     if llm_factory is None:
-        llm_factory = lambda _: FakeLLMClient(
-            [ScriptedTurn(text="reply")] * 10
-        )
-    return profile, config, TelegramBridge(
-        profile, config, llm_factory=llm_factory
-    )
+
+        def llm_factory(_):
+            return FakeLLMClient([ScriptedTurn(text="reply")] * 10)
+
+    return profile, config, TelegramBridge(profile, config, llm_factory=llm_factory)
 
 
 async def _finish(bridge: TelegramBridge):
@@ -155,17 +148,12 @@ async def test_two_users_are_isolated_in_state_profile_and_attachments(
     two = await bridge.runtime_for(22, 22, sender)
     assert one.profile is not two.profile
     assert one.profile.tool_options is not two.profile.tool_options
-    assert (
-        one.profile.tool_options["memory"]
-        is not two.profile.tool_options["memory"]
-    )
+    assert one.profile.tool_options["memory"] is not two.profile.tool_options["memory"]
     assert one.profile.tool_options["memory"]["path"].endswith(
         ".lingcore/telegram/users/11/memory.md"
     )
     assert "allow_absolute_path" not in one.profile.tool_options["memory"]
-    assert one.profile.sessions.path.endswith(
-        ".lingcore/telegram/users/11/sessions.db"
-    )
+    assert one.profile.sessions.path.endswith(".lingcore/telegram/users/11/sessions.db")
     assert one.profile.sessions.allow_absolute_path is False
     assert one.agent.tool_ctx.workspace == config.state_path / "users/11/workspace"
     assert two.agent.tool_ctx.workspace == config.state_path / "users/22/workspace"
@@ -233,9 +221,7 @@ async def test_resume_selection_survives_silent_restart(tmp_path, monkeypatch):
     second_id = runtime.agent.memory.session_id
     assert second_id != first_id
     await bridge.handle_message(
-        TelegramMessage(
-            3, 11, 11, "private", text=f"/resume {first_id[:8]}"
-        ),
+        TelegramMessage(3, 11, 11, "private", text=f"/resume {first_id[:8]}"),
         sender,
     )
     assert runtime.agent.memory.session_id == first_id
@@ -335,9 +321,7 @@ async def test_stop_after_checkpoint_finalizes_and_keeps_user_message(
             await asyncio.Event().wait()
             yield LLMChunk(text_delta="unreachable")
 
-    _, _, bridge = _setup(
-        tmp_path, monkeypatch, llm_factory=lambda _: BlockingLLM()
-    )
+    _, _, bridge = _setup(tmp_path, monkeypatch, llm_factory=lambda _: BlockingLLM())
     sender = FakeSender()
     await bridge.handle_message(
         TelegramMessage(1, 11, 11, "private", text="long"), sender
@@ -350,9 +334,7 @@ async def test_stop_after_checkpoint_finalizes_and_keeps_user_message(
     await bridge.handle_message(
         TelegramMessage(3, 11, 11, "private", text="/resume invalid"), sender
     )
-    assert sum(
-        "Cannot switch sessions" in text for _, text in sender.sent
-    ) == 2
+    assert sum("Cannot switch sessions" in text for _, text in sender.sent) == 2
     await bridge.handle_message(
         TelegramMessage(4, 11, 11, "private", text="/stop"), sender
     )
@@ -395,8 +377,7 @@ async def test_stop_during_final_delivery_waits_for_committed_reply(
     await final_started.wait()
     runtime = await bridge.runtime_for(11, 11, sender)
     assert [
-        (message.role, message.content)
-        for message in runtime.agent.memory.messages
+        (message.role, message.content) for message in runtime.agent.memory.messages
     ] == [
         ("user", "question"),
         ("assistant", "authoritative response"),
@@ -432,17 +413,13 @@ async def test_renderer_failure_falls_back_without_rolling_back_turn(
     tmp_path, monkeypatch
 ):
     class BrokenEditSender(FakeSender):
-        async def edit_message(
-            self, chat_id, message_id, text, *, reply_markup=None
-        ):
+        async def edit_message(self, chat_id, message_id, text, *, reply_markup=None):
             raise RuntimeError("Flood control exceeded. Retry in 5 seconds")
 
     _, _, bridge = _setup(
         tmp_path,
         monkeypatch,
-        llm_factory=lambda _: FakeLLMClient(
-            [ScriptedTurn(text="complete response")]
-        ),
+        llm_factory=lambda _: FakeLLMClient([ScriptedTurn(text="complete response")]),
     )
     sender = BrokenEditSender()
     await bridge.handle_message(
@@ -452,18 +429,17 @@ async def test_renderer_failure_falls_back_without_rolling_back_turn(
 
     runtime = await bridge.runtime_for(11, 11, sender)
     assert [
-        (message.role, message.content)
-        for message in runtime.agent.memory.messages
+        (message.role, message.content) for message in runtime.agent.memory.messages
     ] == [
         ("user", "question"),
         ("assistant", "complete response"),
     ]
     assert "complete response" in sender.messages.values()
     assert "…" not in sender.messages.values()
-    assert sum(
-        "Live Telegram updates were interrupted" in text
-        for _, text in sender.sent
-    ) == 1
+    assert (
+        sum("Live Telegram updates were interrupted" in text for _, text in sender.sent)
+        == 1
+    )
     session_id = runtime.agent.memory.session_id
     assert [
         (message.role, message.content)
@@ -502,19 +478,19 @@ async def test_corrupt_active_session_self_heals_for_messages_and_new(
     assert bridge._state.active_session(22) == twenty_two.agent.memory.session_id
     assert any("Started session" in text for _, text in sender.sent)
     assert not any(
-        "Could not start your LingCore runtime" in text
-        for _, text in sender.sent
+        "Could not start your LingCore runtime" in text for _, text in sender.sent
     )
-    assert sum(
-        "Ignoring invalid Telegram active-session selection" in record.message
-        for record in caplog.records
-    ) == 2
+    assert (
+        sum(
+            "Ignoring invalid Telegram active-session selection" in record.message
+            for record in caplog.records
+        )
+        == 2
+    )
     await bridge.shutdown()
 
 
-async def test_shutdown_cancels_long_turn_instead_of_waiting(
-    tmp_path, monkeypatch
-):
+async def test_shutdown_cancels_long_turn_instead_of_waiting(tmp_path, monkeypatch):
     started = asyncio.Event()
 
     class BlockingLLM:
@@ -523,9 +499,7 @@ async def test_shutdown_cancels_long_turn_instead_of_waiting(
             await asyncio.Event().wait()
             yield LLMChunk(text_delta="unreachable")
 
-    _, _, bridge = _setup(
-        tmp_path, monkeypatch, llm_factory=lambda _: BlockingLLM()
-    )
+    _, _, bridge = _setup(tmp_path, monkeypatch, llm_factory=lambda _: BlockingLLM())
     sender = FakeSender()
     await bridge.handle_message(
         TelegramMessage(1, 11, 11, "private", text="long"), sender

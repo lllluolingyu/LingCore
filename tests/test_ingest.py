@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-from pathlib import Path
 
 from lingcore.ingest import ingest_attachments
 from lingcore.media_types import TEXT_INLINE_MAX_CHARS

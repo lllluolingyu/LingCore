@@ -156,9 +156,7 @@ class TelegramConfig(BaseModel):
             return ""
         return urlsplit(self.webhook.public_url).path.lstrip("/")
 
-    def resolve_token(
-        self, environment: Mapping[str, str] | None = None
-    ) -> str:
+    def resolve_token(self, environment: Mapping[str, str] | None = None) -> str:
         return self._resolve_named_secret(
             self.token_env, "token_env", environment=environment
         )
@@ -320,8 +318,7 @@ def load_telegram_config(
         config = TelegramConfig.model_validate(expanded)
     except ValidationError as exc:
         raise ConfigError(
-            f"invalid Telegram config {config_path}: "
-            f"{_safe_validation_message(exc)}"
+            f"invalid Telegram config {config_path}: {_safe_validation_message(exc)}"
         ) from None
 
     _validate_profile_policy(profile)

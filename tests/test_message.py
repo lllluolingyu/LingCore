@@ -60,8 +60,12 @@ def test_conversation_to_openai_order():
 def test_user_attachments_to_openai_parts():
     img_data = _b64(b"\x89PNG\r\n\x1a\nrest")
     pdf_data = _b64(b"%PDF-1.4\n")
-    img = Attachment(kind="image", media_type="image/png", data=img_data, name="pic.png")
-    pdf = Attachment(kind="file", media_type="application/pdf", data=pdf_data, name="doc.pdf")
+    img = Attachment(
+        kind="image", media_type="image/png", data=img_data, name="pic.png"
+    )
+    pdf = Attachment(
+        kind="file", media_type="application/pdf", data=pdf_data, name="doc.pdf"
+    )
     wire = Message.user("describe", attachments=[img, pdf]).to_openai()
     assert wire == {
         "role": "user",
@@ -237,7 +241,9 @@ def test_text_attachment_validates_and_inlines_content():
 
 
 def test_binary_attachment_renders_its_note_verbatim():
-    note = "[binary file saved to attachments/x.bin (application/octet-stream, 4 bytes)]"
+    note = (
+        "[binary file saved to attachments/x.bin (application/octet-stream, 4 bytes)]"
+    )
     att = Attachment(
         kind="binary",
         media_type="application/octet-stream",
@@ -276,10 +282,12 @@ def test_text_and_image_mix_keeps_native_image_plus_inlined_text():
 
 def test_old_style_image_dict_still_validates():
     # Back-compat: a stored row carrying only image/file kinds loads unchanged.
-    att = Attachment.model_validate({
-        "kind": "image",
-        "media_type": "image/png",
-        "data": _b64(b"\x89PNG\r\n\x1a\nrest"),
-        "name": "p.png",
-    })
+    att = Attachment.model_validate(
+        {
+            "kind": "image",
+            "media_type": "image/png",
+            "data": _b64(b"\x89PNG\r\n\x1a\nrest"),
+            "name": "p.png",
+        }
+    )
     assert att.kind == "image" and att.media_type == "image/png"

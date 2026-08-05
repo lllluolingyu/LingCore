@@ -134,9 +134,13 @@ async def test_no_hunks_error(ctx):
 
 async def test_missing_file(ctx):
     with pytest.raises(ToolError, match="not a file"):
-        await patch_file(PatchArgs(path="nope.py", diff="@@ -1,1 +1,1 @@\n-x\n+y\n"), ctx)
+        await patch_file(
+            PatchArgs(path="nope.py", diff="@@ -1,1 +1,1 @@\n-x\n+y\n"), ctx
+        )
 
 
 async def test_escape_rejected(ctx):
     with pytest.raises(ToolError, match="escapes workspace"):
-        await patch_file(PatchArgs(path="../evil.py", diff="@@ -1,1 +1,1 @@\n-a\n+b\n"), ctx)
+        await patch_file(
+            PatchArgs(path="../evil.py", diff="@@ -1,1 +1,1 @@\n-a\n+b\n"), ctx
+        )

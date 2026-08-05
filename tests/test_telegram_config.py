@@ -77,9 +77,7 @@ allowed_user_ids: [1]
     "users",
     ("[]", "[0]", "[-1]", "[true]", '["123"]'),
 )
-def test_allowed_user_ids_are_nonempty_positive_strict_ints(
-    tmp_path, users
-):
+def test_allowed_user_ids_are_nonempty_positive_strict_ints(tmp_path, users):
     root, profile = _profile(tmp_path)
     path = _telegram(
         root,
@@ -280,9 +278,7 @@ def test_telegram_dispatch_is_synchronous(tmp_path, monkeypatch):
 
 def test_sessions_disabled_and_unsafe_shell_are_refused(tmp_path):
     root, profile = _profile(tmp_path, suffix="sessions:\n  enabled: false\n")
-    path = _telegram(
-        root, "token_env: TELEGRAM_TOKEN\nallowed_user_ids: [1]\n"
-    )
+    path = _telegram(root, "token_env: TELEGRAM_TOKEN\nallowed_user_ids: [1]\n")
     with pytest.raises(ConfigError, match="sessions.enabled"):
         load_telegram_config(profile, path, require_secrets=False)
 

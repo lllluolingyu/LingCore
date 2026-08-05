@@ -6,7 +6,14 @@ from lingcore.errors import (
     MaxIterationsError,
     ToolError,
 )
-from lingcore.message import Attachment, Conversation, Message, ToolCall, ToolResult, UserInput
+from lingcore.message import (
+    Attachment,
+    Conversation,
+    Message,
+    ToolCall,
+    ToolResult,
+    UserInput,
+)
 
 # Single source of truth for the package version: pyproject.toml declares
 # ``dynamic = ["version"]`` and hatchling reads it from here at build time, so

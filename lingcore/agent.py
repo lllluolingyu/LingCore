@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import random
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing
-from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from lingcore.composer import ComposeContext, PromptComposer, StaticComposer
 from lingcore.errors import LLMStreamError
@@ -31,7 +32,7 @@ from lingcore.events import (
     ToolResultEvent,
     TurnCancelled,
 )
-from lingcore.guardrails import Guardrail, NoopGuardrail
+from lingcore.guardrails import Guardrail, NoopGuardrail, build_guardrail
 from lingcore.ingest import ingest_attachments
 from lingcore.llm import LLMChunk
 from lingcore.media_types import (
@@ -41,7 +42,7 @@ from lingcore.media_types import (
 )
 from lingcore.memory import ShortTermMemory, WindowMemory
 from lingcore.message import Attachment, Message, ToolCall, ToolResult, UserInput
-from lingcore.tools import ToolContext, ToolOutput, ToolRegistry
+from lingcore.tools import Tool, ToolContext, ToolOutput, ToolRegistry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -65,15 +66,6 @@ def _backoff_seconds(attempt: int) -> float:
     return random.uniform(
         0.0, min(_BACKOFF_CAP_SECONDS, _BACKOFF_BASE_SECONDS * 2 ** (attempt - 1))
     )
-
-
-def _build_guardrail(policy: str) -> Guardrail:
-    """Map a profile's guardrail policy name to an implementation."""
-    if policy == "noop":
-        return NoopGuardrail()
-    from lingcore.errors import ConfigError
-
-    raise ConfigError(f"unknown guardrail policy: {policy!r}")
 
 
 def _cap_hoist_media(
@@ -186,9 +178,7 @@ class Agent:
         self._turn_user_message: Message | None = None
         self._turn_index_checkpoint: int | None = None
         self._turn_skills_checkpoint: list[str] | None = None
-        self._turn_skill_approvals_checkpoint: (
-            dict[str, frozenset[str]] | None
-        ) = None
+        self._turn_skill_approvals_checkpoint: dict[str, frozenset[str]] | None = None
         self._turn_message_seq: int | None = None
         self._turn_cancel_requested = False
         # If durable rollback fails after the in-memory lease is released, no
@@ -261,9 +251,7 @@ class Agent:
 
         client: _LLMLike = llm or LLMClient(
             model=profile.llm.model,
-            api_key=profile.llm.resolve_api_key(
-                getattr(profile, "_profile_env", {})
-            ),
+            api_key=profile.llm.resolve_api_key(getattr(profile, "_profile_env", {})),
             base_url=profile.llm.base_url,
             sampling=profile.llm.sampling.as_kwargs(),
             max_retries=profile.llm.max_retries,
@@ -419,7 +407,7 @@ class Agent:
         # LLMClient we built (a test-injected fake is left untouched).
         if profile.llm.send_prompt_cache_key and sid and isinstance(client, LLMClient):
             client._prompt_cache_key = sid
-        guardrail = _build_guardrail(profile.guardrail.policy)
+        guardrail = build_guardrail(profile.guardrail.policy, profile.guardrail.options)
 
         # --- Dynamic skill state (only when the activate_skill tool is enabled) ---
         skill_state: "SkillState | None" = None
@@ -444,7 +432,8 @@ class Agent:
                 skills=offerable,
                 profile_tools=ptools,
                 allow_concurrent=bool(sk_opts.get("allow_concurrent", False)),
-                high_risk_tools=frozenset(high_risk) if high_risk is not None
+                high_risk_tools=frozenset(high_risk)
+                if high_risk is not None
                 else SkillState.high_risk_tools,
             )
             if session_store is not None and sid is not None:
@@ -457,19 +446,13 @@ class Agent:
                         skill_state.effective_tools(skill_state.skills[name])
                         & skill_state.high_risk_tools
                     )
-                    <= (
-                        persisted.approvals_for(name)
-                        & skill_state.high_risk_tools
-                    )
+                    <= (persisted.approvals_for(name) & skill_state.high_risk_tools)
                 ]
                 if not skill_state.allow_concurrent and len(restored) > 1:
                     restored = restored[-1:]
                 skill_state.active[:] = restored
                 skill_state.approved_high_risk = {
-                    name: (
-                        persisted.approvals_for(name)
-                        & skill_state.high_risk_tools
-                    )
+                    name: (persisted.approvals_for(name) & skill_state.high_risk_tools)
                     for name in restored
                 }
             # Share the live state object with the activate_skill tool.
@@ -596,8 +579,7 @@ class Agent:
             # failed durable truncate is recorded for retry before the next
             # turn; surface it as an event instead of crashing Stop handling.
             return Error(
-                f"turn cancelled, but rollback is pending: "
-                f"{type(exc).__name__}: {exc}"
+                f"turn cancelled, but rollback is pending: {type(exc).__name__}: {exc}"
             )
         return TurnCancelled(reason=reason)
 
@@ -628,9 +610,7 @@ class Agent:
             ):
                 message_seq = self._turn_message_seq
                 try:
-                    self._session_store.truncate_after(
-                        self._session_id, message_seq
-                    )
+                    self._session_store.truncate_after(self._session_id, message_seq)
                 except BaseException:
                     self._pending_turn_message_seq = message_seq
                     raise
@@ -665,7 +645,9 @@ class Agent:
         self._session_store.truncate_after(self._session_id, message_seq)
         self._pending_turn_message_seq = None
 
-    async def run(self, user_input: str | UserInput) -> AsyncIterator[AgentEvent]:
+    async def run(
+        self, user_input: str | UserInput
+    ) -> AsyncGenerator[AgentEvent, None]:
         """Drive one user turn to completion, yielding events as they happen."""
         # The checkpoint marks an active turn and the identity token owns it.
         # In particular, a cancelled driver task is already ``done`` but its
@@ -763,8 +745,7 @@ class Agent:
                 self._rollback_turn(lease)
             except Exception as rollback_exc:
                 message += (
-                    "; rollback failed: "
-                    f"{type(rollback_exc).__name__}: {rollback_exc}"
+                    f"; rollback failed: {type(rollback_exc).__name__}: {rollback_exc}"
                 )
             yield Error(message)
         except BaseException:
@@ -775,7 +756,7 @@ class Agent:
 
     async def _run_turn(
         self, user_input: str | UserInput, lease: object
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncGenerator[AgentEvent, None]:
         """Run the acquired turn; :meth:`run` owns failure containment."""
         if isinstance(user_input, str):
             incoming = UserInput(text=user_input)
@@ -839,9 +820,7 @@ class Agent:
             # no-op; session snapshot failures are contained by run().
             if not compacted_this_turn:
                 compacted_this_turn = True
-                set_turn_index = getattr(
-                    self.memory, "set_compaction_turn_index", None
-                )
+                set_turn_index = getattr(self.memory, "set_compaction_turn_index", None)
                 if callable(set_turn_index):
                     set_turn_index(self._turn_index)
                 compacted = await self.memory.maybe_compact(system_prompt)
@@ -915,20 +894,18 @@ class Agent:
             for call in assistant.tool_calls:
                 yield ToolCallStarted(call)
 
-            before_active = (
-                list(self.skill_state.active) if self.skill_state else []
-            )
+            before_active = list(self.skill_state.active) if self.skill_state else []
             before = set(before_active)
             before_approvals = (
-                dict(self.skill_state.approved_high_risk)
-                if self.skill_state
-                else {}
+                dict(self.skill_state.approved_high_risk) if self.skill_state else {}
             )
             results = await self._dispatch(assistant.tool_calls)
             for result in results:
                 self.memory.add(Message.from_tool_result(result))
                 yield ToolResultEvent(result)
-            media = [attachment for result in results for attachment in result.attachments]
+            media = [
+                attachment for result in results for attachment in result.attachments
+            ]
             if media:
                 kept, dropped = _cap_hoist_media(media)
                 if kept and self.media_adapter is not None:
@@ -945,12 +922,14 @@ class Agent:
                         "per-message media limit; re-run the tool for the ones "
                         "you need, fewer at a time]"
                     )
-                self.memory.add(Message(
-                    role="user",
-                    content=note,
-                    name="media",
-                    attachments=kept,
-                ))
+                self.memory.add(
+                    Message(
+                        role="user",
+                        content=note,
+                        name="media",
+                        attachments=kept,
+                    )
+                )
 
             # Surface skill activation/deactivation changes as events.
             if self.skill_state is not None:
@@ -1016,7 +995,9 @@ class Agent:
             for schema in base:
                 fn = schema["function"]
                 if fn["name"] == "activate_skill":
-                    fn["description"] = fn["description"] + "\nAvailable skills:\n" + listing
+                    fn["description"] = (
+                        fn["description"] + "\nAvailable skills:\n" + listing
+                    )
                     break
 
         if not self.skill_state.active:
@@ -1070,7 +1051,7 @@ class Agent:
 
     def _resolve_tool(
         self, name: str, *, authorized: frozenset[str] | None = None
-    ):
+    ) -> Tool:
         """Look up a tool by name, enforcing the permission model at dispatch.
 
         A tool is dispatchable only when it is currently *authorized*: in the
@@ -1079,7 +1060,9 @@ class Agent:
         refused with the same error an unknown tool would raise, so a model that
         calls a gated-but-not-active tool can't reach it.
         """
-        allowed = authorized if authorized is not None else self._authorized_tool_names()
+        allowed = (
+            authorized if authorized is not None else self._authorized_tool_names()
+        )
         if name in allowed:
             return self.tools.get(name)
         from lingcore.errors import ToolError

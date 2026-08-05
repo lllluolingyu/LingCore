@@ -5,7 +5,13 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from lingcore.events import Final, StreamRetry, TextDelta, ToolCallStarted, ToolResultEvent
+from lingcore.events import (
+    Final,
+    StreamRetry,
+    TextDelta,
+    ToolCallStarted,
+    ToolResultEvent,
+)
 from lingcore.integrations.telegram.confirmations import ConfirmationManager
 from lingcore.integrations.telegram.protocol import InlineButtons
 from lingcore.integrations.telegram.rendering import (
@@ -41,15 +47,11 @@ class FakeSender:
         self.sent.append((chat_id, text, reply_markup))
         return Sent(mid, text)
 
-    async def edit_message(
-        self, chat_id, message_id, text, *, reply_markup=None
-    ):
+    async def edit_message(self, chat_id, message_id, text, *, reply_markup=None):
         self.messages[message_id] = text
         self.edits.append((message_id, text))
 
-    async def edit_reply_markup(
-        self, chat_id, message_id, *, reply_markup=None
-    ):
+    async def edit_reply_markup(self, chat_id, message_id, *, reply_markup=None):
         self.markup_edits.append(message_id)
 
     async def delete_message(self, chat_id, message_id):
@@ -64,9 +66,7 @@ class FakeSender:
     async def send_document(self, chat_id, data, *, filename):
         pass
 
-    async def answer_callback(
-        self, callback_query_id, *, text=None, show_alert=False
-    ):
+    async def answer_callback(self, callback_query_id, *, text=None, show_alert=False):
         self.callback_answers.append((callback_query_id, text, show_alert))
 
 
@@ -81,9 +81,7 @@ def test_chunker_preserves_text_and_prefers_boundaries():
 async def test_stream_throttles_active_edits_and_final_is_authoritative():
     sender = FakeSender()
     now = [10.0]
-    renderer = TelegramTurnRenderer(
-        sender, 5, edit_interval=1.0, clock=lambda: now[0]
-    )
+    renderer = TelegramTurnRenderer(sender, 5, edit_interval=1.0, clock=lambda: now[0])
     await renderer.handle(TextDelta("first"))
     await renderer.handle(TextDelta(" second"))
     assert [text for _, text in sender.edits] == ["first"]
@@ -94,9 +92,7 @@ async def test_stream_throttles_active_edits_and_final_is_authoritative():
 
 async def test_stream_rollover_and_surplus_delete_fallback():
     sender = FakeSender()
-    renderer = TelegramTurnRenderer(
-        sender, 5, edit_interval=0, clock=lambda: 1.0
-    )
+    renderer = TelegramTurnRenderer(sender, 5, edit_interval=0, clock=lambda: 1.0)
     await renderer.handle(TextDelta("x" * 4_000))
     assert len(renderer.response_message_ids) == 2
     surplus_id = renderer.response_message_ids[1]
@@ -158,12 +154,8 @@ async def test_parallel_confirmations_wrong_user_and_independent_resolution():
     assert alert and "another user" in answer
     assert not first.done()
 
-    await manager.resolve_callback(
-        callback_data=first_data, user_id=1, chat_id=1
-    )
-    await manager.resolve_callback(
-        callback_data=second_data, user_id=1, chat_id=1
-    )
+    await manager.resolve_callback(callback_data=first_data, user_id=1, chat_id=1)
+    await manager.resolve_callback(callback_data=second_data, user_id=1, chat_id=1)
     assert await first is True
     assert await second is False
     assert len(sender.markup_edits) == 2

@@ -42,11 +42,13 @@ Issues = "https://github.com/lllluolingyu/LingCore/issues"
 
 [dependency-groups]
 dev = [
+    "mypy==2.3.0",
     "pytest==9.0.3",
     "pytest-asyncio==1.4.0",
     "pymupdf==1.27.2.3",  # keep in sync with optional-dependencies.pdf
     # Keep in sync with optional-dependencies.telegram.
     "python-telegram-bot[rate-limiter,webhooks]==22.8",
+    "ruff==0.16.1",
 ]
 
 [build-system]
@@ -59,6 +61,44 @@ path = "lingcore/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["lingcore"]
 
+# Immutable examples become package data under ``lingcore/profile_templates``.
+# The explicit file manifest prevents ignored sessions, workspaces, memories,
+# secrets, and local scratch artifacts from leaking into release wheels.
+[tool.hatch.build.targets.wheel.force-include]
+"profiles/coding/.env.example" = "lingcore/profile_templates/coding/.env.example"
+"profiles/coding/config.yaml" = "lingcore/profile_templates/coding/config.yaml"
+"profiles/coding/role.md" = "lingcore/profile_templates/coding/role.md"
+"profiles/coding/workflow.md" = "lingcore/profile_templates/coding/workflow.md"
+"profiles/coding/world.md" = "lingcore/profile_templates/coding/world.md"
+"profiles/coding_ollama/config.yaml" = "lingcore/profile_templates/coding_ollama/config.yaml"
+"profiles/daily/.env.example" = "lingcore/profile_templates/daily/.env.example"
+"profiles/daily/config.yaml" = "lingcore/profile_templates/daily/config.yaml"
+"profiles/daily/role.md" = "lingcore/profile_templates/daily/role.md"
+"profiles/daily/workflow.md" = "lingcore/profile_templates/daily/workflow.md"
+"profiles/daily/world.md" = "lingcore/profile_templates/daily/world.md"
+"profiles/teaching/.env.example" = "lingcore/profile_templates/teaching/.env.example"
+"profiles/teaching/config.yaml" = "lingcore/profile_templates/teaching/config.yaml"
+"profiles/teaching/role.md" = "lingcore/profile_templates/teaching/role.md"
+"profiles/teaching/workflow.md" = "lingcore/profile_templates/teaching/workflow.md"
+"profiles/teaching/world.md" = "lingcore/profile_templates/teaching/world.md"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["lingcore"]
+check_untyped_defs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+disable_error_code = ["import-untyped"]
+warn_redundant_casts = true
+warn_return_any = true
+warn_unused_ignores = true

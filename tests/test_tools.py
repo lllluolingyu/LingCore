@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from lingcore.errors import ConfigError, ToolError
 from lingcore.paths import ConfinedDirectory
 from lingcore.tools import ToolContext, ToolRegistry, tool
+from lingcore.tools.builtin._offload import offload_text
 from lingcore.tools.builtin.fs import (
     EditArgs,
     ListArgs,
@@ -27,7 +28,6 @@ from lingcore.tools.builtin.fs import (
     search,
     write_file,
 )
-from lingcore.tools.builtin._offload import offload_text
 from lingcore.tools.builtin.pdf import Pdf2MdArgs, pdf2md
 
 
@@ -194,9 +194,7 @@ async def test_pdf2md_tool_options_default(tmp_path):
 
     long_page = "\n".join(["lorem ipsum dolor sit amet"] * 12)
     (tmp_path / "doc.pdf").write_bytes(make_pdf(long_page, "tail page"))
-    opt_ctx = ToolContext(
-        workspace=tmp_path, options={"pdf2md": {"max_chars": 200}}
-    )
+    opt_ctx = ToolContext(workspace=tmp_path, options={"pdf2md": {"max_chars": 200}})
     out = await pdf2md(Pdf2MdArgs(path="doc.pdf"), opt_ctx)
     assert "[truncated at 200 characters" in out
 

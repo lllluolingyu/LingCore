@@ -46,6 +46,7 @@ _MEDIA_TYPE_RE = re.compile(r"[\w.+-]+/[\w.+-]+")
 def is_valid_media_type(media_type: str) -> bool:
     return bool(_MEDIA_TYPE_RE.fullmatch(media_type))
 
+
 _EXTENSIONS: dict[str, tuple[AttachmentKind, str]] = {
     ".png": ("image", "image/png"),
     ".jpg": ("image", "image/jpeg"),
@@ -95,9 +96,7 @@ def sanitize_name(name: str | None, fallback: str = "attachment") -> str:
     """Return a short display filename without path separators."""
     raw = (name or "").replace("\\", "/").split("/")[-1].strip()
     raw = raw or fallback
-    raw = "".join(
-        ch if ch.isprintable() and ch not in "\r\n\t" else "_" for ch in raw
-    )
+    raw = "".join(ch if ch.isprintable() and ch not in "\r\n\t" else "_" for ch in raw)
     raw = raw[:MAX_ATTACHMENT_NAME_CHARS].strip(" .")
     return raw or fallback
 
@@ -164,7 +163,9 @@ def decode_base64_payload(
     except Exception:
         raise ValueError("invalid attachment base64 data") from None
     if len(decoded) > max_bytes:
-        raise ValueError(f"attachment too large ({len(decoded)} bytes; limit {max_bytes})")
+        raise ValueError(
+            f"attachment too large ({len(decoded)} bytes; limit {max_bytes})"
+        )
     return base64.b64encode(decoded).decode("ascii"), decoded
 
 

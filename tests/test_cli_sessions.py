@@ -56,7 +56,9 @@ def test_list_sessions_populated(tmp_path, capsys):
     assert SID_A[:8] in out and "hello world" in out
 
 
-def test_list_sessions_on_in_package_profile_prints_notice(tmp_path, monkeypatch, capsys):
+def test_list_sessions_on_in_package_profile_prints_notice(
+    tmp_path, monkeypatch, capsys
+):
     import lingcore.sessions as sessions_mod
 
     d = _write_profile(tmp_path)

@@ -7,8 +7,8 @@ where ``edit_file`` would require many sequential calls.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from pydantic import BaseModel, Field

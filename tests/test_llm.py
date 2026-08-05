@@ -51,15 +51,43 @@ async def test_text_streaming(client, monkeypatch):
 async def test_tool_call_fragments_reassembled(client, monkeypatch):
     # A single tool call whose JSON arguments arrive split across chunks.
     events = [
-        _Event([_Choice(_Delta(tool_calls=[
-            _ToolCallDelta(index=0, id="call_1", function=_Fn(name="read_file")),
-        ]))]),
-        _Event([_Choice(_Delta(tool_calls=[
-            _ToolCallDelta(index=0, function=_Fn(arguments='{"pa')),
-        ]))]),
-        _Event([_Choice(_Delta(tool_calls=[
-            _ToolCallDelta(index=0, function=_Fn(arguments='th": "a.txt"}')),
-        ]))]),
+        _Event(
+            [
+                _Choice(
+                    _Delta(
+                        tool_calls=[
+                            _ToolCallDelta(
+                                index=0, id="call_1", function=_Fn(name="read_file")
+                            ),
+                        ]
+                    )
+                )
+            ]
+        ),
+        _Event(
+            [
+                _Choice(
+                    _Delta(
+                        tool_calls=[
+                            _ToolCallDelta(index=0, function=_Fn(arguments='{"pa')),
+                        ]
+                    )
+                )
+            ]
+        ),
+        _Event(
+            [
+                _Choice(
+                    _Delta(
+                        tool_calls=[
+                            _ToolCallDelta(
+                                index=0, function=_Fn(arguments='th": "a.txt"}')
+                            ),
+                        ]
+                    )
+                )
+            ]
+        ),
         _Event([_Choice(_Delta(), finish_reason="tool_calls")]),
     ]
     chunks = await _collect(client, monkeypatch, events)
@@ -75,10 +103,28 @@ async def test_tool_call_fragments_reassembled(client, monkeypatch):
 
 async def test_parallel_tool_calls_kept_separate(client, monkeypatch):
     events = [
-        _Event([_Choice(_Delta(tool_calls=[
-            _ToolCallDelta(index=0, id="c0", function=_Fn(name="read_file", arguments='{"path":"a"}')),
-            _ToolCallDelta(index=1, id="c1", function=_Fn(name="list_dir", arguments='{"path":"."}')),
-        ]))]),
+        _Event(
+            [
+                _Choice(
+                    _Delta(
+                        tool_calls=[
+                            _ToolCallDelta(
+                                index=0,
+                                id="c0",
+                                function=_Fn(
+                                    name="read_file", arguments='{"path":"a"}'
+                                ),
+                            ),
+                            _ToolCallDelta(
+                                index=1,
+                                id="c1",
+                                function=_Fn(name="list_dir", arguments='{"path":"."}'),
+                            ),
+                        ]
+                    )
+                )
+            ]
+        ),
         _Event([_Choice(_Delta(), finish_reason="tool_calls")]),
     ]
     chunks = await _collect(client, monkeypatch, events)
@@ -90,9 +136,21 @@ async def test_parallel_tool_calls_kept_separate(client, monkeypatch):
 
 async def test_malformed_args_become_empty_dict(client, monkeypatch):
     events = [
-        _Event([_Choice(_Delta(tool_calls=[
-            _ToolCallDelta(index=0, id="c0", function=_Fn(name="x", arguments="{not json")),
-        ]))]),
+        _Event(
+            [
+                _Choice(
+                    _Delta(
+                        tool_calls=[
+                            _ToolCallDelta(
+                                index=0,
+                                id="c0",
+                                function=_Fn(name="x", arguments="{not json"),
+                            ),
+                        ]
+                    )
+                )
+            ]
+        ),
         _Event([_Choice(_Delta(), finish_reason="tool_calls")]),
     ]
     chunks = await _collect(client, monkeypatch, events)
@@ -148,7 +206,10 @@ def test_full_modalities_normalize_to_native_fast_path():
 
 async def test_prompt_cache_key_sent_when_configured(monkeypatch):
     client = LLMClient(
-        model="x", api_key="k", base_url="http://localhost/v1", prompt_cache_key="sess-9"
+        model="x",
+        api_key="k",
+        base_url="http://localhost/v1",
+        prompt_cache_key="sess-9",
     )
     captured: dict = {}
 
@@ -180,16 +241,23 @@ async def test_prompt_cache_key_absent_by_default(monkeypatch):
 # instant and the suite never really sleeps.                                   #
 # --------------------------------------------------------------------------- #
 
+
 def _sse(*chunks: dict) -> bytes:
     body = "".join("data: " + json.dumps(c) + "\n\n" for c in chunks)
     return (body + "data: [DONE]\n\n").encode()
 
 
 _OK_STREAM = _sse(
-    {"id": "1", "object": "chat.completion.chunk",
-     "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}]},
-    {"id": "1", "object": "chat.completion.chunk",
-     "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    {
+        "id": "1",
+        "object": "chat.completion.chunk",
+        "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}],
+    },
+    {
+        "id": "1",
+        "object": "chat.completion.chunk",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    },
 )
 
 
@@ -205,8 +273,9 @@ def _mock_client(handler, **kw) -> LLMClient:
     """An LLMClient whose SDK talks to a MockTransport, so the SDK's own
     (header-aware) retry policy runs for real against scripted responses."""
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    return LLMClient(model="x", api_key="k", base_url="http://test/v1",
-                     http_client=http, **kw)
+    return LLMClient(
+        model="x", api_key="k", base_url="http://test/v1", http_client=http, **kw
+    )
 
 
 async def test_sdk_retries_then_succeeds():
@@ -214,15 +283,15 @@ async def test_sdk_retries_then_succeeds():
 
     def handler(request):
         calls["n"] += 1
-        if calls["n"] <= 2:                       # two transient 429s …
+        if calls["n"] <= 2:  # two transient 429s …
             return _err(429, **{"retry-after-ms": "1"})
-        return httpx.Response(                     # … then a real stream
+        return httpx.Response(  # … then a real stream
             200, headers={"content-type": "text/event-stream"}, content=_OK_STREAM
         )
 
     client = _mock_client(handler, max_retries=5)
     chunks = [c async for c in client.stream(messages=[])]
-    assert calls["n"] == 3                          # 2 retries + 1 success
+    assert calls["n"] == 3  # 2 retries + 1 success
     assert "".join(c.text_delta for c in chunks) == "hi"
     assert chunks[-1].finish_reason == "stop"
 
@@ -237,7 +306,7 @@ async def test_sdk_gives_up_after_max_retries():
     client = _mock_client(handler, max_retries=2)
     with pytest.raises(RateLimitError):
         await client._open_stream([], None)
-    assert calls["n"] == 3                           # 1 attempt + 2 retries
+    assert calls["n"] == 3  # 1 attempt + 2 retries
 
 
 async def test_sdk_honors_x_should_retry_false():
@@ -252,7 +321,7 @@ async def test_sdk_honors_x_should_retry_false():
     client = _mock_client(handler, max_retries=5)
     with pytest.raises(InternalServerError):
         await client._open_stream([], None)
-    assert calls["n"] == 1                           # not retried
+    assert calls["n"] == 1  # not retried
 
 
 async def test_sdk_does_not_retry_bad_request():
@@ -265,7 +334,7 @@ async def test_sdk_does_not_retry_bad_request():
     client = _mock_client(handler, max_retries=5)
     with pytest.raises(BadRequestError):
         await client._open_stream([], None)
-    assert calls["n"] == 1                           # 4xx is non-transient
+    assert calls["n"] == 1  # 4xx is non-transient
 
 
 async def test_max_retries_zero_attempts_once():
@@ -278,7 +347,7 @@ async def test_max_retries_zero_attempts_once():
     client = _mock_client(handler, max_retries=0)
     with pytest.raises(RateLimitError):
         await client._open_stream([], None)
-    assert calls["n"] == 1                           # retrying disabled
+    assert calls["n"] == 1  # retrying disabled
 
 
 # --------------------------------------------------------------------------- #
@@ -350,9 +419,21 @@ async def test_premature_eof_is_retryable_truncation(client, monkeypatch):
     # a tool on half its JSON arguments).
     events = [
         _Event([_Choice(_Delta(content="half a re"))]),
-        _Event([_Choice(_Delta(tool_calls=[
-            _ToolCallDelta(index=0, id="c0", function=_Fn(name="x", arguments='{"pa')),
-        ]))]),
+        _Event(
+            [
+                _Choice(
+                    _Delta(
+                        tool_calls=[
+                            _ToolCallDelta(
+                                index=0,
+                                id="c0",
+                                function=_Fn(name="x", arguments='{"pa'),
+                            ),
+                        ]
+                    )
+                )
+            ]
+        ),
     ]
     chunks = []
     with pytest.raises(LLMStreamError) as ei:
@@ -370,11 +451,12 @@ async def test_premature_eof_is_retryable_truncation(client, monkeypatch):
 
 
 def test_retry_and_timeout_wired_to_sdk():
-    client = LLMClient(model="x", api_key="k", base_url="http://test/v1",
-                       max_retries=7, timeout=33.0)
+    client = LLMClient(
+        model="x", api_key="k", base_url="http://test/v1", max_retries=7, timeout=33.0
+    )
     assert client._client.max_retries == 7
-    assert client._client.timeout.read == 33.0       # read window honored
-    assert client._client.timeout.connect == 10.0    # connect capped for fast-fail
+    assert client._client.timeout.read == 33.0  # read window honored
+    assert client._client.timeout.connect == 10.0  # connect capped for fast-fail
 
 
 async def test_retry_and_timeout_flow_from_profile_to_client(tmp_path, monkeypatch):

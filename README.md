@@ -80,13 +80,25 @@ cd LingCore
 uv sync
 ```
 
-The source checkout includes the example profiles used below. Wheels contain
-the runtime package but not those repo-root, writable profile directories, so
-an installed `lingcore` command must be given an external profile explicitly:
+The source checkout includes the example profiles used below. Wheels include
+immutable copies of the same templates; initialize one into writable user state
+before the first installed-wheel run:
 
 ```bash
-lingcore --profile /path/to/my-agent
+lingcore profile list
+lingcore profile init                 # initializes the keyed `coding` default
+cp ~/.local/state/lingcore/profiles/coding/.env.example \
+  ~/.local/state/lingcore/profiles/coding/.env
+lingcore doctor
+lingcore
 ```
+
+On Linux the default root follows `XDG_STATE_HOME` (falling back to
+`~/.local/state/lingcore`); macOS and Windows use their normal application-state
+locations. `LINGCORE_STATE_HOME` overrides the LingCore state root. Templates
+are copied atomically and never overwrite an existing profile. Use
+`--destination` for an explicit location, or initialize the local profile as
+the installed default with `lingcore profile init coding_ollama --name coding`.
 
 PDF text extraction (the `pdf2md` tool and the automatic PDF→text fallback)
 needs PyMuPDF, which is AGPL-3.0 while LingCore is Apache-2.0 — so it ships as
@@ -237,19 +249,22 @@ uv run lingcore -p my-agent --resume 3ca5       # resume by unique id prefix
 uv run lingcore -p my-agent --list-sessions     # see what's stored
 ```
 
-History lands in `<profile>/sessions.db` — delete the file to wipe it. The
-bundled profiles live at the repo root (`profiles/`), outside the installed
-package, so they keep history too (their db files are gitignored). A profile
-inside an installed package can't persist and runs ephemeral with a one-line
-notice.
+History lands in `<profile>/sessions.db` — delete the file to wipe it. Checkout
+profiles live at the repo root (`profiles/`); wheel templates are copied into
+writable user state by `lingcore profile init`. Both therefore keep history
+without writing into installed package code. A manually selected profile inside
+an installed package still runs ephemeral with a one-line notice.
 
-> The first message may pause briefly while `tiktoken` downloads its tokenizer
-> data (cached afterward). This step needs network access once.
+`tiktoken` vocabularies are resolved lazily on the first context render. If the
+cache is empty and resolution is unavailable offline, LingCore falls back to a
+deterministic UTF-8 byte/token estimate; local agent assembly and Ollama use do
+not require that download.
 
 ## Profiles
 
 A profile is a **directory** containing a `config.yaml` and optional Markdown
-prompt-layer files. The source repository includes four examples:
+prompt-layer files. The source repository and wheel template manifest include
+four examples (`lingcore profile list` shows the installed set):
 
 - `profiles/coding/` — default profile, targets a keyed provider via env vars.
 - `profiles/coding_ollama/` — keyless variant for local Ollama/vLLM.
@@ -283,6 +298,24 @@ launching process. Real `.env` files are gitignored; commit a secret-free
 `coding`, `daily`, and `teaching` profiles include one; keyless
 `coding_ollama` needs none. Run `lingcore doctor --profile <path>` after copying
 or editing one. To create a new agent type, add a directory—no code required.
+
+### Guardrails
+
+`guardrail.policy: noop` remains the default. A profile can select a third-party
+implementation without editing LingCore by naming either a
+`lingcore.guardrails` package entry point or a Python target; `options` are
+passed to its class/factory as keyword arguments:
+
+```yaml
+guardrail:
+  policy: my_safety_package.guardrails:PsychGuardrail
+  options:
+    crisis_message: "Contact local emergency services now."
+```
+
+The loaded object must provide async `pre_input(text)` and `post_output(text)`
+methods. LingCore ships only the no-op policy; domain-specific safety behavior
+belongs to the selected profile/package.
 
 ## Knowledge retrieval
 
@@ -398,6 +431,11 @@ provider key named by the teaching profile if it is not already exported. A
 `CANVAS_TOKEN` in the teaching profile's `.env` overrides an exported value, so
 each profile reliably selects its own Canvas account.
 
+The bundled instruction-only `code-review` skill is also live: the `daily`
+profile exposes `activate_skill`, and its authorized `read_file`/`search` ceiling
+makes `code-review` dynamically offerable. To make it always-on in another
+profile, add `skills: [code-review]` and authorize the tools it should receive.
+
 ## Writing a tool
 
 A tool is an async function whose first argument is a pydantic model (its
@@ -435,6 +473,7 @@ memory.py    ShortTermMemory protocol + WindowMemory (prefix-stable eviction) + 
 sessions.py  SessionStore + SessionMemory — transcript, snapshots, replay, rewind, fork
 skills.py    Skill / SkillState / load_skill_tools — skills, incl. code-shipping
 guardrails.py  Guardrail protocol + NoopGuardrail (pre/post hooks)
+profiles.py  immutable template manifest + writable user-state initialization
 tools/       Tool / @tool / ToolRegistry / ToolContext, plus builtin tools
 io/          Frontend protocol + run_session driver + Rich CLI
 integrations/telegram/  PTB-light bridge/state/rendering + thin PTB adapter
@@ -468,10 +507,9 @@ commitments.
      copied event cursors, and record parent/root provenance. LingChat can fork
      and regenerate from a user message or continue from a final assistant reply.
    - Implemented: `lingcore doctor` performs offline, secret-safe profile and
-     environment diagnostics. Add `lingcore profile init/list` and separate
-     immutable profile templates from writable sessions, memory, and workspaces
-     in the user's application-state directory. A wheel install should be useful
-     without a repository checkout.
+     environment diagnostics. `lingcore profile init/list` separates immutable
+     wheel templates from writable sessions, memory, and workspaces in the
+     user's application-state directory, so a wheel works without a checkout.
 
 2. **v0.2 — Knowledge 1.0**
    - Implemented: the `knowledge` tool's incremental `index` and `hybrid`

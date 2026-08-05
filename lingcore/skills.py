@@ -69,9 +69,7 @@ def _parse_skill(text: str, *, source: str, source_dir: Path | None = None) -> S
             f"skill {source!r} declares provides but no module to register them"
         )
     if module is not None and not provides:
-        raise ConfigError(
-            f"skill {source!r} sets module but declares no provides"
-        )
+        raise ConfigError(f"skill {source!r} sets module but declares no provides")
     return Skill(
         name=str(meta["name"]),
         description=str(meta.get("description", "")),
@@ -136,9 +134,7 @@ def load_skill_tools(skills: dict[str, Skill]) -> frozenset[str]:
             )
         mod_path = (skill.source_dir / skill.module).resolve()
         if not mod_path.is_file():
-            raise ConfigError(
-                f"skill {skill.name!r} module not found: {mod_path}"
-            )
+            raise ConfigError(f"skill {skill.name!r} module not found: {mod_path}")
         # Synthetic module name keyed by the *resolved path* (not just
         # name+stem) so a profile-local skill that shadows a bundled one — same
         # skill name, same filename, different file — gets its own sys.modules

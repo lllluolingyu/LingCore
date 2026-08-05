@@ -156,8 +156,8 @@ class TelegramTurnRenderer:
             except Exception:
                 await self._edit_response(index, SUPERSEDED_NOTICE)
         if surplus:
-            del self._messages[len(chunks):]
-            del self._sent_text[len(chunks):]
+            del self._messages[len(chunks) :]
+            del self._sent_text[len(chunks) :]
         self._text = content or EMPTY_RESPONSE
 
     async def _render_stream(self) -> None:
@@ -167,7 +167,9 @@ class TelegramTurnRenderer:
         # A full active chunk is frozen immediately and followed by a fresh
         # placeholder. Final reconciliation removes that placeholder when the
         # authoritative answer ends exactly on the boundary.
-        desired_slots = len(chunks) + (1 if len(chunks[-1]) == TELEGRAM_TEXT_LIMIT else 0)
+        desired_slots = len(chunks) + (
+            1 if len(chunks[-1]) == TELEGRAM_TEXT_LIMIT else 0
+        )
         while len(self._messages) < desired_slots:
             sent = await self.sender.send_message(self.chat_id, STREAM_PLACEHOLDER)
             self._messages.append(message_id(sent))
@@ -179,10 +181,7 @@ class TelegramTurnRenderer:
         active_index = len(chunks) - 1
         now = self._clock()
         active_filled = len(chunks[-1]) == TELEGRAM_TEXT_LIMIT
-        if (
-            active_filled
-            or now - self._last_active_edit >= self.edit_interval
-        ):
+        if active_filled or now - self._last_active_edit >= self.edit_interval:
             await self._edit_response(active_index, chunks[-1])
             self._last_active_edit = now
 
@@ -190,9 +189,7 @@ class TelegramTurnRenderer:
         if self._sent_text[index] == text:
             return
         try:
-            await self.sender.edit_message(
-                self.chat_id, self._messages[index], text
-            )
+            await self.sender.edit_message(self.chat_id, self._messages[index], text)
         except Exception as exc:
             if not _not_modified(exc):
                 raise
@@ -225,8 +222,7 @@ class TelegramTurnRenderer:
         if len(tools) > 20:
             lines.append(f"• +{len(tools) - 20} more tool calls")
         lines.extend(
-            f"• {' '.join(entry.split())[:120]}"
-            for entry in self._activity[-4:]
+            f"• {' '.join(entry.split())[:120]}" for entry in self._activity[-4:]
         )
         text = "\n".join(lines)
         if text == self._status_text:
@@ -236,9 +232,7 @@ class TelegramTurnRenderer:
             self._status_message = message_id(sent)
         else:
             try:
-                await self.sender.edit_message(
-                    self.chat_id, self._status_message, text
-                )
+                await self.sender.edit_message(self.chat_id, self._status_message, text)
             except Exception as exc:
                 if not _not_modified(exc):
                     raise

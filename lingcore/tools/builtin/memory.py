@@ -48,6 +48,7 @@ _MEMORY_COMPACT_SYSTEM = (
 # Path resolution                                                              #
 # --------------------------------------------------------------------------- #
 
+
 def _resolve_memory_path(ctx: ToolContext) -> Path:
     opts = ctx.options.get("memory", {})
     raw = Path(opts.get("path", "memory.md"))
@@ -77,13 +78,14 @@ def _resolve_memory_path(ctx: ToolContext) -> Path:
     raise ToolError(
         "cannot write memory into the installed package directory; "
         "set an explicit absolute path outside it, "
-        f"e.g. path: ${{HOME}}/.local/state/lingcore/memory.md"
+        "e.g. path: ${HOME}/.local/state/lingcore/memory.md"
     )
 
 
 # --------------------------------------------------------------------------- #
 # Section helpers                                                              #
 # --------------------------------------------------------------------------- #
+
 
 def _parse(text: str) -> dict[str, str]:
     """Return ordered {key: body} mapping from flat ## sections."""
@@ -140,6 +142,7 @@ async def _compact_memory(summarizer: Any, content: str, max_bytes: int) -> str 
 # Tool                                                                         #
 # --------------------------------------------------------------------------- #
 
+
 class MemoryArgs(BaseModel):
     action: Literal["remember", "forget", "modify", "read"] = Field(
         description="Operation to perform on the memory file."
@@ -154,11 +157,13 @@ class MemoryArgs(BaseModel):
     )
 
 
-@tool(description=(
-    "Read or update the agent's persistent memory file. "
-    "Use `remember` to store a new entry, `modify` to update an existing one, "
-    "`forget` to remove one, and `read` to inspect the full file."
-))
+@tool(
+    description=(
+        "Read or update the agent's persistent memory file. "
+        "Use `remember` to store a new entry, `modify` to update an existing one, "
+        "`forget` to remove one, and `read` to inspect the full file."
+    )
+)
 async def memory(args: MemoryArgs, ctx: ToolContext) -> str:
     path = _resolve_memory_path(ctx)
     opts = ctx.options.get("memory", {})
@@ -176,18 +181,14 @@ async def memory(args: MemoryArgs, ctx: ToolContext) -> str:
 
     if args.action == "remember":
         if args.key in entries:
-            raise ToolError(
-                f"key {args.key!r} already exists; use modify to update it"
-            )
+            raise ToolError(f"key {args.key!r} already exists; use modify to update it")
         if args.content is None:
             raise ToolError("remember requires content")
         entries[args.key] = args.content
 
     elif args.action == "modify":
         if args.key not in entries:
-            raise ToolError(
-                f"key {args.key!r} not found; use remember to create it"
-            )
+            raise ToolError(f"key {args.key!r} not found; use remember to create it")
         if args.content is None:
             raise ToolError("modify requires content")
         entries[args.key] = args.content

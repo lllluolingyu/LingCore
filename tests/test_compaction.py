@@ -92,9 +92,7 @@ async def test_agent_run_emits_compacted_event(tmp_path):
     w = WindowMemory(max_tokens=200, evict_to_ratio=0.5, model="gpt-4o")
     _fill(w, 30)  # pre-load the window past the compaction threshold
     summarizer = FakeLLMClient([ScriptedTurn(text="SUMMARY OF OLD STUFF")])
-    sm = SummarizingMemory(
-        w, summarizer, compact_at_ratio=0.5, keep_recent_ratio=0.25
-    )
+    sm = SummarizingMemory(w, summarizer, compact_at_ratio=0.5, keep_recent_ratio=0.25)
     main_llm = FakeLLMClient([ScriptedTurn(text="done")])
     agent = Agent(
         llm=main_llm,

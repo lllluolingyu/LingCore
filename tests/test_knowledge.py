@@ -289,9 +289,7 @@ async def test_partial_index_only_updates_selected_paths(tmp_path):
     a.write_text("feline two", encoding="utf-8")
     b.write_text("canine two", encoding="utf-8")
     embedder.calls.clear()
-    await knowledge(
-        knowledge.args_model(action="index", paths=["a.txt"]), ctx
-    )
+    await knowledge(knowledge.args_model(action="index", paths=["a.txt"]), ctx)
     assert embedder.calls == [["feline two"]]
     status = await knowledge(knowledge.args_model(action="status"), ctx)
     assert "stale files=1" in status
@@ -321,9 +319,7 @@ async def test_stale_content_is_excluded_until_reindexed(tmp_path):
     await knowledge(knowledge.args_model(action="index"), ctx)
 
     path.write_text("New feline fact that is not indexed.", encoding="utf-8")
-    result = await knowledge(
-        knowledge.args_model(action="query", query="cat"), ctx
-    )
+    result = await knowledge(knowledge.args_model(action="query", query="cat"), ctx)
     assert result.startswith("[index stale: changed=1")
     assert "Old feline fact" not in result
     assert result.endswith("(no matches)")
@@ -340,9 +336,7 @@ async def test_hybrid_combines_full_text_and_semantic_candidates(tmp_path):
     ctx = _ctx(tmp_path, _indexed_opts("hybrid"), embedder=embedder)
     await knowledge(knowledge.args_model(action="index"), ctx)
 
-    result = await knowledge(
-        knowledge.args_model(action="query", query="cat"), ctx
-    )
+    result = await knowledge(knowledge.args_model(action="query", query="cat"), ctx)
     assert "literal.txt:1" in result
     assert "semantic.txt:1" in result
 
@@ -352,9 +346,7 @@ async def test_optional_reranker_controls_final_order(tmp_path):
     (tmp_path / "second.txt").write_text("feline second", encoding="utf-8")
     embedder = FakeEmbedder()
     reranker = FakeReranker()
-    opts = _indexed_opts(
-        reranker={"enabled": True, "candidate_count": 2}, max_hits=2
-    )
+    opts = _indexed_opts(reranker={"enabled": True, "candidate_count": 2}, max_hits=2)
     ctx = _ctx(tmp_path, opts, embedder=embedder, reranker=reranker)
     await knowledge(knowledge.args_model(action="index"), ctx)
 
@@ -365,9 +357,7 @@ async def test_optional_reranker_controls_final_order(tmp_path):
         await knowledge(knowledge.args_model(action="query", query="cat"), ctx)
     ctx.options["knowledge"]["reranker"]["candidate_count"] = 2
 
-    result = await knowledge(
-        knowledge.args_model(action="query", query="cat"), ctx
-    )
+    result = await knowledge(knowledge.args_model(action="query", query="cat"), ctx)
     assert result.startswith("[1] second.txt:1")
     assert reranker.calls[0][0] == "cat"
     assert reranker.calls[0][2] == 2
@@ -388,9 +378,7 @@ async def test_pdf_index_preserves_page_and_line_citation(tmp_path):
     )
     await knowledge(knowledge.args_model(action="index"), ctx)
 
-    result = await knowledge(
-        knowledge.args_model(action="query", query="cat"), ctx
-    )
+    result = await knowledge(knowledge.args_model(action="query", query="cat"), ctx)
     assert "notes.pdf#page=1:lines=1" in result
 
 
@@ -477,9 +465,7 @@ async def test_source_parent_swap_cannot_redirect_index_read(tmp_path, monkeypat
             swapped = True
         return real_read(self, name, max_bytes=max_bytes)
 
-    monkeypatch.setattr(
-        ConfinedDirectory, "read_regular_with_stat", swap_then_read
-    )
+    monkeypatch.setattr(ConfinedDirectory, "read_regular_with_stat", swap_then_read)
     embedder = FakeEmbedder()
     ctx = _ctx(
         workspace,

@@ -52,20 +52,11 @@ def _leaf_name(name: str) -> str:
 
 def _dir_flags() -> int:
     if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
-        raise PathEscapeError(
-            "secure confined writes are unsupported on this platform"
-        )
+        raise PathEscapeError("secure confined writes are unsupported on this platform")
     required = (os.open, os.mkdir, os.stat, os.unlink, os.rename)
     if any(fn not in os.supports_dir_fd for fn in required):
-        raise PathEscapeError(
-            "secure confined writes are unsupported on this platform"
-        )
-    return (
-        os.O_RDONLY
-        | os.O_DIRECTORY
-        | os.O_NOFOLLOW
-        | getattr(os, "O_CLOEXEC", 0)
-    )
+        raise PathEscapeError("secure confined writes are unsupported on this platform")
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 
 
 class ConfinedDirectory:
@@ -192,13 +183,10 @@ class ConfinedDirectory:
             )
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
-                raise PathEscapeError(
-                    f"confined entry is not a regular file: {leaf!r}"
-                )
+                raise PathEscapeError(f"confined entry is not a regular file: {leaf!r}")
             if info.st_size > max_bytes:
                 raise PathEscapeError(
-                    f"confined entry exceeds the {max_bytes}-byte read limit: "
-                    f"{leaf!r}"
+                    f"confined entry exceeds the {max_bytes}-byte read limit: {leaf!r}"
                 )
             with os.fdopen(fd, "rb") as fh:
                 fd = -1
@@ -221,9 +209,7 @@ class ConfinedDirectory:
         """Return a no-follow regular file's size, else ``None``."""
         self.ensure_anchored()
         try:
-            info = os.stat(
-                _leaf_name(name), dir_fd=self._fd, follow_symlinks=False
-            )
+            info = os.stat(_leaf_name(name), dir_fd=self._fd, follow_symlinks=False)
         except OSError:
             return None
         return info.st_size if stat.S_ISREG(info.st_mode) else None

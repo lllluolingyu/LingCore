@@ -27,6 +27,7 @@ through the same ``stream`` seam as the rest of the runtime).
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Protocol
 
 import tiktoken
@@ -48,7 +49,7 @@ class ShortTermMemory(Protocol):
     def messages(self) -> list[Message]: ...
 
 
-def _encoding(model: str):
+def _encoding(model: str) -> tiktoken.Encoding:
     try:
         return tiktoken.encoding_for_model(model)
     except KeyError:
@@ -72,7 +73,13 @@ class WindowMemory:
         # before the next eviction, so the prefix stays stable across many
         # turns. evict_to_ratio == 1.0 reproduces the legacy slide-every-render.
         self._evict_to_tokens = max(1, int(max_tokens * evict_to_ratio))
-        self._enc = _encoding(model)
+        # Resolving a tiktoken encoding can download its vocabulary on first
+        # use. Agent assembly must remain offline-safe (especially for the
+        # Ollama profile), so resolution is lazy and a deterministic estimate
+        # takes over if the vocabulary is unavailable.
+        self._model = model
+        self._enc: tiktoken.Encoding | None = None
+        self._encoding_resolved = False
         self._messages: list[Message] = []
         # Lifetime count of oldest blocks physically evicted (monotonic, only
         # ever increases). Evicted messages are *removed* from ``_messages``, so
@@ -91,7 +98,7 @@ class WindowMemory:
     def _tokens(self, message: Message) -> int:
         # Approximate but stable: encode content plus any tool-call argument
         # text. Exact accounting is the API's job; this only drives trimming.
-        n = len(self._enc.encode(message.content or ""))
+        n = self._text_tokens(message.content or "")
         for attachment in message.attachments:
             # Floors reflect the wire cost a fallback can't capture: a native
             # image/PDF part (no fallback_text but real tokens), versus text
@@ -108,8 +115,31 @@ class WindowMemory:
             # whichever estimate is larger (over-counting only trims earlier).
             n += max(flat, len(attachment.fallback_text or "") // 4)
         for tc in message.tool_calls:
-            n += len(self._enc.encode(tc.name)) + len(self._enc.encode(str(tc.arguments)))
+            n += self._text_tokens(tc.name) + self._text_tokens(str(tc.arguments))
         return n + 4  # per-message overhead fudge
+
+    def _text_tokens(self, text: str) -> int:
+        """Count text with tiktoken, or estimate when its data is unavailable.
+
+        UTF-8 bytes divided by four is deliberately simple and deterministic.
+        It tracks the common English character/token ratio while avoiding the
+        severe under-count that a raw character ratio would produce for CJK
+        text. The estimate is only a trimming heuristic; providers remain the
+        authority on exact usage.
+        """
+        if not self._encoding_resolved:
+            self._encoding_resolved = True
+            try:
+                self._enc = _encoding(self._model)
+            except Exception:
+                # Network/cache/plugin failures must not make local agent
+                # construction or rendering depend on an external download.
+                self._enc = None
+        if self._enc is not None:
+            return len(self._enc.encode(text))
+        if not text:
+            return 0
+        return math.ceil(len(text.encode("utf-8")) / 4)
 
     def _blocks(self) -> list[list[Message]]:
         """Group messages into atomic blocks.
@@ -127,7 +157,7 @@ class WindowMemory:
         return blocks
 
     def render(self, system_prompt: str) -> list[Message]:
-        sys_tokens = len(self._enc.encode(system_prompt))
+        sys_tokens = self._text_tokens(system_prompt)
         self._evict(sys_tokens)
         return [Message.system(system_prompt), *self._messages]
 
@@ -240,7 +270,7 @@ class SummarizingMemory:
         # Count the system prompt too, so the trigger measures the same footprint
         # the window's eviction floor does (a large system prompt must not let
         # the floor evict before compaction ever fires).
-        reserved = len(self._w._enc.encode(system_prompt)) if system_prompt else 0
+        reserved = self._w._text_tokens(system_prompt) if system_prompt else 0
         before = reserved + sum(self._w._tokens(m) for m in msgs)
         if before < self._compact_at * max_tokens:
             return None  # not nearly full

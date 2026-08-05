@@ -75,9 +75,7 @@ class TelegramSender(Protocol):
 
     async def delete_message(self, chat_id: int, message_id: int) -> Any: ...
 
-    async def send_photo(
-        self, chat_id: int, data: bytes, *, filename: str
-    ) -> Any: ...
+    async def send_photo(self, chat_id: int, data: bytes, *, filename: str) -> Any: ...
 
     async def send_document(
         self, chat_id: int, data: bytes, *, filename: str

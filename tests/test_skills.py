@@ -42,6 +42,7 @@ def _ctx(state, confirm=None) -> ToolContext:
 # Loading & frontmatter                                                       #
 # --------------------------------------------------------------------------- #
 
+
 def test_load_skills_from_dir(tmp_path):
     d = tmp_path / "skills" / "greet"
     d.mkdir(parents=True)
@@ -82,6 +83,7 @@ def test_prompt_only_skill_has_no_shipped_code():
 # Permission model (§8 invariants)                                            #
 # --------------------------------------------------------------------------- #
 
+
 def test_effective_tools_is_intersection():
     state = _state(profile_tools={"read_file", "search"})
     skill = _skill(tools=("read_file", "run_shell"))
@@ -98,6 +100,7 @@ def test_skill_cannot_grant_disallowed_tool():
 # --------------------------------------------------------------------------- #
 # activate_skill behaviour                                                     #
 # --------------------------------------------------------------------------- #
+
 
 async def test_activate_unknown_skill():
     state = _state(profile_tools={"read_file"})
@@ -179,7 +182,9 @@ async def test_high_risk_skill_refused_without_confirm_handler():
 
 
 async def test_low_risk_skill_no_confirmation():
-    state = _state(profile_tools={"read_file"}, skills={"review": _skill(tools=("read_file",))})
+    state = _state(
+        profile_tools={"read_file"}, skills={"review": _skill(tools=("read_file",))}
+    )
 
     async def confirm(prompt):
         raise AssertionError("should not be called for low-risk skill")

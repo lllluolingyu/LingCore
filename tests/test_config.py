@@ -109,12 +109,9 @@ def test_profile_dotenv_overrides_process_environment(tmp_path, monkeypatch):
 
 def test_empty_profile_dotenv_value_blocks_exported_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("LINGCORE_TEST_EMPTY_OVERRIDE", "process-secret")
-    (tmp_path / ".env").write_text(
-        "LINGCORE_TEST_EMPTY_OVERRIDE=\n", encoding="utf-8"
-    )
+    (tmp_path / ".env").write_text("LINGCORE_TEST_EMPTY_OVERRIDE=\n", encoding="utf-8")
     (tmp_path / "config.yaml").write_text(
-        "llm:\n  model: test-model\n"
-        "  api_key_env: LINGCORE_TEST_EMPTY_OVERRIDE\n",
+        "llm:\n  model: test-model\n  api_key_env: LINGCORE_TEST_EMPTY_OVERRIDE\n",
         encoding="utf-8",
     )
 
@@ -126,9 +123,7 @@ def test_empty_profile_dotenv_value_blocks_exported_fallback(tmp_path, monkeypat
 
 def test_empty_profile_dotenv_value_uses_expansion_default(tmp_path, monkeypatch):
     monkeypatch.setenv("LINGCORE_TEST_EMPTY_EXPANSION", "exported-model")
-    (tmp_path / ".env").write_text(
-        "LINGCORE_TEST_EMPTY_EXPANSION=\n", encoding="utf-8"
-    )
+    (tmp_path / ".env").write_text("LINGCORE_TEST_EMPTY_EXPANSION=\n", encoding="utf-8")
     (tmp_path / "config.yaml").write_text(
         "llm:\n  model: ${LINGCORE_TEST_EMPTY_EXPANSION:-default-model}\n",
         encoding="utf-8",
@@ -159,8 +154,7 @@ def test_profile_dotenv_values_are_literal_not_interpolated(tmp_path, monkeypatc
         "LINGCORE_TEST_LITERAL_KEY=se${CRET}-with-dollar\n", encoding="utf-8"
     )
     (tmp_path / "config.yaml").write_text(
-        "llm:\n  model: test-model\n"
-        "  api_key_env: LINGCORE_TEST_LITERAL_KEY\n",
+        "llm:\n  model: test-model\n  api_key_env: LINGCORE_TEST_LITERAL_KEY\n",
         encoding="utf-8",
     )
 
@@ -186,13 +180,9 @@ def test_from_profile_carries_dotenv_into_tool_context(tmp_path, monkeypatch):
     assert "tool-secret" not in repr(agent.tool_ctx)
 
 
-def test_tool_context_getenv_treats_empty_profile_value_as_unset(
-    tmp_path, monkeypatch
-):
+def test_tool_context_getenv_treats_empty_profile_value_as_unset(tmp_path, monkeypatch):
     monkeypatch.setenv("LINGCORE_TEST_TOOL_EMPTY", "exported-secret")
-    (tmp_path / ".env").write_text(
-        "LINGCORE_TEST_TOOL_EMPTY=\n", encoding="utf-8"
-    )
+    (tmp_path / ".env").write_text("LINGCORE_TEST_TOOL_EMPTY=\n", encoding="utf-8")
     (tmp_path / "config.yaml").write_text(
         "llm:\n  model: test-model\n",
         encoding="utf-8",
@@ -217,8 +207,7 @@ def test_profile_dotenv_values_are_isolated_between_profiles(tmp_path, monkeypat
             f"LINGCORE_TEST_SHARED_KEY={secret}\n", encoding="utf-8"
         )
         (root / "config.yaml").write_text(
-            "llm:\n  model: test-model\n"
-            "  api_key_env: LINGCORE_TEST_SHARED_KEY\n",
+            "llm:\n  model: test-model\n  api_key_env: LINGCORE_TEST_SHARED_KEY\n",
             encoding="utf-8",
         )
         profiles.append(AgentProfile.load(root))
@@ -256,7 +245,11 @@ llm:
 
 
 def test_api_key_resolution_missing(tmp_path):
-    prof = AgentProfile.load(_write(tmp_path, FIXTURE.replace("api_key_env: TEST_KEY", "api_key_env: NOPE_KEY")))
+    prof = AgentProfile.load(
+        _write(
+            tmp_path, FIXTURE.replace("api_key_env: TEST_KEY", "api_key_env: NOPE_KEY")
+        )
+    )
     with pytest.raises(ConfigError, match="not set"):
         prof.llm.resolve_api_key()
 
@@ -358,13 +351,17 @@ async def test_layered_composer_keeps_inline_system_prompt(tmp_path, monkeypatch
 # Workspace resolution                                                         #
 # --------------------------------------------------------------------------- #
 
+
 def test_unset_workspace_defaults_to_profile_subdir(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_KEY", "sk-xyz")
     text = FIXTURE.replace("workspace: ${TEST_WS:-.}\n", "")
     prof = AgentProfile.load(_write(tmp_path, text))
     assert prof.workspace is None
     # The profile dir wins even when a base (the user's CWD) is supplied.
-    assert prof.workspace_path(tmp_path / "elsewhere") == (tmp_path / "workspace").resolve()
+    assert (
+        prof.workspace_path(tmp_path / "elsewhere")
+        == (tmp_path / "workspace").resolve()
+    )
 
 
 def test_blank_workspace_expansion_means_default(tmp_path, monkeypatch):
@@ -419,9 +416,7 @@ def test_modalities_default_to_both(tmp_path, monkeypatch):
 
 def test_modalities_parse_and_dedup(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_KEY", "sk-xyz")
-    text = FIXTURE.replace(
-        "  sampling:", "  modalities: [image, image]\n  sampling:"
-    )
+    text = FIXTURE.replace("  sampling:", "  modalities: [image, image]\n  sampling:")
     prof = AgentProfile.load(_write(tmp_path, text))
     assert prof.llm.modalities == ["image"]
 
@@ -464,10 +459,7 @@ def test_media_fallback_typo_is_loud(tmp_path):
 
 def test_media_fallback_vision_model_must_see_images(tmp_path):
     text = FIXTURE + (
-        "media_fallback:\n"
-        "  image:\n"
-        "    model: blind-model\n"
-        "    modalities: [file]\n"
+        "media_fallback:\n  image:\n    model: blind-model\n    modalities: [file]\n"
     )
     with pytest.raises(ConfigError, match="exclude 'image'"):
         AgentProfile.load(_write(tmp_path, text))
@@ -479,9 +471,7 @@ def test_media_fallback_pdf_max_chars_bounds(tmp_path):
         AgentProfile.load(_write(tmp_path, text))
 
 
-async def test_from_profile_wires_adapter_for_narrow_modalities(
-    tmp_path, monkeypatch
-):
+async def test_from_profile_wires_adapter_for_narrow_modalities(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_KEY", "sk-xyz")
     text = FIXTURE.replace("  sampling:", "  modalities: []\n  sampling:")
     prof = AgentProfile.load(_write(tmp_path, text))

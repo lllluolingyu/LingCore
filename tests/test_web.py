@@ -89,7 +89,9 @@ class _FakeClient:
 
 def _patch_client(responses: list[_FakeResponse]):
     client = _FakeClient(responses)
-    return patch("lingcore.tools.builtin.web.httpx.AsyncClient", return_value=client), client
+    return patch(
+        "lingcore.tools.builtin.web.httpx.AsyncClient", return_value=client
+    ), client
 
 
 async def test_fetch_plain(ctx):
@@ -145,7 +147,9 @@ async def test_fetch_respects_max_bytes_option(tmp_path):
     # constant — the daily profile relies on this to bound fetch size.
     ctx = ToolContext(
         workspace=tmp_path,
-        options={"fetch_url": {"max_bytes": 20, "offload_over_chars": 0, "max_chars": 5000}},
+        options={
+            "fetch_url": {"max_bytes": 20, "offload_over_chars": 0, "max_chars": 5000}
+        },
     )
     p, _ = _patch_client([_FakeResponse("y" * 10_000)])
     with p:
@@ -207,7 +211,7 @@ async def test_fetch_rejects_private_or_credentialed_urls(ctx, url):
         "http://2130706433/",  # decimal-encoded 127.0.0.1
         "http://0x7f000001/",  # hex-encoded 127.0.0.1
         "http://0177.0.0.1/",  # octal-encoded 127.0.0.1
-        "http://0/",           # shorthand 0.0.0.0
+        "http://0/",  # shorthand 0.0.0.0
     ],
 )
 async def test_fetch_rejects_alt_encoded_loopback(ctx, url):

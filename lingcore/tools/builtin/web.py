@@ -78,7 +78,7 @@ async def _resolve_ips(host: str, port: int) -> list[str]:
     except socket.gaierror as e:
         raise ToolError(f"could not resolve host {host!r}: {e}") from None
     # Drop any IPv6 zone id (e.g. fe80::1%eth0) before the address is parsed.
-    return [info[4][0].split("%", 1)[0] for info in infos]
+    return [str(info[4][0]).split("%", 1)[0] for info in infos]
 
 
 async def _vet_url(url: str, *, allow_private_hosts: bool) -> str | None:
@@ -122,11 +122,15 @@ async def _vet_url(url: str, *, allow_private_hosts: bool) -> str | None:
         if pinned is None:
             pinned = addr
     if pinned is None:
-        raise ToolError(f"could not resolve host {parsed.hostname!r} to a usable address")
+        raise ToolError(
+            f"could not resolve host {parsed.hostname!r} to a usable address"
+        )
     return pinned
 
 
-def _build_request(client: httpx.AsyncClient, url: str, pinned_ip: str | None) -> httpx.Request:
+def _build_request(
+    client: httpx.AsyncClient, url: str, pinned_ip: str | None
+) -> httpx.Request:
     """Build a GET request, pinning the connection to *pinned_ip* when set.
 
     Pinning rewrites the authority to the vetted IP but keeps the Host header
@@ -169,7 +173,9 @@ def _is_redirect(status_code: int) -> bool:
     return 300 <= status_code < 400
 
 
-@tool(description="Fetch a URL and return its text content (HTML is converted to plain text).")
+@tool(
+    description="Fetch a URL and return its text content (HTML is converted to plain text)."
+)
 async def fetch_url(args: FetchArgs, ctx: ToolContext) -> str:
     opts = ctx.options.get("fetch_url", {}) if ctx.options else {}
     allow_private_hosts = bool(opts.get("allow_private_hosts", False))
@@ -194,7 +200,9 @@ async def fetch_url(args: FetchArgs, ctx: ToolContext) -> str:
             follow_redirects=False, timeout=_TIMEOUT, limits=limits
         ) as client:
             for _ in range(_MAX_REDIRECTS + 1):
-                resp = await client.send(_build_request(client, url, pinned), stream=True)
+                resp = await client.send(
+                    _build_request(client, url, pinned), stream=True
+                )
                 try:
                     if _is_redirect(resp.status_code):
                         location = resp.headers.get("location")

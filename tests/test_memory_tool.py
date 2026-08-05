@@ -9,8 +9,8 @@ import pytest
 from lingcore.errors import ConfigError, ToolError
 from lingcore.tools import ToolContext
 from lingcore.tools.builtin.memory import (
-    MEMORY_SUMMARIZER_KEY,
     _PACKAGE_DIR,
+    MEMORY_SUMMARIZER_KEY,
     _compact_memory,
     memory,
 )
@@ -28,6 +28,7 @@ def _ctx(tmp_path: Path, opts: dict | None = None) -> ToolContext:
 # --------------------------------------------------------------------------- #
 # Basic operations                                                             #
 # --------------------------------------------------------------------------- #
+
 
 async def test_remember_and_read(tmp_path):
     ctx = _ctx(tmp_path)
@@ -62,6 +63,7 @@ async def test_read_empty(tmp_path):
 # Strict key semantics (§8 invariants)                                        #
 # --------------------------------------------------------------------------- #
 
+
 async def test_remember_fails_if_key_exists(tmp_path):
     ctx = _ctx(tmp_path)
     await memory(memory.args_model(action="remember", key="k", content="v"), ctx)
@@ -72,7 +74,9 @@ async def test_remember_fails_if_key_exists(tmp_path):
 async def test_modify_fails_if_key_missing(tmp_path):
     ctx = _ctx(tmp_path)
     with pytest.raises(ToolError, match="not found"):
-        await memory(memory.args_model(action="modify", key="missing", content="x"), ctx)
+        await memory(
+            memory.args_model(action="modify", key="missing", content="x"), ctx
+        )
 
 
 async def test_forget_fails_if_key_missing(tmp_path):
@@ -85,10 +89,13 @@ async def test_forget_fails_if_key_missing(tmp_path):
 # max_bytes on final content (§8)                                             #
 # --------------------------------------------------------------------------- #
 
+
 async def test_max_bytes_on_final_content(tmp_path):
     ctx = _ctx(tmp_path, {"max_bytes": 50})
     with pytest.raises(ToolError, match="max_bytes"):
-        await memory(memory.args_model(action="remember", key="k", content="x" * 100), ctx)
+        await memory(
+            memory.args_model(action="remember", key="k", content="x" * 100), ctx
+        )
 
 
 async def test_max_bytes_gradual_growth(tmp_path):
@@ -96,12 +103,15 @@ async def test_max_bytes_gradual_growth(tmp_path):
     ctx = _ctx(tmp_path, {"max_bytes": 60})
     await memory(memory.args_model(action="remember", key="a", content="x" * 10), ctx)
     with pytest.raises(ToolError, match="max_bytes"):
-        await memory(memory.args_model(action="remember", key="b", content="x" * 40), ctx)
+        await memory(
+            memory.args_model(action="remember", key="b", content="x" * 40), ctx
+        )
 
 
 # --------------------------------------------------------------------------- #
 # Path confinement (§8)                                                       #
 # --------------------------------------------------------------------------- #
+
 
 async def test_relative_path_escape_rejected(tmp_path):
     ctx = _ctx(tmp_path, {"path": "../../evil.md"})
@@ -125,6 +135,7 @@ async def test_absolute_path_allowed_with_flag(tmp_path):
 # --------------------------------------------------------------------------- #
 # Built-in package profile guard (§8)                                         #
 # --------------------------------------------------------------------------- #
+
 
 async def test_package_dir_write_blocked(tmp_path):
     """profile_dir inside the installed package must not be writable."""
@@ -150,6 +161,7 @@ async def test_absolute_path_inside_package_blocked_even_with_flag(tmp_path):
 # --------------------------------------------------------------------------- #
 # No profile_dir                                                               #
 # --------------------------------------------------------------------------- #
+
 
 async def test_no_profile_dir_raises(tmp_path):
     ctx = ToolContext(workspace=tmp_path, options={"memory": {}})
@@ -194,12 +206,16 @@ async def test_compact_memory_survives_summarizer_failure():
 async def test_auto_compact_shrinks_oversized_write(tmp_path):
     summ = FakeLLMClient([ScriptedTurn(text="## kept\ncondensed note")])
     ctx = _ctx_summ(
-        tmp_path, summ, {"max_bytes": 200, "compact_at_ratio": 0.5, "auto_compact": True}
+        tmp_path,
+        summ,
+        {"max_bytes": 200, "compact_at_ratio": 0.5, "auto_compact": True},
     )
     await memory(memory.args_model(action="remember", key="a", content="x" * 40), ctx)
     # This second write crosses compact_at (0.5 × 200 = 100) → compaction fires
     # and rescues a write that would otherwise have approached the cap.
-    out = await memory(memory.args_model(action="remember", key="b", content="y" * 120), ctx)
+    out = await memory(
+        memory.args_model(action="remember", key="b", content="y" * 120), ctx
+    )
     assert "auto-compacted" in out
     result = await memory(memory.args_model(action="read"), ctx)
     assert "condensed note" in result
@@ -212,7 +228,9 @@ async def test_summarizer_present_but_auto_compact_off_hard_fails(tmp_path):
     summ = FakeLLMClient([ScriptedTurn(text="## kept\ncondensed note")])
     ctx = _ctx_summ(tmp_path, summ, {"max_bytes": 50, "compact_at_ratio": 0.5})
     with pytest.raises(ToolError, match="max_bytes"):
-        await memory(memory.args_model(action="remember", key="k", content="x" * 100), ctx)
+        await memory(
+            memory.args_model(action="remember", key="k", content="x" * 100), ctx
+        )
 
 
 async def test_compaction_unparseable_falls_back_to_hard_cap(tmp_path):
@@ -223,7 +241,9 @@ async def test_compaction_unparseable_falls_back_to_hard_cap(tmp_path):
         tmp_path, summ, {"max_bytes": 50, "compact_at_ratio": 0.5, "auto_compact": True}
     )
     with pytest.raises(ToolError, match="max_bytes"):
-        await memory(memory.args_model(action="remember", key="k", content="x" * 100), ctx)
+        await memory(
+            memory.args_model(action="remember", key="k", content="x" * 100), ctx
+        )
 
 
 def test_from_profile_injects_summarizer_when_enabled(tmp_path):

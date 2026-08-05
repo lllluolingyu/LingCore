@@ -107,7 +107,7 @@ def _parse_attachments(
             continue
         attachments.append(attachment)
         total += size
-        out.append(line[pos:match.start()])
+        out.append(line[pos : match.start()])
         out.append(raw_path)
         pos = match.end()
     out.append(line[pos:])
@@ -243,7 +243,7 @@ class CLIFrontend:
         """
         title = escape(meta.title or "(untitled)")
         self.console.print(
-            f"[dim]resumed[/] [cyan]{meta.id[:8]}[/] [dim]· \"{title}\" · "
+            f'[dim]resumed[/] [cyan]{meta.id[:8]}[/] [dim]· "{title}" · '
             f"{meta.message_count} stored messages · last active {rel_time(meta.updated_at)}[/]"
         )
         shown = messages[-tail:]
@@ -258,14 +258,12 @@ class CLIFrontend:
                     self.console.print(f"[dim]  ↥ media{escape(summary)}[/]")
                 elif m.name == "summary":
                     self.console.print(
-                        f"[dim]  ≋ earlier summary › "
-                        f"{escape(_short(m.content))}[/]"
+                        f"[dim]  ≋ earlier summary › {escape(_short(m.content))}[/]"
                     )
                 else:
                     text = m.input_text if m.input_text is not None else m.content
                     self.console.print(
-                        f"[dim]  you › "
-                        f"{escape(_short(text))}{escape(summary)}[/]"
+                        f"[dim]  you › {escape(_short(text))}{escape(summary)}[/]"
                     )
             elif m.role == "assistant":
                 if m.content:
@@ -299,7 +297,9 @@ class CLIFrontend:
                 patterns: list[str] = run_shell_opts.setdefault("allow_patterns", [])
                 pattern = allowlist_pattern_for(command)
                 if not pattern:
-                    self.console.print("[dim]command was not added to session allowlist[/]")
+                    self.console.print(
+                        "[dim]command was not added to session allowlist[/]"
+                    )
                     return True
                 if pattern not in patterns:
                     patterns.append(pattern)

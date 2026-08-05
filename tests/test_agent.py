@@ -10,9 +10,9 @@ import base64
 from pathlib import Path
 
 import pytest
-
 from pydantic import BaseModel
 
+import lingcore.tools.builtin  # noqa: F401  (registers builtins)
 from lingcore.agent import Agent
 from lingcore.composer import StaticComposer
 from lingcore.events import (
@@ -29,7 +29,6 @@ from lingcore.memory import WindowMemory
 from lingcore.message import Attachment, Message, ToolCall, UserInput
 from lingcore.modality import MediaAdapter
 from lingcore.tools import ToolContext, ToolOutput, ToolRegistry, tool
-from lingcore.tools.builtin.fs import read_file
 from tests.fakes import FakeLLMClient, ScriptedTurn, StreamFailure
 from tests.test_modality import make_pdf
 
@@ -74,9 +73,7 @@ async def test_simple_text_reply_streams(workspace):
 
 
 async def test_legacy_system_prompt_constructor_stays_compatible(workspace):
-    llm = FakeLLMClient(
-        [ScriptedTurn(text="first"), ScriptedTurn(text="second")]
-    )
+    llm = FakeLLMClient([ScriptedTurn(text="first"), ScriptedTurn(text="second")])
     agent = Agent(
         llm,
         ToolRegistry(),
@@ -96,10 +93,12 @@ async def test_legacy_system_prompt_constructor_stays_compatible(workspace):
 
 async def test_tool_call_then_final(workspace):
     call = ToolCall(id="c1", name="read_file", arguments={"path": "a.txt"})
-    llm = FakeLLMClient([
-        ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
-        ScriptedTurn(text="The file says hello."),
-    ])
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
+            ScriptedTurn(text="The file says hello."),
+        ]
+    )
     agent = _agent(llm, workspace)
     events = await _drain(agent, "read a.txt")
 
@@ -121,14 +120,18 @@ async def test_tool_output_attachments_are_hoisted(workspace):
     @tool(name="media_tool", registry=local_reg)
     async def media_tool(args: _EmptyArgs, ctx: ToolContext) -> ToolOutput:
         data = base64.b64encode(b"\x89PNG\r\n\x1a\nrest").decode("ascii")
-        att = Attachment(kind="image", media_type="image/png", data=data, name="pic.png")
+        att = Attachment(
+            kind="image", media_type="image/png", data=data, name="pic.png"
+        )
         return ToolOutput(text="attached pic", attachments=[att])
 
     call = ToolCall(id="c1", name="media_tool", arguments={})
-    llm = FakeLLMClient([
-        ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
-        ScriptedTurn(text="done"),
-    ])
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
+            ScriptedTurn(text="done"),
+        ]
+    )
     agent = Agent(
         llm=llm,
         tools=local_reg,
@@ -171,10 +174,12 @@ async def test_hoist_caps_aggregate_attachments(workspace):
         return ToolOutput(text="3 pics", attachments=atts)
 
     calls = [ToolCall(id=f"c{i}", name="three_pics", arguments={}) for i in range(3)]
-    llm = FakeLLMClient([
-        ScriptedTurn(tool_calls=calls, finish_reason="tool_calls"),
-        ScriptedTurn(text="done"),
-    ])
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(tool_calls=calls, finish_reason="tool_calls"),
+            ScriptedTurn(text="done"),
+        ]
+    )
     agent = Agent(
         llm=llm,
         tools=local_reg,
@@ -208,10 +213,12 @@ async def test_hoist_caps_aggregate_total_bytes(workspace, monkeypatch):
     monkeypatch.setattr(agent_mod, "TOTAL_ATTACHMENT_MAX_BYTES", 100)
 
     calls = [ToolCall(id=f"c{i}", name="one_pic", arguments={}) for i in range(2)]
-    llm = FakeLLMClient([
-        ScriptedTurn(tool_calls=calls, finish_reason="tool_calls"),
-        ScriptedTurn(text="done"),
-    ])
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(tool_calls=calls, finish_reason="tool_calls"),
+            ScriptedTurn(text="done"),
+        ]
+    )
     agent = Agent(
         llm=llm,
         tools=local_reg,
@@ -260,10 +267,12 @@ async def test_modality_fallback_prepares_hoisted_tool_media(workspace):
         return ToolOutput(text="attached q.pdf", attachments=[att])
 
     call = ToolCall(id="c1", name="fetch_doc", arguments={})
-    llm = FakeLLMClient([
-        ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
-        ScriptedTurn(text="done"),
-    ])
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
+            ScriptedTurn(text="done"),
+        ]
+    )
     agent = Agent(
         llm=llm,
         tools=local_reg,
@@ -291,10 +300,12 @@ async def test_no_adapter_leaves_attachments_untouched(workspace):
 
 async def test_tool_error_is_contained(workspace):
     call = ToolCall(id="c1", name="read_file", arguments={"path": "missing.txt"})
-    llm = FakeLLMClient([
-        ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
-        ScriptedTurn(text="Sorry, that file is missing."),
-    ])
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
+            ScriptedTurn(text="Sorry, that file is missing."),
+        ]
+    )
     agent = _agent(llm, workspace)
     events = await _drain(agent, "read missing.txt")
 
@@ -311,10 +322,12 @@ async def test_parallel_tool_calls(workspace):
         ToolCall(id="c1", name="read_file", arguments={"path": "a.txt"}),
         ToolCall(id="c2", name="read_file", arguments={"path": "b.txt"}),
     ]
-    llm = FakeLLMClient([
-        ScriptedTurn(tool_calls=calls, finish_reason="tool_calls"),
-        ScriptedTurn(text="done"),
-    ])
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(tool_calls=calls, finish_reason="tool_calls"),
+            ScriptedTurn(text="done"),
+        ]
+    )
     agent = _agent(llm, workspace)
     events = await _drain(agent, "read both")
     results = [e for e in events if isinstance(e, ToolResultEvent)]
@@ -324,7 +337,9 @@ async def test_parallel_tool_calls(workspace):
 async def test_max_iters_emits_error(workspace):
     # A model that always asks for a tool never terminates -> cap hits.
     call = ToolCall(id="c1", name="read_file", arguments={"path": "a.txt"})
-    turns = [ScriptedTurn(tool_calls=[call], finish_reason="tool_calls") for _ in range(10)]
+    turns = [
+        ScriptedTurn(tool_calls=[call], finish_reason="tool_calls") for _ in range(10)
+    ]
     llm = FakeLLMClient(turns)
     agent = _agent(llm, workspace, max_iters=3)
     events = await _drain(agent, "loop forever")
@@ -334,10 +349,12 @@ async def test_max_iters_emits_error(workspace):
 
 async def test_unknown_tool_contained(workspace):
     call = ToolCall(id="c1", name="ghost_tool", arguments={})
-    llm = FakeLLMClient([
-        ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
-        ScriptedTurn(text="recovered"),
-    ])
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
+            ScriptedTurn(text="recovered"),
+        ]
+    )
     agent = _agent(llm, workspace)
     events = await _drain(agent, "call ghost")
     result = [e for e in events if isinstance(e, ToolResultEvent)][0].result
@@ -356,10 +373,12 @@ def no_backoff(monkeypatch):
 async def test_midstream_failure_recovers(workspace, no_backoff):
     # The reply dies after "par" already streamed; the loop discards the
     # partial turn, announces the retry, and re-requests successfully.
-    llm = FakeLLMClient([
-        StreamFailure(text="par", reason="stream interrupted: connection lost"),
-        ScriptedTurn(text="Hi there!"),
-    ])
+    llm = FakeLLMClient(
+        [
+            StreamFailure(text="par", reason="stream interrupted: connection lost"),
+            ScriptedTurn(text="Hi there!"),
+        ]
+    )
     agent = _agent(llm, workspace)
     events = await _drain(agent, "hello")
 
@@ -379,9 +398,9 @@ async def test_midstream_failure_recovers(workspace, no_backoff):
     # The re-request sent the identical conversation (nothing was appended
     # between attempts).
     assert len(llm.calls) == 2
-    assert [
-        (m.role, m.content) for m in llm.calls[0]
-    ] == [(m.role, m.content) for m in llm.calls[1]]
+    assert [(m.role, m.content) for m in llm.calls[0]] == [
+        (m.role, m.content) for m in llm.calls[1]
+    ]
 
 
 async def test_midstream_failure_before_first_token_recovers(workspace, no_backoff):
@@ -425,10 +444,12 @@ async def test_stream_retries_zero_disables_recovery(workspace, no_backoff):
 
 
 async def test_nonretryable_stream_error_fails_fast(workspace, no_backoff):
-    llm = FakeLLMClient([
-        StreamFailure(reason="request failed: BadRequestError", retryable=False),
-        ScriptedTurn(text="never reached"),
-    ])
+    llm = FakeLLMClient(
+        [
+            StreamFailure(reason="request failed: BadRequestError", retryable=False),
+            ScriptedTurn(text="never reached"),
+        ]
+    )
     agent = _agent(llm, workspace, stream_retries=5)
     events = await _drain(agent, "hello")
     assert not any(isinstance(e, StreamRetry) for e in events)

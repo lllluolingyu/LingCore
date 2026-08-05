@@ -32,6 +32,10 @@ from lingcore.modality import DEFAULT_PDF_MAX_CHARS
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
+def _default_modalities() -> list[NativeModality]:
+    return ["image", "file"]
+
+
 def _load_profile_env(profile_file: Path) -> dict[str, str]:
     """Parse only ``<profile dir>/.env`` without mutating ``os.environ``.
 
@@ -135,9 +139,7 @@ class LLMCfg(BaseModel):
     # on. Defaults to both — today's behavior. Declare fewer for a model that
     # rejects media parts: unsupported attachments then degrade to text via
     # the profile's ``media_fallback`` section instead of erroring mid-turn.
-    modalities: list[NativeModality] = Field(
-        default_factory=lambda: ["image", "file"]
-    )
+    modalities: list[NativeModality] = Field(default_factory=_default_modalities)
     # Send an OpenAI ``prompt_cache_key`` (the session id) with every request so
     # same-session traffic routes to the same warm cache node — the routing lever
     # that lifts the realized prompt-cache hit rate on top of a stable prefix.
@@ -150,9 +152,7 @@ class LLMCfg(BaseModel):
     def _dedup_modalities(cls, v: list[NativeModality]) -> list[NativeModality]:
         return list(dict.fromkeys(v))
 
-    def resolve_api_key(
-        self, environment: Mapping[str, str] | None = None
-    ) -> str:
+    def resolve_api_key(self, environment: Mapping[str, str] | None = None) -> str:
         """Read the API key from the named env var.
 
         Returns a harmless placeholder when no env var is named — local
@@ -271,6 +271,7 @@ class GuardrailCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     policy: str = "noop"
+    options: dict[str, Any] = Field(default_factory=dict)
 
 
 class SessionsCfg(BaseModel):

@@ -10,15 +10,16 @@ coupling contained.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from lingcore.media_types import (
-    AttachmentKind,
     FALLBACK_TEXT_MAX_CHARS,
     MAX_ATTACHMENTS,
     TOTAL_ATTACHMENT_MAX_BYTES,
+    AttachmentKind,
     decoded_payload_size,
     is_valid_media_type,
     kind_for_media_type,
@@ -246,23 +247,25 @@ class Message(BaseModel):
                 if attachment.kind not in modalities:
                     fallback_chunks.append(_fallback_block(attachment))
                     continue
-                data_uri = (
-                    f"data:{attachment.media_type};base64,{attachment.data}"
-                )
+                data_uri = f"data:{attachment.media_type};base64,{attachment.data}"
                 if attachment.kind == "image":
-                    native_parts.append({
-                        "type": "image_url",
-                        "image_url": {"url": data_uri},
-                    })
+                    native_parts.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_uri},
+                        }
+                    )
                 else:
-                    native_parts.append({
-                        "type": "file",
-                        "file": {
-                            "filename": attachment.name
-                            or _default_filename(attachment),
-                            "file_data": data_uri,
-                        },
-                    })
+                    native_parts.append(
+                        {
+                            "type": "file",
+                            "file": {
+                                "filename": attachment.name
+                                or _default_filename(attachment),
+                                "file_data": data_uri,
+                            },
+                        }
+                    )
             text = "\n\n".join(
                 chunk for chunk in (self.content, *fallback_chunks) if chunk
             )
@@ -326,8 +329,7 @@ def _validate_attachment_list(attachments: list[Attachment]) -> list[Attachment]
         raise ValueError("invalid attachment base64 data") from None
     if total > TOTAL_ATTACHMENT_MAX_BYTES:
         raise ValueError(
-            f"attachments too large ({total} bytes; "
-            f"limit {TOTAL_ATTACHMENT_MAX_BYTES})"
+            f"attachments too large ({total} bytes; limit {TOTAL_ATTACHMENT_MAX_BYTES})"
         )
     known = supported_media_types()
     for attachment in attachments:
@@ -355,5 +357,5 @@ class Conversation(BaseModel):
     def __len__(self) -> int:
         return len(self.messages)
 
-    def __iter__(self):  # type: ignore[override]
+    def __iter__(self) -> Iterator[Message]:  # type: ignore[override]
         return iter(self.messages)

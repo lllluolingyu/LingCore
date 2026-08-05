@@ -16,8 +16,8 @@ import lingcore.modality as modality_mod
 from lingcore.errors import ToolError
 from lingcore.llm import LLMChunk
 from lingcore.media_types import FALLBACK_TEXT_MAX_CHARS
-from lingcore.message import Attachment, Message
-from lingcore.modality import MediaAdapter, PDF_INSTALL_HINT, extract_pdf_markdown
+from lingcore.message import Attachment
+from lingcore.modality import PDF_INSTALL_HINT, MediaAdapter, extract_pdf_markdown
 from tests.fakes import FakeLLMClient, ScriptedTurn
 
 

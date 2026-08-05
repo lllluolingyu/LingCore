@@ -31,27 +31,31 @@ DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-VL-Embedding-8B"
 DEFAULT_RERANKER_MODEL = "Qwen/Qwen3-VL-Reranker-8B"
 
 _RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
-_ALLOWED_EMBEDDING_KEYS = frozenset({
-    "enabled",
-    "provider",
-    "base_url",
-    "api_key_env",
-    "model",
-    "dimensions",
-    "batch_size",
-    "timeout",
-    "max_retries",
-})
-_ALLOWED_RERANKER_KEYS = frozenset({
-    "enabled",
-    "provider",
-    "base_url",
-    "api_key_env",
-    "model",
-    "timeout",
-    "max_retries",
-    "candidate_count",
-})
+_ALLOWED_EMBEDDING_KEYS = frozenset(
+    {
+        "enabled",
+        "provider",
+        "base_url",
+        "api_key_env",
+        "model",
+        "dimensions",
+        "batch_size",
+        "timeout",
+        "max_retries",
+    }
+)
+_ALLOWED_RERANKER_KEYS = frozenset(
+    {
+        "enabled",
+        "provider",
+        "base_url",
+        "api_key_env",
+        "model",
+        "timeout",
+        "max_retries",
+        "candidate_count",
+    }
+)
 
 
 @runtime_checkable
@@ -156,9 +160,7 @@ def _positive_int(
         ) from None
     if value < 1 or (maximum is not None and value > maximum):
         suffix = f" and <= {maximum}" if maximum is not None else ""
-        raise ConfigError(
-            f"knowledge provider option {name!r} must be >= 1{suffix}"
-        )
+        raise ConfigError(f"knowledge provider option {name!r} must be >= 1{suffix}")
     return value
 
 
@@ -336,7 +338,10 @@ class SiliconFlowEmbeddingProvider(_SiliconFlowHTTP):
                     "knowledge embedding provider returned invalid vector indices"
                 ) from None
             for expected, item in enumerate(ordered):
-                if not isinstance(item, Mapping) or int(item.get("index", -1)) != expected:
+                if (
+                    not isinstance(item, Mapping)
+                    or int(item.get("index", -1)) != expected
+                ):
                     raise ToolError(
                         "knowledge embedding provider returned non-contiguous indices"
                     )
@@ -406,7 +411,9 @@ class SiliconFlowRerankingProvider(_SiliconFlowHTTP):
                 index = int(raw["index"])
                 score = float(raw["relevance_score"])
             except (KeyError, TypeError, ValueError):
-                raise ToolError("knowledge reranker returned an invalid result") from None
+                raise ToolError(
+                    "knowledge reranker returned an invalid result"
+                ) from None
             if (
                 index < 0
                 or index >= len(documents)
@@ -416,9 +423,7 @@ class SiliconFlowRerankingProvider(_SiliconFlowHTTP):
                 raise ToolError("knowledge reranker returned an invalid result")
             seen.add(index)
             results.append(RerankResult(index=index, score=score))
-        return sorted(results, key=lambda result: (-result.score, result.index))[
-            :top_n
-        ]
+        return sorted(results, key=lambda result: (-result.score, result.index))[:top_n]
 
 
 def build_embedding_provider(

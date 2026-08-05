@@ -22,6 +22,8 @@ from lingcore.media_types import (
     supported_extensions,
     supported_media_type,
     supported_media_types,
+)
+from lingcore.media_types import (
     validate_base64_payload as _validate_base64_payload,
 )
 from lingcore.message import Attachment
@@ -29,17 +31,19 @@ from lingcore.message import Attachment
 _HEAD_BYTES = 16
 # application/* types that are really UTF-8 text — accepted as a ``text`` kind
 # so their content inlines rather than being treated as opaque binary.
-_TEXTUAL_APPLICATION_TYPES = frozenset({
-    "application/json",
-    "application/xml",
-    "application/javascript",
-    "application/ecmascript",
-    "application/yaml",
-    "application/x-yaml",
-    "application/toml",
-    "application/x-sh",
-    "application/x-shellscript",
-})
+_TEXTUAL_APPLICATION_TYPES = frozenset(
+    {
+        "application/json",
+        "application/xml",
+        "application/javascript",
+        "application/ecmascript",
+        "application/yaml",
+        "application/x-yaml",
+        "application/toml",
+        "application/x-sh",
+        "application/x-shellscript",
+    }
+)
 __all__ = [
     "FILE_MAX_BYTES",
     "IMAGE_MAX_BYTES",

@@ -38,6 +38,7 @@ Design notes:
 
 from __future__ import annotations
 
+import builtins
 import json
 import re
 import sqlite3
@@ -51,11 +52,12 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
 from lingcore.errors import ConfigError, SessionError
+from lingcore.events import Compacted
 from lingcore.message import Message
 
 if TYPE_CHECKING:
     from lingcore.config import AgentProfile
-    from lingcore.memory import ShortTermMemory, WindowMemory
+    from lingcore.memory import ShortTermMemory
 
 # The installed package root — a sessions.db inside it is refused (gracefully).
 _PACKAGE_DIR = Path(__file__).parent.resolve()
@@ -163,7 +165,9 @@ def _strip_invalid_attachments(payload: str) -> Message | None:
         message = Message.model_validate(raw)
     except Exception:
         return None
-    suffix = f" [{dropped} stored attachment(s) no longer pass validation; dropped on load]"
+    suffix = (
+        f" [{dropped} stored attachment(s) no longer pass validation; dropped on load]"
+    )
     message.content = (message.content + suffix).strip()
     if message.input_text is not None:
         message.input_text = (message.input_text + suffix).strip()
@@ -311,8 +315,7 @@ def _normalized_skill_event_payload(
     normalized: dict[str, Any] = {
         "active": list(state.active),
         "approved_high_risk": {
-            name: sorted(tools)
-            for name, tools in state.approved_high_risk.items()
+            name: sorted(tools) for name, tools in state.approved_high_risk.items()
         },
     }
     for key in ("activated", "deactivated"):
@@ -460,7 +463,9 @@ class SessionStore:
             )
             normalized_payload = json.loads(payload_json)
         except (TypeError, ValueError) as exc:
-            raise SessionError(f"session event payload is not JSON-compatible: {exc}") from None
+            raise SessionError(
+                f"session event payload is not JSON-compatible: {exc}"
+            ) from None
         if not isinstance(normalized_payload, dict):
             raise SessionError("session event payload must be an object")
 
@@ -480,6 +485,8 @@ class SessionStore:
                 "VALUES (?, ?, ?, ?, ?)",
                 (session_id, message_seq, kind, now, payload_json),
             )
+            if cur.lastrowid is None:
+                raise SessionError("session event insert did not return a cursor")
             event_seq = int(cur.lastrowid)
             if kind == "compaction":
                 self._prune_old_compaction_snapshots_locked(
@@ -489,7 +496,7 @@ class SessionStore:
             event_seq=event_seq,
             message_seq=message_seq,
             kind=kind,
-            created_at=now,
+            created_at=datetime.fromisoformat(now),
             payload=normalized_payload,
         )
 
@@ -599,11 +606,7 @@ class SessionStore:
             ("before token count", before_tokens, 0),
             ("after token count", after_tokens, 0),
         ):
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value < minimum
-            ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
                 raise SessionError(f"compaction {label} must be at least {minimum}")
         return self.append_event(
             session_id,
@@ -643,9 +646,7 @@ class SessionStore:
                     f"{label} skill names must be a list of non-empty strings"
                 )
         active_names = list(dict.fromkeys(active))
-        if approved_high_risk is not None and not isinstance(
-            approved_high_risk, dict
-        ):
+        if approved_high_risk is not None and not isinstance(approved_high_risk, dict):
             raise SessionError("approved high-risk skill grants must be an object")
         normalized_approvals: dict[str, list[str]] = {}
         for name, tools in (approved_high_risk or {}).items():
@@ -740,7 +741,11 @@ class SessionStore:
                     )
 
                 copied: list[tuple[int, str, Message]] = [
-                    (int(seq), created_at, _stored_message(session_id, int(seq), payload))
+                    (
+                        int(seq),
+                        created_at,
+                        _stored_message(session_id, int(seq), payload),
+                    )
                     for seq, created_at, payload in rows
                 ]
                 messages = [message for _, _, message in copied]
@@ -817,7 +822,13 @@ class SessionStore:
                     (session_id,),
                 ).fetchall()
                 latest_compaction_cursor: int | None = None
-                for event_seq, message_seq, kind, created_at, payload_json in event_rows:
+                for (
+                    event_seq,
+                    message_seq,
+                    kind,
+                    created_at,
+                    payload_json,
+                ) in event_rows:
                     anchor = by_seq.get(message_seq)
                     if kind not in _SESSION_EVENT_KINDS:
                         continue
@@ -830,8 +841,7 @@ class SessionStore:
                         # an inactive tombstone so omitting it cannot revive an
                         # older authorization in the fork.
                         source_anchor = self._conn.execute(
-                            "SELECT 1 FROM messages "
-                            "WHERE session_id = ? AND seq = ?",
+                            "SELECT 1 FROM messages WHERE session_id = ? AND seq = ?",
                             (session_id, message_seq),
                         ).fetchone()
                         if source_anchor is not None:
@@ -869,11 +879,13 @@ class SessionStore:
                             copied_created_at = event.created_at.isoformat()
                             if event.kind == "compaction":
                                 if "messages" in event.payload:
-                                    snapshot = CompactionSnapshot.model_validate({
-                                        **event.payload,
-                                        "event_seq": event.event_seq,
-                                        "message_seq": event.message_seq,
-                                    })
+                                    snapshot = CompactionSnapshot.model_validate(
+                                        {
+                                            **event.payload,
+                                            "event_seq": event.event_seq,
+                                            "message_seq": event.message_seq,
+                                        }
+                                    )
                                     if snapshot.snapshot_superseded:
                                         continue
                                     canonical_prefix = messages[: event.message_seq + 1]
@@ -936,6 +948,10 @@ class SessionStore:
                             normalized_payload,
                         ),
                     )
+                    if inserted.lastrowid is None:
+                        raise SessionError(
+                            "forked event insert did not return a cursor"
+                        )
                     if copied_kind == "compaction":
                         latest_compaction_cursor = int(inserted.lastrowid)
                 if latest_compaction_cursor is not None:
@@ -970,9 +986,7 @@ class SessionStore:
     def delete(self, session_id: str) -> bool:
         """Delete a session and (via cascade) its messages."""
         with self._lock, self._conn:
-            cur = self._conn.execute(
-                "DELETE FROM sessions WHERE id = ?", (session_id,)
-            )
+            cur = self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             return cur.rowcount > 0
 
     # -- read -----------------------------------------------------------
@@ -1007,9 +1021,7 @@ class SessionStore:
             raise SessionError(f"no session matching {prefix!r}")
         if len(rows) > 1:
             listing = "\n".join(f"  {r[0][:8]}  {r[1] or '(untitled)'}" for r in rows)
-            raise SessionError(
-                f"session id prefix {prefix!r} is ambiguous:\n{listing}"
-            )
+            raise SessionError(f"session id prefix {prefix!r} is ambiguous:\n{listing}")
         return _row_to_meta(rows[0])
 
     def message_records(
@@ -1018,16 +1030,13 @@ class SessionStore:
         *,
         after_seq: int = -1,
         through_seq: int | None = None,
-    ) -> list[StoredMessage]:
+    ) -> builtins.list[StoredMessage]:
         """Stored messages in a stable inclusive/exclusive sequence window."""
         if after_seq < -1:
             raise SessionError("message replay cursor must be -1 or greater")
         if through_seq is not None and through_seq < 0:
             raise SessionError("message replay boundary must be non-negative")
-        sql = (
-            "SELECT seq, payload FROM messages "
-            "WHERE session_id = ? AND seq > ?"
-        )
+        sql = "SELECT seq, payload FROM messages WHERE session_id = ? AND seq > ?"
         params: list[Any] = [session_id, after_seq]
         if through_seq is not None:
             sql += " AND seq <= ?"
@@ -1043,7 +1052,7 @@ class SessionStore:
 
     def _canonical_message_suffix(
         self, session_id: str, *, through_seq: int, count: int
-    ) -> list[Message]:
+    ) -> builtins.list[Message]:
         """Read only enough canonical rows to validate a working-set suffix.
 
         Rows are fetched newest-first in bounded batches. Once the validated
@@ -1085,7 +1094,7 @@ class SessionStore:
                 return [record.message for record in validated[-count:]]
             upper_seq = int(rows[-1][0]) - 1
 
-    def messages(self, session_id: str) -> list[Message]:
+    def messages(self, session_id: str) -> builtins.list[Message]:
         """Stored messages in order; empty list when the session has no row."""
         return [record.message for record in self.message_records(session_id)]
 
@@ -1095,7 +1104,7 @@ class SessionStore:
         *,
         after_seq: int = -1,
         kind: str | None = None,
-    ) -> list[SessionEvent]:
+    ) -> builtins.list[SessionEvent]:
         """Durable runtime events after a monotonic replay cursor."""
         if after_seq < -1:
             raise SessionError("session event replay cursor must be -1 or greater")
@@ -1120,13 +1129,15 @@ class SessionStore:
                     raise ValueError("payload is not an object")
                 if event_kind not in _SESSION_EVENT_KINDS:
                     raise ValueError(f"unsupported kind {event_kind!r}")
-                out.append(SessionEvent(
-                    event_seq=event_seq,
-                    message_seq=message_seq,
-                    kind=event_kind,
-                    created_at=created_at,
-                    payload=payload,
-                ))
+                out.append(
+                    SessionEvent(
+                        event_seq=event_seq,
+                        message_seq=message_seq,
+                        kind=event_kind,
+                        created_at=created_at,
+                        payload=payload,
+                    )
+                )
             except Exception:
                 # Runtime events are derived state, not the canonical
                 # transcript. A damaged row must not make session history (or
@@ -1170,11 +1181,13 @@ class SessionStore:
                 payload = json.loads(payload_json)
                 if not isinstance(payload, dict):
                     continue
-                snapshot = CompactionSnapshot.model_validate({
-                    **payload,
-                    "event_seq": event_seq,
-                    "message_seq": message_seq,
-                })
+                snapshot = CompactionSnapshot.model_validate(
+                    {
+                        **payload,
+                        "event_seq": event_seq,
+                        "message_seq": message_seq,
+                    }
+                )
                 if snapshot.snapshot_superseded:
                     continue
                 tail = _compaction_tail(snapshot.messages)
@@ -1222,8 +1235,7 @@ class SessionStore:
         """Discard runtime events anchored at or after a removed branch point."""
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "DELETE FROM session_events "
-                "WHERE session_id = ? AND message_seq >= ?",
+                "DELETE FROM session_events WHERE session_id = ? AND message_seq >= ?",
                 (session_id, seq),
             )
             return cur.rowcount
@@ -1249,8 +1261,7 @@ class SessionStore:
                 (session_id, seq),
             )
             event_cur = self._conn.execute(
-                "DELETE FROM session_events "
-                "WHERE session_id = ? AND message_seq >= ?",
+                "DELETE FROM session_events WHERE session_id = ? AND message_seq >= ?",
                 (session_id, seq),
             )
             if cur.rowcount or event_cur.rowcount:
@@ -1299,8 +1310,7 @@ class SessionStore:
                 (session_id, seq),
             )
             self._conn.execute(
-                "DELETE FROM session_events "
-                "WHERE session_id = ? AND message_seq >= ?",
+                "DELETE FROM session_events WHERE session_id = ? AND message_seq >= ?",
                 (session_id, seq),
             )
             # If this was the auto-titled first prompt, clear it so appending the
@@ -1351,7 +1361,9 @@ class SessionMemory:
     while the store keeps the *full* history regardless of the window.
     """
 
-    def __init__(self, inner: "ShortTermMemory", store: SessionStore, session_id: str) -> None:
+    def __init__(
+        self, inner: "ShortTermMemory", store: SessionStore, session_id: str
+    ) -> None:
         self._inner = inner
         self._store = store
         self._session_id = session_id
@@ -1374,7 +1386,7 @@ class SessionMemory:
         """Supply the agent's validated iteration count for the next snapshot."""
         self._compaction_turn_index = turn_index
 
-    async def maybe_compact(self, system_prompt: str = ""):
+    async def maybe_compact(self, system_prompt: str = "") -> Compacted | None:
         # The transcript remains lossless, while the derived working-set
         # snapshot is anchored separately so resume can start from it and replay
         # only messages appended after the compaction watermark.
@@ -1467,12 +1479,12 @@ def attach_session(
         # anchor. Only hydrate and validate the later raw tail; old full-history
         # rows remain available for transcript display and future branch edits.
         replayed = list(snapshot.messages)
-        tail = trim_dangling([
-            record.message
-            for record in store.message_records(
-                sid, after_seq=snapshot.message_seq
-            )
-        ])
+        tail = trim_dangling(
+            [
+                record.message
+                for record in store.message_records(sid, after_seq=snapshot.message_seq)
+            ]
+        )
         replayed.extend(tail)
         turn_index = snapshot.turn_index + sum(
             1 for message in tail if message.role == "assistant"

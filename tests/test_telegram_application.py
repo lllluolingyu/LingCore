@@ -73,9 +73,7 @@ async def test_factory_enables_serial_updates_and_retrying_rate_limiter(tmp_path
     await application.bot_data[_BRIDGE_KEY].shutdown()
 
 
-def test_polling_runner_retains_updates_and_limits_update_types(
-    tmp_path, monkeypatch
-):
+def test_polling_runner_retains_updates_and_limits_update_types(tmp_path, monkeypatch):
     profile, config = _loaded(tmp_path)
     calls = {}
 
@@ -156,9 +154,7 @@ async def test_download_stream_enforces_cap_when_metadata_is_understated(
 
     stream = Stream()
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(
-            lambda _: httpx.Response(200, stream=stream)
-        )
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, stream=stream))
     )
     monkeypatch.setattr(
         "lingcore.integrations.telegram.application.httpx.AsyncClient",
@@ -183,9 +179,7 @@ async def test_download_stream_enforces_cap_when_metadata_is_understated(
 
 async def test_download_stream_accepts_unknown_size_within_cap(monkeypatch):
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(
-            lambda _: httpx.Response(200, content=b"bounded")
-        )
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=b"bounded"))
     )
     monkeypatch.setattr(
         "lingcore.integrations.telegram.application.httpx.AsyncClient",
@@ -200,10 +194,7 @@ async def test_download_stream_accepts_unknown_size_within_cap(monkeypatch):
         async def get_file(self, _):
             return Remote()
 
-    assert (
-        await PTBSender(FakeBot()).download_file("file", max_bytes=7)
-        == b"bounded"
-    )
+    assert await PTBSender(FakeBot()).download_file("file", max_bytes=7) == b"bounded"
 
 
 async def test_local_bot_api_download_is_bounded_when_metadata_is_understated(

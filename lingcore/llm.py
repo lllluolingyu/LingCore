@@ -29,8 +29,9 @@ replayed or duplicated.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator, Collection
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any
 
 import httpx
 from openai import AsyncOpenAI
@@ -111,7 +112,7 @@ class LLMClient:
         max_retries: int = 10,
         timeout: float = 120.0,
         http_client: Any = None,
-        modalities: "frozenset[str] | list[str] | None" = None,
+        modalities: Collection[str] | None = None,
         prompt_cache_key: str | None = None,
     ) -> None:
         self.model = model
@@ -133,9 +134,7 @@ class LLMClient:
         # default, but a steadily-streaming response can run longer, and across
         # max_retries attempts + backoff the total wait can still be minutes.
         # Connect is capped shorter so a dead host fails fast, not per attempt.
-        sdk_timeout = httpx.Timeout(
-            timeout, connect=min(timeout, _MAX_CONNECT_SECONDS)
-        )
+        sdk_timeout = httpx.Timeout(timeout, connect=min(timeout, _MAX_CONNECT_SECONDS))
         client_kwargs: dict[str, Any] = {
             "api_key": api_key,
             "base_url": base_url,
@@ -148,7 +147,7 @@ class LLMClient:
 
     async def _open_stream(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None
-    ):
+    ) -> Any:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -186,9 +185,7 @@ class LLMClient:
         no SDK retry ever covers it and only the caller can decide to discard
         the partial turn and re-request.
         """
-        wire = [
-            m.to_openai(attachment_modalities=self._modalities) for m in messages
-        ]
+        wire = [m.to_openai(attachment_modalities=self._modalities) for m in messages]
         try:
             stream = await self._open_stream(wire, tools)
         except Exception as e:

@@ -24,14 +24,18 @@ SKILL_STATE_KEY = "_skill_state"
 
 class SkillArgs(BaseModel):
     name: str = Field(description="Name of the skill to activate or deactivate.")
-    active: bool = Field(default=True, description="True to activate, False to deactivate.")
+    active: bool = Field(
+        default=True, description="True to activate, False to deactivate."
+    )
 
 
-@tool(description=(
-    "Activate or deactivate a named skill. An active skill's instructions are "
-    "added to the system prompt and its requested tools (limited to those the "
-    "profile already allows) become available on the next step."
-))
+@tool(
+    description=(
+        "Activate or deactivate a named skill. An active skill's instructions are "
+        "added to the system prompt and its requested tools (limited to those the "
+        "profile already allows) become available on the next step."
+    )
+)
 async def activate_skill(args: SkillArgs, ctx: ToolContext) -> str:
     state = ctx.options.get(SKILL_STATE_KEY)
     if state is None:

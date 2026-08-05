@@ -17,7 +17,7 @@ from lingcore.agent import Agent
 from lingcore.errors import ConfigError, LingCoreError, SessionError, ToolError
 from lingcore.events import AgentEvent, Error, Final, TurnCancelled
 from lingcore.integrations.telegram.config import TelegramConfig
-from lingcore.integrations.telegram.confirmations import ConfirmationManager
+from lingcore.integrations.telegram.confirmations import ConfirmationManager, Sleep
 from lingcore.integrations.telegram.protocol import (
     TelegramCallback,
     TelegramFile,
@@ -103,7 +103,7 @@ class TelegramBridge:
         *,
         llm_factory: LLMFactory | None = None,
         clock: Callable[[], float] = time.monotonic,
-        confirmation_sleep=asyncio.sleep,
+        confirmation_sleep: Sleep = asyncio.sleep,
     ) -> None:
         self.profile = profile
         self.config = config
@@ -342,9 +342,11 @@ class TelegramBridge:
             )
             self._user_tasks[runtime.user_id] = task
             self._tasks.add(task)
-            task.add_done_callback(
-                lambda done, uid=runtime.user_id: self._task_done(uid, done)
-            )
+
+            def task_done(done: asyncio.Task[None], uid: int = runtime.user_id) -> None:
+                self._task_done(uid, done)
+
+            task.add_done_callback(task_done)
 
     async def _run_turn(
         self,
@@ -367,9 +369,7 @@ class TelegramBridge:
                         f"file too large ({len(payload)} bytes; "
                         f"limit {attachment_limit})"
                     )
-                attachments.append(
-                    attachment_from_bytes(payload, name=attachment.name)
-                )
+                attachments.append(attachment_from_bytes(payload, name=attachment.name))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -534,9 +534,7 @@ class TelegramBridge:
             except SessionError as exc:
                 await sender.send_message(chat_id, str(exc))
                 return
-            await self._replace_session(
-                runtime, meta.id, chat_id, sender, resumed=True
-            )
+            await self._replace_session(runtime, meta.id, chat_id, sender, resumed=True)
 
     async def _sessions(
         self,
@@ -590,9 +588,7 @@ class TelegramBridge:
         verb = "Resumed" if resumed else "Started"
         await sender.send_message(chat_id, f"{verb} session {session_id[:8]}.")
 
-    async def _stop(
-        self, user_id: int, chat_id: int, sender: TelegramSender
-    ) -> None:
+    async def _stop(self, user_id: int, chat_id: int, sender: TelegramSender) -> None:
         runtime = self._runtimes.get(user_id)
         task = self._user_tasks.get(user_id)
         if runtime is None or task is None or task.done():
@@ -666,9 +662,7 @@ class TelegramBridge:
             source_dir = getattr(scoped, "_source_dir", None)
             if source_dir is None:  # guarded by Telegram config loading
                 raise ConfigError("Telegram scoped profile has no source directory")
-            configured_memory_path = str(
-                memory_path.relative_to(source_dir.resolve())
-            )
+            configured_memory_path = str(memory_path.relative_to(source_dir.resolve()))
             configured_sessions_path = str(
                 sessions_path.relative_to(source_dir.resolve())
             )
@@ -697,9 +691,7 @@ class TelegramBridge:
             chat_id = self._chat_ids.get(user_id)
             if sender is None or chat_id is None:
                 return False
-            return await self.confirmations.request(
-                user_id, chat_id, command, sender
-            )
+            return await self.confirmations.request(user_id, chat_id, command, sender)
 
         llm = self.llm_factory(user_id) if self.llm_factory is not None else None
         agent = Agent.from_profile(

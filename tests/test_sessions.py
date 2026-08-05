@@ -396,9 +396,9 @@ def test_runtime_event_replay_cursor_skips_corrupt_derived_rows(
         first.event_seq,
         second.event_seq,
     ]
-    assert [event.event_seq for event in store.events(sid, after_seq=first.event_seq)] == [
-        second.event_seq
-    ]
+    assert [
+        event.event_seq for event in store.events(sid, after_seq=first.event_seq)
+    ] == [second.event_seq]
 
     # Events are rebuildable state. One damaged row is omitted while later
     # cursors and the prior valid compaction remain usable.
@@ -418,9 +418,9 @@ def test_runtime_event_replay_cursor_skips_corrupt_derived_rows(
     )
 
     assert third.event_seq > corrupt_seq > second.event_seq
-    assert [event.event_seq for event in store.events(sid, after_seq=second.event_seq)] == [
-        third.event_seq
-    ]
+    assert [
+        event.event_seq for event in store.events(sid, after_seq=second.event_seq)
+    ] == [third.event_seq]
     assert store.event_cursor(sid) == third.event_seq
     assert store.latest_compaction(sid).event_seq == second.event_seq
     assert store.active_skills(sid) == ()
@@ -463,20 +463,22 @@ def test_compaction_retains_only_two_full_snapshot_bodies(store: SessionStore):
 
     saved = []
     for index in range(4):
-        saved.append(store.save_compaction(
-            sid,
-            messages=[
-                Message(
-                    role="user",
-                    name="summary",
-                    content=f"[Earlier conversation, summarized]\nsummary {index}",
-                ),
-                Message.user("current"),
-            ],
-            summarized_messages=1,
-            before_tokens=20,
-            after_tokens=5,
-        ))
+        saved.append(
+            store.save_compaction(
+                sid,
+                messages=[
+                    Message(
+                        role="user",
+                        name="summary",
+                        content=f"[Earlier conversation, summarized]\nsummary {index}",
+                    ),
+                    Message.user("current"),
+                ],
+                summarized_messages=1,
+                before_tokens=20,
+                after_tokens=5,
+            )
+        )
 
     with store._lock:
         payloads = [
@@ -641,16 +643,18 @@ def test_fork_session_copies_valid_prefix_state_and_provenance(
             "VALUES (?, 2, 'compaction', '2026-01-01T00:00:01+00:00', ?)",
             (
                 source,
-                json.dumps({
-                    "messages": [
-                        Message.system("foreign").model_dump(mode="json"),
-                        Message.user("current question").model_dump(mode="json"),
-                    ],
-                    "turn_index": 1,
-                    "summarized_messages": 1,
-                    "before_tokens": 20,
-                    "after_tokens": 5,
-                }),
+                json.dumps(
+                    {
+                        "messages": [
+                            Message.system("foreign").model_dump(mode="json"),
+                            Message.user("current question").model_dump(mode="json"),
+                        ],
+                        "turn_index": 1,
+                        "summarized_messages": 1,
+                        "before_tokens": 20,
+                        "after_tokens": 5,
+                    }
+                ),
             ),
         )
     store.append(source, Message.assistant(content="current answer"))
@@ -821,7 +825,11 @@ def test_trim_keeps_clean_history():
 
 
 def test_trim_keeps_trailing_user():
-    msgs = [Message.user("q"), Message.assistant(content="a"), Message.user("crashed turn")]
+    msgs = [
+        Message.user("q"),
+        Message.assistant(content="a"),
+        Message.user("crashed turn"),
+    ]
     assert trim_dangling(msgs) == msgs
 
 
@@ -1239,7 +1247,10 @@ async def test_agent_resume_sees_history_and_turn_index(tmp_path: Path):
         contents = [m.content for m in fake2.calls[0]]
         assert "first question" in contents and "answer one" in contents
         assert [m.role for m in store.messages(sid)] == [
-            "user", "assistant", "user", "assistant",
+            "user",
+            "assistant",
+            "user",
+            "assistant",
         ]
 
 
@@ -1275,8 +1286,7 @@ async def test_agent_without_store_unchanged(tmp_path: Path):
 async def test_agent_compaction_snapshot_survives_rebuild(tmp_path: Path):
     profile = _profile(
         tmp_path,
-        PROFILE_YAML
-        + "memory:\n"
+        PROFILE_YAML + "memory:\n"
         "  max_messages: 50\n"
         "  max_tokens: 120\n"
         "  compaction:\n"
@@ -1288,11 +1298,13 @@ async def test_agent_compaction_snapshot_survives_rebuild(tmp_path: Path):
     store, _ = open_store(profile)
     assert store is not None
     with store:
-        fake = FakeLLMClient([
-            ScriptedTurn(text="first answer"),
-            ScriptedTurn(text="durable compact summary"),
-            ScriptedTurn(text="second answer"),
-        ])
+        fake = FakeLLMClient(
+            [
+                ScriptedTurn(text="first answer"),
+                ScriptedTurn(text="durable compact summary"),
+                ScriptedTurn(text="second answer"),
+            ]
+        )
         first = Agent.from_profile(
             profile, llm=fake, base_dir=tmp_path, session_store=store
         )
@@ -1320,7 +1332,9 @@ async def test_agent_compaction_snapshot_survives_rebuild(tmp_path: Path):
         assert not any("padding padding" in content for content in working)
         assert "second answer" in working
         assert resumed._turn_index == 2
-        assert any("padding padding" in message.content for message in store.messages(sid))
+        assert any(
+            "padding padding" in message.content for message in store.messages(sid)
+        )
 
 
 async def test_agent_dynamic_skill_state_survives_rebuild(tmp_path: Path):
@@ -1347,10 +1361,12 @@ initial_tools:
             name="activate_skill",
             arguments={"name": "code-review"},
         )
-        first_llm = FakeLLMClient([
-            ScriptedTurn(tool_calls=[activate], finish_reason="tool_calls"),
-            ScriptedTurn(text="activated"),
-        ])
+        first_llm = FakeLLMClient(
+            [
+                ScriptedTurn(tool_calls=[activate], finish_reason="tool_calls"),
+                ScriptedTurn(text="activated"),
+            ]
+        )
         first = Agent.from_profile(
             profile, llm=first_llm, base_dir=tmp_path, session_store=store
         )
@@ -1375,8 +1391,7 @@ initial_tools:
         system = second_llm.calls[0][0].content
         assert "Group findings by severity" in system
         names = {
-            schema["function"]["name"]
-            for schema in (second_llm.tool_schemas[0] or [])
+            schema["function"]["name"] for schema in (second_llm.tool_schemas[0] or [])
         }
         assert {"activate_skill", "read_file", "search"} <= names
 

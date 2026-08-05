@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import lingcore.memory as memory_module
 from lingcore.memory import WindowMemory
 from lingcore.message import Message, ToolCall, ToolResult
 
@@ -13,6 +14,25 @@ def test_render_prepends_system():
     assert rendered[0].role == "system"
     assert rendered[0].content == "SYS"
     assert rendered[1].content == "hi"
+
+
+def test_encoding_is_lazy_and_offline_failure_uses_estimate(monkeypatch):
+    calls: list[str] = []
+
+    def unavailable(model: str):
+        calls.append(model)
+        raise OSError("encoding cache unavailable")
+
+    monkeypatch.setattr(memory_module, "_encoding", unavailable)
+    mem = WindowMemory(model="local/offline")
+    mem.add(Message.user("hello"))
+
+    assert calls == []  # construction never resolves/downloads a vocabulary
+    rendered = mem.render("system")
+    assert calls == ["local/offline"]
+    assert rendered[-1].content == "hello"
+    assert mem._tokens(rendered[-1]) > 0
+    assert calls == ["local/offline"]  # failed resolution is not retried
 
 
 def test_message_count_cap_keeps_recent():
@@ -31,10 +51,13 @@ def test_tool_block_never_orphaned():
     mem.add(Message.user("old"))
     call = ToolCall(id="c1", name="read_file", arguments={"path": "a"})
     mem.add(Message.assistant(content="", tool_calls=[call]))
-    mem.add(Message.from_tool_result(ToolResult(call_id="c1", name="read_file", content="x")))
+    mem.add(
+        Message.from_tool_result(
+            ToolResult(call_id="c1", name="read_file", content="x")
+        )
+    )
 
     rendered = mem.render("SYS")
-    roles = [m.role for m in rendered]
     # If a tool message is present, the message before it must carry tool_calls.
     for i, m in enumerate(rendered):
         if m.role == "tool":
@@ -103,7 +126,9 @@ def _count_prefix_shifts(evict_to_ratio):
         mem.add(Message.user(f"message number {i} with a few words"))
         r = _render_bodies(mem)
         # hard cap is always respected
-        assert sum(mem._tokens(m) for m in mem.render("SYS") if m.role != "system") <= 80
+        assert (
+            sum(mem._tokens(m) for m in mem.render("SYS") if m.role != "system") <= 80
+        )
         renders.append(r)
     shifts = sum(1 for a, b in zip(renders, renders[1:]) if b[: len(a)] != a)
     return shifts, mem

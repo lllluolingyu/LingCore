@@ -119,7 +119,10 @@ def test_classify_empty_file_is_text():
 
 
 def test_classify_nul_bytes_are_binary():
-    assert classify_bytes(b"ab\x00cd", "x.dat") == ("binary", "application/octet-stream")
+    assert classify_bytes(b"ab\x00cd", "x.dat") == (
+        "binary",
+        "application/octet-stream",
+    )
 
 
 def test_classify_non_utf8_is_binary():

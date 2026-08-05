@@ -41,7 +41,11 @@ async def run_session(agent: Agent, frontend: Frontend) -> None:
         user_input = await frontend.read_input()
         if user_input is None:
             return
-        incoming = user_input if isinstance(user_input, UserInput) else UserInput(text=user_input)
+        incoming = (
+            user_input
+            if isinstance(user_input, UserInput)
+            else UserInput(text=user_input)
+        )
         if not incoming.text.strip() and not incoming.attachments:
             continue
         turn = agent.run(incoming)

@@ -24,7 +24,7 @@ import sqlite3
 import struct
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Literal, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Literal, Mapping, Sequence, cast
 
 from pydantic import BaseModel, Field
 
@@ -129,13 +129,15 @@ def _backend(options: Mapping[str, Any]) -> Literal["grep", "index", "hybrid"]:
         raise ConfigError(
             "tool_options.knowledge.backend must be grep, index, or hybrid"
         )
-    return value
+    return cast(Literal["grep", "index", "hybrid"], value)
 
 
 def _sources(options: Mapping[str, Any]) -> list[str]:
     raw = options.get("sources", _DEFAULT_SOURCES)
-    if not isinstance(raw, list) or not raw or any(
-        not isinstance(value, str) or not value.strip() for value in raw
+    if (
+        not isinstance(raw, list)
+        or not raw
+        or any(not isinstance(value, str) or not value.strip() for value in raw)
     ):
         raise ConfigError(
             "tool_options.knowledge.sources must be a non-empty list of globs"
@@ -161,9 +163,7 @@ def _int_option(
         raise ConfigError(f"{option_path}.{name} must be an integer") from None
     if value < minimum or (maximum is not None and value > maximum):
         upper = f" and <= {maximum}" if maximum is not None else ""
-        raise ConfigError(
-            f"{option_path}.{name} must be >= {minimum}{upper}"
-        )
+        raise ConfigError(f"{option_path}.{name} must be >= {minimum}{upper}")
     return value
 
 
@@ -176,13 +176,9 @@ def _float_option(
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        raise ConfigError(
-            f"tool_options.knowledge.{name} must be a number"
-        ) from None
+        raise ConfigError(f"tool_options.knowledge.{name} must be a number") from None
     if not math.isfinite(value) or value < minimum:
-        raise ConfigError(
-            f"tool_options.knowledge.{name} must be >= {minimum}"
-        )
+        raise ConfigError(f"tool_options.knowledge.{name} must be >= {minimum}")
     return value
 
 
@@ -236,9 +232,7 @@ def _grep(
 
     for full in _iter_source_files(base, sources):
         try:
-            payload, _ = _read_source_bytes(
-                base, full, max_bytes=_MAX_READ_BYTES
-            )
+            payload, _ = _read_source_bytes(base, full, max_bytes=_MAX_READ_BYTES)
             text = payload.decode("utf-8")
         except (UnicodeDecodeError, OSError, PathEscapeError):
             continue
@@ -357,15 +351,17 @@ def _chunk_text(
             occurrence = occurrences.get(text_hash, 0)
             occurrences[text_hash] = occurrence + 1
             identity = f"{path}\0{page or 0}\0{text_hash}\0{occurrence}"
-            drafts.append(_ChunkDraft(
-                chunk_key=hashlib.sha256(identity.encode("utf-8")).hexdigest(),
-                ordinal=ordinal_start + len(drafts),
-                page=page,
-                line_start=group[0][0],
-                line_end=group[-1][0],
-                text_hash=text_hash,
-                text=chunk_text,
-            ))
+            drafts.append(
+                _ChunkDraft(
+                    chunk_key=hashlib.sha256(identity.encode("utf-8")).hexdigest(),
+                    ordinal=ordinal_start + len(drafts),
+                    page=page,
+                    line_start=group[0][0],
+                    line_end=group[-1][0],
+                    text_hash=text_hash,
+                    text=chunk_text,
+                )
+            )
         if end >= len(pieces):
             break
         # Overlap by bounded pieces (normally one physical line each).  Always
@@ -384,9 +380,7 @@ def _load_snapshot(
 ) -> tuple[_SourceSnapshot | None, str | None]:
     rel = full.relative_to(base).as_posix()
     try:
-        payload, info = _read_source_bytes(
-            base, full, max_bytes=max_source_bytes
-        )
+        payload, info = _read_source_bytes(base, full, max_bytes=max_source_bytes)
     except PathEscapeError as exc:
         if "exceeds" in str(exc):
             return None, f"{rel} (over max_source_bytes)"
@@ -397,7 +391,7 @@ def _load_snapshot(
     chunks: list[_ChunkDraft] = []
     if full.suffix.lower() == ".pdf":
         try:
-            import fitz  # type: ignore[import-not-found]
+            import fitz
         except ImportError:
             return None, f"{rel} (PDF extraction needs the pdf extra)"
         try:
@@ -451,9 +445,7 @@ def _index_path(base: Path, options: Mapping[str, Any]) -> Path:
     return resolved
 
 
-def _open_index(
-    base: Path, path: Path, *, create: bool
-) -> sqlite3.Connection | None:
+def _open_index(base: Path, path: Path, *, create: bool) -> sqlite3.Connection | None:
     """Load a confined SQLite file into an in-memory connection.
 
     SQLite's pathname API cannot accept an already-open no-follow descriptor.
@@ -470,13 +462,13 @@ def _open_index(
                 if not create:
                     return None
             else:
-                payload = directory.read_regular(
-                    rel.name, max_bytes=_MAX_INDEX_BYTES
-                )
+                payload = directory.read_regular(rel.name, max_bytes=_MAX_INDEX_BYTES)
     except FileNotFoundError:
         if not create:
             return None
-        raise ToolError(f"cannot create knowledge index directory: {path.parent}") from None
+        raise ToolError(
+            f"cannot create knowledge index directory: {path.parent}"
+        ) from None
     except (OSError, PathEscapeError) as exc:
         raise ToolError(f"cannot safely open knowledge index {path}: {exc}") from None
 
@@ -770,12 +762,14 @@ async def _index_sources(
                     """,
                     (snapshot.path, vector_identity),
                 ):
-                    targets.append((
-                        "existing",
-                        int(row["id"]),
-                        str(row["text_hash"]),
-                        str(row["text"]),
-                    ))
+                    targets.append(
+                        (
+                            "existing",
+                            int(row["id"]),
+                            str(row["text_hash"]),
+                            str(row["text"]),
+                        )
+                    )
                 already = connection.execute(
                     """
                     SELECT COUNT(*) FROM chunks
@@ -788,9 +782,7 @@ async def _index_sources(
 
         unique_inputs = {target[2]: target[3] for target in targets}
         raw_vectors = (
-            await provider.embed(list(unique_inputs.values()))
-            if unique_inputs
-            else []
+            await provider.embed(list(unique_inputs.values())) if unique_inputs else []
         )
         if len(raw_vectors) != len(unique_inputs):
             raise ToolError("embedding provider returned the wrong vector count")
@@ -809,10 +801,14 @@ async def _index_sources(
 
         with connection:
             for remove_path in sorted(remove_paths):
-                connection.execute("DELETE FROM documents WHERE path = ?", (remove_path,))
+                connection.execute(
+                    "DELETE FROM documents WHERE path = ?", (remove_path,)
+                )
 
             for snapshot, reusable in changed_snapshots:
-                connection.execute("DELETE FROM documents WHERE path = ?", (snapshot.path,))
+                connection.execute(
+                    "DELETE FROM documents WHERE path = ?", (snapshot.path,)
+                )
                 connection.execute(
                     """
                     INSERT INTO documents(path, content_hash, size, mtime_ns, chunk_config)
@@ -865,8 +861,12 @@ async def _index_sources(
                     (vector_identity, dim, payload, target_id),
                 )
 
-        total_files = int(connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
-        total_chunks = int(connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+        total_files = int(
+            connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        )
+        total_chunks = int(
+            connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        )
         _save_index(base, path, connection)
         report = (
             f"indexed files={total_files} "
@@ -929,9 +929,7 @@ def _stale_state(
         # clock. Verify the content hash so stale text is never cited merely
         # because size/mtime happen to match.
         try:
-            payload, _ = _read_source_bytes(
-                base, full, max_bytes=max_source_bytes
-            )
+            payload, _ = _read_source_bytes(base, full, max_bytes=max_source_bytes)
             current_hash = hashlib.sha256(payload).hexdigest()
         except (OSError, PathEscapeError):
             changed.add(path)
@@ -950,7 +948,7 @@ def _stale_state(
             continue
         if full.suffix.lower() == ".pdf":
             try:
-                import fitz  # type: ignore[import-not-found]
+                import fitz
 
                 with fitz.open(stream=payload, filetype="pdf"):
                     pass
@@ -971,7 +969,9 @@ def _stale_state(
     )
 
 
-def _row_hit(row: sqlite3.Row, score: float, *, semantic: float | None = None) -> _SearchHit:
+def _row_hit(
+    row: sqlite3.Row, score: float, *, semantic: float | None = None
+) -> _SearchHit:
     return _SearchHit(
         chunk_id=int(row["id"]),
         path=str(row["path"]),
@@ -1025,10 +1025,7 @@ def _lexical_hits(
         ).fetchall()
     except sqlite3.OperationalError:
         return []
-    return [
-        _row_hit(row, 1.0 / rank)
-        for rank, row in enumerate(rows, start=1)
-    ]
+    return [_row_hit(row, 1.0 / rank) for rank, row in enumerate(rows, start=1)]
 
 
 def _semantic_hits(
@@ -1149,11 +1146,13 @@ async def _query_index(
             excluded=stale.excluded,
         )
         if not semantic:
-            count = int(connection.execute(
-                "SELECT COUNT(*) FROM chunks WHERE embedding_identity = ? "
-                "AND embedding IS NOT NULL",
-                (identity,),
-            ).fetchone()[0])
+            count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM chunks WHERE embedding_identity = ? "
+                    "AND embedding IS NOT NULL",
+                    (identity,),
+                ).fetchone()[0]
+            )
             total = int(connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
             if total and not count:
                 raise ToolError(
@@ -1303,7 +1302,9 @@ def _status(
                 maximum=100 * 1024 * 1024,
             ),
         )
-        indexed = int(connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
+        indexed = int(
+            connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        )
         chunks = int(connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
         identity: str | None = None
         injected = ctx.options.get(EMBEDDING_PROVIDER_KEY)
@@ -1313,13 +1314,15 @@ def _status(
             identity = embedding_identity(options)
         embedded = 0
         if identity is not None:
-            embedded = int(connection.execute(
-                """
+            embedded = int(
+                connection.execute(
+                    """
                 SELECT COUNT(*) FROM chunks
                 WHERE embedding_identity = ? AND embedding IS NOT NULL
                 """,
-                (identity,),
-            ).fetchone()[0])
+                    (identity,),
+                ).fetchone()[0]
+            )
         return (
             f"{prefix}, indexed files={indexed}, chunks={chunks}, "
             f"embedded chunks={embedded}, stale files={stale.count}"
@@ -1344,11 +1347,13 @@ class KnowledgeArgs(BaseModel):
     )
 
 
-@tool(description=(
-    "Search the knowledge corpus of workspace files. Use `query` to find "
-    "relevant, source-cited excerpts; `index` to incrementally build/update an "
-    "opt-in semantic index; and `status` to inspect index freshness."
-))
+@tool(
+    description=(
+        "Search the knowledge corpus of workspace files. Use `query` to find "
+        "relevant, source-cited excerpts; `index` to incrementally build/update an "
+        "opt-in semantic index; and `status` to inspect index freshness."
+    )
+)
 async def knowledge(args: KnowledgeArgs, ctx: ToolContext) -> str:
     options = _knowledge_options(ctx)
     backend = _backend(options)
@@ -1361,9 +1366,7 @@ async def knowledge(args: KnowledgeArgs, ctx: ToolContext) -> str:
     if args.action == "index":
         if backend == "grep":
             return "grep backend needs no index; query directly"
-        return await _index_sources(
-            ctx, options, sources, _selector_list(args.paths)
-        )
+        return await _index_sources(ctx, options, sources, _selector_list(args.paths))
 
     if args.action == "query":
         if not args.query or not args.query.strip():

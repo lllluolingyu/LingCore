@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+import lingcore.tools.builtin  # noqa: F401  (registers builtins first)
 from lingcore.agent import Agent
 from lingcore.composer import ComposeContext
 from lingcore.config import AgentProfile
@@ -24,14 +25,11 @@ from lingcore.skills import load_skill_tools, load_skills
 from lingcore.tools import REGISTRY
 from tests.fakes import FakeLLMClient, ScriptedTurn
 
-import lingcore.tools.builtin  # noqa: F401  (registers builtins first)
-
-
 # --------------------------------------------------------------------------- #
 # Fixtures for writing tmp skills that ship code                              #
 # --------------------------------------------------------------------------- #
 
-_TOOL_SRC = '''\
+_TOOL_SRC = """\
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -46,7 +44,7 @@ class {model}(BaseModel):
 @tool(name="{tool}", description="echo the input")
 async def {fn}({arg}: {model}, ctx: ToolContext) -> str:
     return "echo:" + {arg}.text
-'''
+"""
 
 
 def _write_skill(
@@ -88,6 +86,7 @@ def _write_skill(
 # --------------------------------------------------------------------------- #
 # load_skill_tools                                                            #
 # --------------------------------------------------------------------------- #
+
 
 def test_skill_ships_tool_registers(tmp_path):
     skills_dir = _write_skill(tmp_path / "skills", "shipper_reg", tool_name="echo_reg")
@@ -226,6 +225,7 @@ def test_provides_without_module_rejected(tmp_path):
 # from_profile integration: reorder + always-on exposure + ceiling           #
 # --------------------------------------------------------------------------- #
 
+
 def _profile_dir(
     tmp_path, *, skill_name, tool_name, profile_tools, declare_skill=True
 ) -> Path:
@@ -253,13 +253,15 @@ async def test_from_profile_authorizes_and_advertises_skill_tool(tmp_path):
     root = _profile_dir(
         tmp_path, skill_name="echoerA", tool_name="echo_a", profile_tools=["echo_a"]
     )
-    llm = FakeLLMClient([
-        ScriptedTurn(
-            tool_calls=[ToolCall(id="c1", name="echo_a", arguments={"text": "hi"})],
-            finish_reason="tool_calls",
-        ),
-        ScriptedTurn(text="done"),
-    ])
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(
+                tool_calls=[ToolCall(id="c1", name="echo_a", arguments={"text": "hi"})],
+                finish_reason="tool_calls",
+            ),
+            ScriptedTurn(text="done"),
+        ]
+    )
     # The load-bearing assertion: subset() does NOT raise on the skill-shipped
     # name because its code was imported before subset (the reorder).
     agent = Agent.from_profile(AgentProfile.load(root), llm=llm)
@@ -269,7 +271,11 @@ async def test_from_profile_authorizes_and_advertises_skill_tool(tmp_path):
     # Always-on: advertised from the very first request (no activate_skill needed).
     assert "echo_a" in {s["function"]["name"] for s in llm.tool_schemas[0]}
     # And it dispatches.
-    res = [e for e in events if isinstance(e, ToolResultEvent) and e.result.name == "echo_a"]
+    res = [
+        e
+        for e in events
+        if isinstance(e, ToolResultEvent) and e.result.name == "echo_a"
+    ]
     assert res and res[0].result.ok is True and "echo:hi" in res[0].result.content
 
 
@@ -277,8 +283,12 @@ async def test_static_skill_instructions_in_prompt_from_turn0(tmp_path):
     root = _profile_dir(
         tmp_path, skill_name="echoerB", tool_name="echo_b", profile_tools=["echo_b"]
     )
-    agent = Agent.from_profile(AgentProfile.load(root), llm=FakeLLMClient([ScriptedTurn(text="hi")]))
-    prompt = await agent.composer.compose(ComposeContext(user_message="hi", turn_index=0))
+    agent = Agent.from_profile(
+        AgentProfile.load(root), llm=FakeLLMClient([ScriptedTurn(text="hi")])
+    )
+    prompt = await agent.composer.compose(
+        ComposeContext(user_message="hi", turn_index=0)
+    )
     assert "use it well" in prompt  # the skill.md body became a prompt layer
 
 
@@ -288,18 +298,24 @@ async def test_ceiling_binds_skill_tool_not_in_profile_tools(tmp_path):
     root = _profile_dir(
         tmp_path, skill_name="echoerC", tool_name="echo_c", profile_tools=[]
     )
-    llm = FakeLLMClient([
-        ScriptedTurn(
-            tool_calls=[ToolCall(id="c1", name="echo_c", arguments={"text": "x"})],
-            finish_reason="tool_calls",
-        ),
-        ScriptedTurn(text="done"),
-    ])
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(
+                tool_calls=[ToolCall(id="c1", name="echo_c", arguments={"text": "x"})],
+                finish_reason="tool_calls",
+            ),
+            ScriptedTurn(text="done"),
+        ]
+    )
     agent = Agent.from_profile(AgentProfile.load(root), llm=llm)
-    assert "echo_c" not in agent.tools.names()          # not authorized
+    assert "echo_c" not in agent.tools.names()  # not authorized
     events = await _drain(agent, "go")
     assert "echo_c" not in {s["function"]["name"] for s in (llm.tool_schemas[0] or [])}
-    res = [e for e in events if isinstance(e, ToolResultEvent) and e.result.name == "echo_c"]
+    res = [
+        e
+        for e in events
+        if isinstance(e, ToolResultEvent) and e.result.name == "echo_c"
+    ]
     assert res and res[0].result.ok is False and "unknown tool" in res[0].result.content
 
 
@@ -310,9 +326,7 @@ async def test_static_skill_unlocks_gated_requested_tools(tmp_path):
     # gated. (A static skill used to be unable to unlock anything: SkillState
     # only existed for the dynamic activate_skill path.)
     root = tmp_path / "prof"
-    _write_skill(
-        root / "skills", "readerD", module=None, requested_tools=["read_file"]
-    )
+    _write_skill(root / "skills", "readerD", module=None, requested_tools=["read_file"])
     (root / "config.yaml").write_text(
         "name: t\n"
         "llm:\n  model: gpt-4o\n"
@@ -321,13 +335,17 @@ async def test_static_skill_unlocks_gated_requested_tools(tmp_path):
         "initial_tools: []\n",
         encoding="utf-8",
     )
-    llm = FakeLLMClient([
-        ScriptedTurn(
-            tool_calls=[ToolCall(id="c1", name="read_file", arguments={"path": "hello.txt"})],
-            finish_reason="tool_calls",
-        ),
-        ScriptedTurn(text="done"),
-    ])
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(
+                tool_calls=[
+                    ToolCall(id="c1", name="read_file", arguments={"path": "hello.txt"})
+                ],
+                finish_reason="tool_calls",
+            ),
+            ScriptedTurn(text="done"),
+        ]
+    )
     agent = Agent.from_profile(AgentProfile.load(root), llm=llm)
     # The static grant lands in the initially-enabled set: requested ∩ ceiling.
     assert agent.initial_tools == frozenset({"read_file"})
@@ -344,7 +362,8 @@ def test_unknown_declared_skill_raises(tmp_path):
     root = tmp_path / "prof2"
     root.mkdir()
     (root / "config.yaml").write_text(
-        "name: t\nllm:\n  model: gpt-4o\nskills:\n  - nope\ntools: []\n", encoding="utf-8"
+        "name: t\nllm:\n  model: gpt-4o\nskills:\n  - nope\ntools: []\n",
+        encoding="utf-8",
     )
     with pytest.raises(ConfigError, match="unknown skill"):
         Agent.from_profile(AgentProfile.load(root), llm=FakeLLMClient([ScriptedTurn()]))
@@ -375,5 +394,5 @@ async def test_activate_skill_only_offers_usable_skills(tmp_path):
     )
     assert agent.skill_state is not None
     offered = set(agent.skill_state.skills)
-    assert "usable" in offered           # use_tool is in tools: → grantable
+    assert "usable" in offered  # use_tool is in tools: → grantable
     assert "ungrantable" not in offered  # hidden_tool absent → nothing to grant

@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-import signal
 import shlex
+import signal
 
 from pydantic import BaseModel, Field
 
@@ -36,7 +36,20 @@ _DEFAULT_TIMEOUT = 60
 # memory before the timeout fires.
 _MAX_CAPTURE_BYTES = 10 * 1024 * 1024
 _SHELL_CONTROL_TOKENS = (
-    ";", "&&", "&", "||", "|", "<", ">", "\n", "\r", "`", "$(", "${", "(", ")"
+    ";",
+    "&&",
+    "&",
+    "||",
+    "|",
+    "<",
+    ">",
+    "\n",
+    "\r",
+    "`",
+    "$(",
+    "${",
+    "(",
+    ")",
 )
 
 

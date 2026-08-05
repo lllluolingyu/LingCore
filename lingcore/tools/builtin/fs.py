@@ -124,9 +124,7 @@ async def read_file(args: ReadArgs, ctx: ToolContext) -> str | ToolOutput:
         )
     data = full.read_bytes()
     if len(data) > _MAX_READ_BYTES:
-        raise ToolError(
-            f"file too large ({len(data)} bytes; limit {_MAX_READ_BYTES})"
-        )
+        raise ToolError(f"file too large ({len(data)} bytes; limit {_MAX_READ_BYTES})")
     if is_probably_binary(data):
         raise ToolError(
             "binary file; not readable as text — inspect it with shell tools if available"
@@ -194,9 +192,7 @@ async def list_dir(args: ListArgs, ctx: ToolContext) -> str:
         raise ToolError(f"not a directory: {args.path!r}")
     opts = ctx.options.get("list_dir", {}) if ctx.options else {}
     max_entries = int(opts.get("max_entries", _LIST_MAX_ENTRIES))
-    entries = sorted(
-        f"{p.name}/" if p.is_dir() else p.name for p in full.iterdir()
-    )
+    entries = sorted(f"{p.name}/" if p.is_dir() else p.name for p in full.iterdir())
     if not entries:
         return "(empty)"
     shown = entries[:max_entries]

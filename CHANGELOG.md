@@ -7,6 +7,12 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ### Added
 
+- `lingcore profile list/init`, an explicit clean wheel-template manifest, and
+  atomic initialization into writable per-user application state.
+- Profile-selected guardrails through dotted Python targets or the
+  `lingcore.guardrails` entry-point group, including constructor options.
+- Ruff lint/format and package-wide mypy gates, plus a LingChat-main
+  compatibility job on every LingCore change.
 - First-party Telegram Bot API channel in the main package, installable with
   `lingcore[telegram]`, with polling and single-process webhook runners.
 - Allowlisted private-chat routing, per-user workspaces/memory/session stores,
@@ -18,6 +24,11 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ### Changed
 
+- `WindowMemory` resolves tiktoken lazily and falls back to a deterministic
+  UTF-8 byte-ratio estimate when encoding data is unavailable offline.
+- Release wheels include immutable profile templates and a `py.typed` marker;
+  writable workspaces, memory, and sessions are created only in initialized
+  external/user-state profiles.
 - The CLI dispatches Telegram synchronously before `asyncio.run`, allowing PTB
   to own its event loop and signal handlers.
 - `Agent.turn_pending_finalization` exposes the cancellation readiness check as

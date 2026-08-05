@@ -16,11 +16,10 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+import lingcore.tools.builtin  # noqa: F401
 from lingcore.errors import ToolError
 from lingcore.paths import ConfinedDirectory
 from lingcore.tools import ToolContext
-
-import lingcore.tools.builtin  # noqa: F401
 
 _CANVAS_PATH = (
     Path(__file__).parent.parent / "lingcore" / "skills" / "canvas" / "canvas_tools.py"
@@ -33,7 +32,7 @@ def _load_canvas():
     name. A later ``from_profile`` that loads the teaching profile then
     re-imports the same path idempotently instead of colliding on the canvas
     tool names in the process-global REGISTRY (test isolation)."""
-    from lingcore.skills import load_skills, load_skill_tools
+    from lingcore.skills import load_skill_tools, load_skills
 
     bundled = Path(__file__).parent.parent / "lingcore" / "skills"
     skills = load_skills([bundled])
@@ -71,6 +70,7 @@ def _token(monkeypatch):
 # Config / credential handling                                                #
 # --------------------------------------------------------------------------- #
 
+
 async def test_missing_token_is_toolerror(tmp_path, monkeypatch):
     monkeypatch.delenv("CANVAS_TEST_TOKEN", raising=False)
     with pytest.raises(ToolError, match=r"token.*\.env"):
@@ -94,7 +94,9 @@ async def test_profile_environment_overrides_exported_token(tmp_path):
 
 
 async def test_missing_base_url_is_toolerror(tmp_path):
-    ctx = ToolContext(workspace=tmp_path, options={"canvas": {"token_env": "CANVAS_TEST_TOKEN"}})
+    ctx = ToolContext(
+        workspace=tmp_path, options={"canvas": {"token_env": "CANVAS_TEST_TOKEN"}}
+    )
     with pytest.raises(ToolError, match="base_url|not configured"):
         await canvas.canvas_courses(canvas.CoursesArgs(), ctx)
 
@@ -133,10 +135,18 @@ async def test_download_omits_token_off_origin(tmp_path):
         if p.endswith("/folders"):
             return httpx.Response(200, json=[])
         if p.endswith("/files"):
-            return httpx.Response(200, json=[
-                {"id": 7, "display_name": "lecture.pdf", "folder_id": None,
-                 "size": len(body), "url": "https://files.test/lecture.pdf"},
-            ])
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 7,
+                        "display_name": "lecture.pdf",
+                        "folder_id": None,
+                        "size": len(body),
+                        "url": "https://files.test/lecture.pdf",
+                    },
+                ],
+            )
         if request.url.host == "files.test":
             seen["file_auth"] = request.headers.get("authorization")
             return httpx.Response(200, content=body)
@@ -159,10 +169,18 @@ async def test_download_sends_token_on_origin(tmp_path):
         if p.endswith("/folders"):
             return httpx.Response(200, json=[])
         if p.endswith("/files"):
-            return httpx.Response(200, json=[
-                {"id": 7, "display_name": "lecture.pdf", "folder_id": None,
-                 "size": len(body), "url": "https://canvas.test:443/files/7/download"},
-            ])
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 7,
+                        "display_name": "lecture.pdf",
+                        "folder_id": None,
+                        "size": len(body),
+                        "url": "https://canvas.test:443/files/7/download",
+                    },
+                ],
+            )
         if "/files/7/download" in p:
             seen["file_auth"] = request.headers.get("authorization")
             return httpx.Response(200, content=body)
@@ -177,7 +195,8 @@ async def test_pagination_off_origin_link_refused(tmp_path):
     # A next-link pointing off the Canvas origin is refused (credential leak).
     def handler(request):
         return httpx.Response(
-            200, json=[{"id": 1, "name": "Bio"}],
+            200,
+            json=[{"id": 1, "name": "Bio"}],
             headers={"Link": '<https://evil.test/api/v1/courses?page=2>; rel="next"'},
         )
 
@@ -190,14 +209,19 @@ async def test_pagination_off_origin_link_refused(tmp_path):
 # Pagination + course filter                                                  #
 # --------------------------------------------------------------------------- #
 
+
 async def test_courses_pagination_follows_next(tmp_path):
     def handler(request):
         if request.url.params.get("page") == "2":
-            return httpx.Response(200, json=[{"id": 2, "name": "Chem", "course_code": "CHEM"}])
+            return httpx.Response(
+                200, json=[{"id": 2, "name": "Chem", "course_code": "CHEM"}]
+            )
         return httpx.Response(
             200,
             json=[{"id": 1, "name": "Bio", "course_code": "BIO"}],
-            headers={"Link": '<https://canvas.test:443/api/v1/courses?page=2>; rel="next"'},
+            headers={
+                "Link": '<https://canvas.test:443/api/v1/courses?page=2>; rel="next"'
+            },
         )
 
     with _patch_canvas(handler):
@@ -213,7 +237,9 @@ async def test_course_ids_filter(tmp_path):
         )
 
     with _patch_canvas(handler):
-        out = await canvas.canvas_courses(canvas.CoursesArgs(), _ctx(tmp_path, course_ids=[2]))
+        out = await canvas.canvas_courses(
+            canvas.CoursesArgs(), _ctx(tmp_path, course_ids=[2])
+        )
     assert "Chem" in out and "Bio" not in out
 
 
@@ -221,16 +247,36 @@ async def test_course_ids_filter(tmp_path):
 # Assignments                                                                 #
 # --------------------------------------------------------------------------- #
 
+
 async def test_assignments_drops_unpublished_and_sorts(tmp_path):
     def handler(request):
         if request.url.path.endswith("/courses"):
             return httpx.Response(200, json=[{"id": 1, "name": "Bio"}])
         if request.url.path.endswith("/assignments"):
-            return httpx.Response(200, json=[
-                {"id": 9, "name": "Hidden", "published": False, "due_at": "2026-01-01"},
-                {"id": 10, "name": "Later", "published": True, "due_at": "2026-12-01", "points_possible": 5},
-                {"id": 11, "name": "Sooner", "published": True, "due_at": "2026-06-01"},
-            ])
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 9,
+                        "name": "Hidden",
+                        "published": False,
+                        "due_at": "2026-01-01",
+                    },
+                    {
+                        "id": 10,
+                        "name": "Later",
+                        "published": True,
+                        "due_at": "2026-12-01",
+                        "points_possible": 5,
+                    },
+                    {
+                        "id": 11,
+                        "name": "Sooner",
+                        "published": True,
+                        "due_at": "2026-06-01",
+                    },
+                ],
+            )
         return httpx.Response(404)
 
     with _patch_canvas(handler):
@@ -244,6 +290,7 @@ async def test_assignments_drops_unpublished_and_sorts(tmp_path):
 # --------------------------------------------------------------------------- #
 # Sync: download, skip-if-unchanged, confinement                              #
 # --------------------------------------------------------------------------- #
+
 
 def test_confined_rejects_escape(tmp_path):
     with pytest.raises(ToolError, match="escapes workspace"):
@@ -262,12 +309,25 @@ async def test_sync_downloads_then_skips(tmp_path):
         if p.endswith("/folders"):
             return httpx.Response(200, json=[])
         if p.endswith("/files"):
-            return httpx.Response(200, json=[
-                {"id": 7, "display_name": "lecture.pdf", "folder_id": None,
-                 "size": len(body), "url": "https://files.test/lecture.pdf"},
-                {"id": 8, "display_name": "skip.txt", "folder_id": None,
-                 "size": 3, "url": "https://files.test/skip.txt"},
-            ])
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 7,
+                        "display_name": "lecture.pdf",
+                        "folder_id": None,
+                        "size": len(body),
+                        "url": "https://files.test/lecture.pdf",
+                    },
+                    {
+                        "id": 8,
+                        "display_name": "skip.txt",
+                        "folder_id": None,
+                        "size": 3,
+                        "url": "https://files.test/skip.txt",
+                    },
+                ],
+            )
         if "lecture.pdf" in p:
             return httpx.Response(200, content=body)
         return httpx.Response(404)
@@ -301,10 +361,18 @@ async def test_sync_part_symlink_does_not_redirect_download(tmp_path):
         if p.endswith("/folders"):
             return httpx.Response(200, json=[])
         if p.endswith("/files"):
-            return httpx.Response(200, json=[
-                {"id": 7, "display_name": "lecture.pdf", "folder_id": None,
-                 "size": len(body), "url": "https://files.test/lecture.pdf"},
-            ])
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 7,
+                        "display_name": "lecture.pdf",
+                        "folder_id": None,
+                        "size": len(body),
+                        "url": "https://files.test/lecture.pdf",
+                    },
+                ],
+            )
         if "lecture.pdf" in p:
             return httpx.Response(200, content=body)
         return httpx.Response(404)
@@ -337,10 +405,18 @@ async def test_sync_parent_swap_cannot_redirect_download(tmp_path, monkeypatch):
         if p.endswith("/folders"):
             return httpx.Response(200, json=[])
         if p.endswith("/files"):
-            return httpx.Response(200, json=[
-                {"id": 7, "display_name": "lecture.pdf", "folder_id": None,
-                 "size": len(body), "url": "https://files.test/lecture.pdf"},
-            ])
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 7,
+                        "display_name": "lecture.pdf",
+                        "folder_id": None,
+                        "size": len(body),
+                        "url": "https://files.test/lecture.pdf",
+                    },
+                ],
+            )
         if "lecture.pdf" in p:
             return httpx.Response(200, content=body)
         return httpx.Response(404)
@@ -384,10 +460,18 @@ async def test_sync_reports_download_error(tmp_path):
         if p.endswith("/folders"):
             return httpx.Response(200, json=[])
         if p.endswith("/files"):
-            return httpx.Response(200, json=[
-                {"id": 7, "display_name": "broken.pdf", "folder_id": None,
-                 "size": 10, "url": "https://files.test/broken.pdf"},
-            ])
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 7,
+                        "display_name": "broken.pdf",
+                        "folder_id": None,
+                        "size": 10,
+                        "url": "https://files.test/broken.pdf",
+                    },
+                ],
+            )
         return httpx.Response(500)  # the download fails
 
     with _patch_canvas(handler):
@@ -400,6 +484,7 @@ async def test_sync_reports_download_error(tmp_path):
 # --------------------------------------------------------------------------- #
 # Helpers                                                                     #
 # --------------------------------------------------------------------------- #
+
 
 def test_next_link_parsing():
     hdr = '<https://c/api/v1/x?page=2>; rel="next", <https://c/api/v1/x?page=9>; rel="last"'
@@ -434,6 +519,7 @@ def test_folder_path_reconstruction():
 # End-to-end: the real teaching profile builds in this (already-polluted) proc #
 # --------------------------------------------------------------------------- #
 
+
 async def test_teaching_profile_loads_without_collision(tmp_path, monkeypatch):
     # This module already registered the canvas tools at import time (the
     # ``canvas = _load_canvas()`` above). Building the *real* teaching profile
@@ -446,9 +532,7 @@ async def test_teaching_profile_loads_without_collision(tmp_path, monkeypatch):
     from tests.fakes import FakeLLMClient, ScriptedTurn
 
     monkeypatch.setenv("LLY_API_KEY", "dummy")
-    prof = AgentProfile.load(
-        Path(__file__).parent.parent / "profiles" / "teaching"
-    )
+    prof = AgentProfile.load(Path(__file__).parent.parent / "profiles" / "teaching")
     # Keep the auto-created default workspace out of the real profile dir.
     prof.workspace = str(tmp_path)
     agent = Agent.from_profile(prof, llm=FakeLLMClient([ScriptedTurn(text="hi")]))

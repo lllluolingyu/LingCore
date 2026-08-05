@@ -72,9 +72,7 @@ def offload_text(
         # rename. A concurrent parent swap therefore fails closed instead of
         # redirecting this internal artifact outside the workspace, while the
         # unique temporary entry keeps the published content-hash file atomic.
-        with confined_directory(
-            ctx.workspace, directory_rel, create=True
-        ) as directory:
+        with confined_directory(ctx.workspace, directory_rel, create=True) as directory:
             if not directory.same_bytes(filename, payload):
                 part = f".{filename}.{secrets.token_hex(8)}.part"
                 try:

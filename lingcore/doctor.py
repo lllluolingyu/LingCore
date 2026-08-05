@@ -44,9 +44,7 @@ class DoctorReport:
 
     @property
     def warnings(self) -> tuple[DoctorFinding, ...]:
-        return tuple(
-            finding for finding in self.findings if finding.level == "warning"
-        )
+        return tuple(finding for finding in self.findings if finding.level == "warning")
 
     @property
     def exit_code(self) -> int:
@@ -175,9 +173,7 @@ def _example_findings(path: Path, required: set[str]) -> list[DoctorFinding]:
         parsed = dotenv_values(path, interpolate=False, encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         return [
-            DoctorFinding(
-                "warning", f"could not read .env.example at {path}: {exc}"
-            )
+            DoctorFinding("warning", f"could not read .env.example at {path}: {exc}")
         ]
     missing = sorted(required - set(parsed))
     if missing:
@@ -209,9 +205,7 @@ def diagnose_profile(
     ]
 
     if source_dir is None:
-        findings.append(
-            DoctorFinding("warning", "profile has no source directory")
-        )
+        findings.append(DoctorFinding("warning", "profile has no source directory"))
     else:
         env_path = source_dir / ".env"
         if env_path.is_file():
@@ -224,21 +218,17 @@ def diagnose_profile(
             )
 
     requirements, example_names, config_errors = _profile_requirements(profile)
-    for raw_name, raw_consumers in (
-        additional_environment_requirements or {}
-    ).items():
+    for raw_name, raw_consumers in (additional_environment_requirements or {}).items():
         name = raw_name.strip()
         if not name:
             config_errors.append(
                 "an additional environment requirement has an empty name"
             )
             continue
-        consumers = (
-            [raw_consumers]
-            if isinstance(raw_consumers, str)
-            else list(raw_consumers)
+        additional_consumers = (
+            [raw_consumers] if isinstance(raw_consumers, str) else list(raw_consumers)
         )
-        for consumer in consumers:
+        for consumer in additional_consumers:
             _add_requirement(requirements, name, str(consumer))
         example_names.add(name)
     findings.extend(DoctorFinding("error", message) for message in config_errors)
@@ -273,15 +263,11 @@ def diagnose_profile(
             )
         else:
             findings.append(
-                DoctorFinding(
-                    "error", f"{name} is missing (required by {used_by})"
-                )
+                DoctorFinding("error", f"{name} is missing (required by {used_by})")
             )
 
     if source_dir is not None:
-        findings.extend(
-            _example_findings(source_dir / ".env.example", example_names)
-        )
+        findings.extend(_example_findings(source_dir / ".env.example", example_names))
     return DoctorReport(profile_name=profile.name, findings=tuple(findings))
 
 

@@ -88,12 +88,15 @@ async def test_compose_called_per_iteration(tmp_path: Path):
 
     reg = ToolRegistry()
     call = ToolCall(id="c1", name="read_file", arguments={"path": "x.txt"})
-    llm = FakeLLMClient([
-        ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
-        ScriptedTurn(text="done"),
-    ])
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
+            ScriptedTurn(text="done"),
+        ]
+    )
     (tmp_path / "x.txt").write_text("hello", encoding="utf-8")
     from lingcore.tools import REGISTRY
+
     reg.register(REGISTRY.get("read_file"))
 
     agent = Agent(
@@ -106,7 +109,7 @@ async def test_compose_called_per_iteration(tmp_path: Path):
 
     # Write memory AFTER first compose call to verify the second call picks it up.
     mem.write_text("## note\nremembered", encoding="utf-8")
-    events = [ev async for ev in agent.run("go")]
+    [ev async for ev in agent.run("go")]
 
     # Second LLM call must have seen the memory content in the system prompt.
     second_system = llm.calls[1][0]  # first message is system

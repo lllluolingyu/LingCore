@@ -76,9 +76,7 @@ class ConfirmationManager:
             )
             for chunk in chunks[:-1]:
                 await sender.send_message(chat_id, chunk)
-            sent = await sender.send_message(
-                chat_id, chunks[-1], reply_markup=buttons
-            )
+            sent = await sender.send_message(chat_id, chunks[-1], reply_markup=buttons)
             pending.message_id = message_id(sent)
             return await future
         finally:
@@ -112,7 +110,11 @@ class ConfirmationManager:
 
     async def deny_user(self, user_id: int) -> None:
         await self._deny(
-            [pending for pending in self._pending.values() if pending.user_id == user_id]
+            [
+                pending
+                for pending in self._pending.values()
+                if pending.user_id == user_id
+            ]
         )
 
     async def deny_all(self) -> None:

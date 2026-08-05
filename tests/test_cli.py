@@ -94,10 +94,12 @@ async def test_run_session_ends_on_none(tmp_path, monkeypatch):
 async def test_run_session_closes_turn_when_render_raises(tmp_path, monkeypatch):
     monkeypatch.setenv("SMOKE_WS", str(tmp_path))
     prof = _profile(tmp_path)
-    llm = FakeLLMClient([
-        ScriptedTurn(text="discarded"),
-        ScriptedTurn(text="recovered"),
-    ])
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(text="discarded"),
+            ScriptedTurn(text="recovered"),
+        ]
+    )
     agent = Agent.from_profile(prof, llm=llm, base_dir=tmp_path)
 
     class FailingFrontend(ScriptedFrontend):
@@ -130,12 +132,16 @@ async def test_session_shell_confirm_flows_to_frontend(tmp_path, monkeypatch):
     prof = _profile(tmp_path)
 
     call = ToolCall(id="c1", name="run_shell", arguments={"command": "echo hi"})
-    llm = FakeLLMClient([
-        ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
-        ScriptedTurn(text="done"),
-    ])
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
+            ScriptedTurn(text="done"),
+        ]
+    )
     frontend = ScriptedFrontend(inputs=["run echo"], confirm_answer=True)
-    agent = Agent.from_profile(prof, confirm=frontend.confirm, llm=llm, base_dir=tmp_path)
+    agent = Agent.from_profile(
+        prof, confirm=frontend.confirm, llm=llm, base_dir=tmp_path
+    )
 
     await run_session(agent, frontend)
 
@@ -152,12 +158,16 @@ async def test_session_shell_denied(tmp_path, monkeypatch):
     prof = _profile(tmp_path)
 
     call = ToolCall(id="c1", name="run_shell", arguments={"command": "rm -rf /"})
-    llm = FakeLLMClient([
-        ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
-        ScriptedTurn(text="ok, skipped"),
-    ])
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(tool_calls=[call], finish_reason="tool_calls"),
+            ScriptedTurn(text="ok, skipped"),
+        ]
+    )
     frontend = ScriptedFrontend(inputs=["do something scary"], confirm_answer=False)
-    agent = Agent.from_profile(prof, confirm=frontend.confirm, llm=llm, base_dir=tmp_path)
+    agent = Agent.from_profile(
+        prof, confirm=frontend.confirm, llm=llm, base_dir=tmp_path
+    )
 
     await run_session(agent, frontend)
 
@@ -174,10 +184,20 @@ def test_cli_renders_all_event_types_without_error():
     cli.console.quiet = True  # swallow output
     cli.render(TextDelta("hello "))
     cli.render(TextDelta("world"))
-    cli.render(ToolCallStarted(ToolCall(id="c", name="read_file", arguments={"path": "a"})))
-    cli.render(ToolResultEvent(ToolResult(call_id="c", name="read_file", content="data")))
-    cli.render(StreamRetry(attempt=1, max_attempts=3,
-                           reason="stream interrupted: [boom]", discarded_chars=11))
+    cli.render(
+        ToolCallStarted(ToolCall(id="c", name="read_file", arguments={"path": "a"}))
+    )
+    cli.render(
+        ToolResultEvent(ToolResult(call_id="c", name="read_file", content="data"))
+    )
+    cli.render(
+        StreamRetry(
+            attempt=1,
+            max_attempts=3,
+            reason="stream interrupted: [boom]",
+            discarded_chars=11,
+        )
+    )
     cli.render(Final("hello world"))
     cli.render(Error("something broke"))
     # If we got here, all event branches rendered without raising.
@@ -191,7 +211,9 @@ def test_cli_escapes_model_controlled_markup():
     cli = CLIFrontend(agent_name="t")
     cli.console = Console(record=True, width=240)
     cli.render(TextDelta("[bold red]spoof[/] and [unbalanced"))
-    cli.render(ToolResultEvent(ToolResult(call_id="c", name="tool", content="[link=x]y")))
+    cli.render(
+        ToolResultEvent(ToolResult(call_id="c", name="tool", content="[link=x]y"))
+    )
     out = cli.console.export_text()
     assert "[bold red]spoof[/]" in out  # rendered literally, not as styling
     assert "[unbalanced" in out
