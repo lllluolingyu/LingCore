@@ -1,0 +1,68 @@
+name: Trusted sandbox E2E
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "lingcore/sandbox.py"
+      - "lingcore/_sandbox_watchdog.py"
+      - "lingcore/tools/builtin/shell.py"
+      - "tests/test_shell_sandbox_e2e.py"
+      - ".github/workflows/sandbox-e2e.yml"
+
+permissions:
+  contents: read
+
+# Self-hosted runners are never exposed to pull-request code. The custom
+# Windows labels distinguish Docker Desktop Linux mode from native Windows
+# containers with Hyper-V enabled. LINGCORE_WINDOWS_IMAGE is a repository
+# variable naming an image compatible with that runner fleet's host build.
+jobs:
+  sandbox:
+    if: >-
+      github.repository_owner == 'lllluolingyu' &&
+      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main')
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux · Bubblewrap
+            labels: '["self-hosted", "sandbox", "Linux"]'
+            mode: bubblewrap
+          - name: Linux · Docker
+            labels: '["self-hosted", "sandbox", "Linux"]'
+            mode: docker-linux
+          - name: Linux · Podman
+            labels: '["self-hosted", "sandbox", "Linux"]'
+            mode: podman-linux
+          - name: macOS · Docker Desktop
+            labels: '["self-hosted", "sandbox", "macOS"]'
+            mode: docker-linux
+          - name: macOS · Podman machine
+            labels: '["self-hosted", "sandbox", "macOS"]'
+            mode: podman-linux
+          - name: Windows · Docker Desktop Linux
+            labels: '["self-hosted", "sandbox", "Windows", "windows-linux-containers"]'
+            mode: docker-linux
+          - name: Windows · Podman machine
+            labels: '["self-hosted", "sandbox", "Windows", "windows-linux-containers"]'
+            mode: podman-linux
+          - name: Windows · Docker Hyper-V native
+            labels: '["self-hosted", "sandbox", "Windows", "windows-hyperv-containers"]'
+            mode: docker-windows
+    runs-on: ${{ fromJSON(matrix.labels) }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.13
+      - run: uv sync --locked --python 3.13
+      - name: Exercise real sandbox boundary
+        env:
+          LINGCORE_SANDBOX_E2E: ${{ matrix.mode }}
+          LINGCORE_WINDOWS_IMAGE: ${{ vars.LINGCORE_WINDOWS_IMAGE }}
+        run: uv run --python 3.13 pytest tests/test_shell_sandbox_e2e.py -q

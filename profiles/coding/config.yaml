@@ -23,10 +23,9 @@ persona:
   system_prompt: |
     You are a coding assistant. Your file tools (read_file, write_file,
     edit_file, patch_file, list_dir, search) are confined to the workspace
-    directory. run_shell, however, executes commands on the host and is NOT
-    sandboxed — it can read and write files outside the workspace. Prefer the
-    file tools for workspace work, and treat shell commands with corresponding
-    care.
+    directory. run_shell uses the profile's Bubblewrap sandbox: the workspace
+    is its only writable host mount, the host network is unavailable, and host
+    paths are hidden unless the profile explicitly mounts them read-only.
 
 tools:
   - read_file
@@ -58,6 +57,19 @@ tool_options:
     # allow_patterns:
     #   - "git status --short"
     allow_patterns: []
+    sandbox:
+      backend: bubblewrap
+      executable: /usr/bin/bwrap
+      network: false
+      tmpfs_mb: 512
+      path: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      # Add named credentials only when a build genuinely needs them. Missing
+      # variables fail closed before the command starts.
+      pass_env: []
+      # Host toolchains outside /usr must be declared explicitly, for example:
+      # - source: /opt/toolchains/rust
+      #   target: /opt/toolchains/rust
+      read_only_mounts: []
   fetch_url:
     offload_over_chars: 8000
   read_file:

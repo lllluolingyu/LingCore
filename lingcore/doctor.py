@@ -9,6 +9,8 @@ never include values.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,11 +19,21 @@ from typing import Literal
 from dotenv import dotenv_values
 
 from lingcore.config import AgentProfile
-from lingcore.errors import ConfigError
+from lingcore.errors import ConfigError, ToolError
 from lingcore.knowledge import (
     DEFAULT_API_KEY_ENV,
     embedding_options,
     reranker_options,
+)
+from lingcore.sandbox import (
+    OCI_IMAGE_INSPECT_FORMAT,
+    BubblewrapSandbox,
+    OciSandbox,
+    bubblewrap_system_mount_args,
+    parse_oci_image_metadata,
+    parse_shell_options,
+    resolve_sandbox_executable,
+    sandbox_environment_names,
 )
 
 DoctorLevel = Literal["ok", "info", "warning", "error"]
@@ -148,6 +160,22 @@ def _profile_requirements(
                             "tool_options.knowledge.reranker.api_key_env",
                         )
 
+    if "run_shell" in profile.tools:
+        raw_shell = profile.tool_options.get("run_shell", {})
+        try:
+            shell = parse_shell_options(raw_shell)
+        except (TypeError, ValueError) as exc:
+            # AgentProfile normally catches this first; retaining the branch
+            # keeps diagnostics robust for programmatically constructed data.
+            config_errors.append(f"invalid tool_options.run_shell: {exc}")
+        else:
+            for name in sandbox_environment_names(shell):
+                _add_requirement(
+                    requirements,
+                    name,
+                    "tool_options.run_shell.sandbox.pass_env",
+                )
+
     example_names.update(requirements)
     return requirements, example_names, config_errors
 
@@ -184,6 +212,218 @@ def _example_findings(path: Path, required: set[str]) -> list[DoctorFinding]:
             )
         ]
     return [DoctorFinding("ok", f".env.example documents {len(required)} variable(s)")]
+
+
+def _probe(argv: list[str], *, timeout: float = 5) -> bool:
+    """Run a bounded, non-interactive local capability probe."""
+    try:
+        completed = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def _probe_output(argv: list[str], *, timeout: float = 5) -> tuple[bool, bytes]:
+    """Run a metadata probe whose successful output is intentionally bounded."""
+    try:
+        completed = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False, b""
+    return completed.returncode == 0, completed.stdout[: 256 * 1024]
+
+
+def _executable_finding(
+    path_text: str, label: str, workspace: Path
+) -> tuple[Path | None, DoctorFinding]:
+    try:
+        resolved = resolve_sandbox_executable(path_text, workspace, label)
+    except ToolError as exc:
+        return None, DoctorFinding("error", str(exc))
+    return resolved, DoctorFinding("ok", f"{label} executable: {resolved}")
+
+
+def _mount_findings(
+    backend: BubblewrapSandbox | OciSandbox,
+) -> list[DoctorFinding]:
+    findings: list[DoctorFinding] = []
+    for mount in backend.read_only_mounts:
+        if Path(mount.source).exists():
+            findings.append(
+                DoctorFinding("ok", f"sandbox mount source exists: {mount.source}")
+            )
+        else:
+            findings.append(
+                DoctorFinding(
+                    "error", f"sandbox mount source is missing: {mount.source}"
+                )
+            )
+    return findings
+
+
+def _bubblewrap_findings(
+    config: BubblewrapSandbox, workspace: Path
+) -> list[DoctorFinding]:
+    findings: list[DoctorFinding] = []
+    if not sys.platform.startswith("linux"):
+        return [
+            DoctorFinding("error", "Bubblewrap run_shell profiles require a Linux host")
+        ]
+    executable, finding = _executable_finding(
+        config.executable, "Bubblewrap", workspace
+    )
+    findings.append(finding)
+    findings.extend(_mount_findings(config))
+    if executable is None:
+        return findings
+
+    argv = [
+        str(executable),
+        "--die-with-parent",
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--unshare-cgroup-try",
+        "--disable-userns",
+        "--cap-drop",
+        "ALL",
+    ]
+    if not config.network:
+        argv.append("--unshare-net")
+    argv.extend(bubblewrap_system_mount_args())
+    argv.append("/bin/true")
+    if _probe(argv):
+        findings.append(DoctorFinding("ok", "Bubblewrap isolation probe passed"))
+    else:
+        findings.append(
+            DoctorFinding(
+                "error",
+                "Bubblewrap isolation probe failed; user/network namespaces "
+                "or the configured policy are unavailable",
+            )
+        )
+    return findings
+
+
+def _oci_findings(config: OciSandbox, workspace: Path) -> list[DoctorFinding]:
+    findings: list[DoctorFinding] = []
+    if config.container_os == "windows" and os.name != "nt":
+        findings.append(
+            DoctorFinding(
+                "error", "native Windows OCI sandboxes require a Windows host"
+            )
+        )
+    executable, finding = _executable_finding(
+        config.executable, config.runtime, workspace
+    )
+    findings.append(finding)
+    findings.extend(_mount_findings(config))
+    if executable is None:
+        return findings
+
+    if not _probe([str(executable), "info"], timeout=10):
+        findings.append(
+            DoctorFinding(
+                "error", f"{config.runtime} engine is unavailable or not responding"
+            )
+        )
+        return findings
+    findings.append(DoctorFinding("ok", f"{config.runtime} engine is responding"))
+
+    image_present = _probe(
+        [str(executable), "image", "inspect", config.image], timeout=10
+    )
+    if image_present:
+        findings.append(DoctorFinding("ok", f"OCI image is available: {config.image}"))
+        metadata_ok, metadata_output = _probe_output(
+            [
+                str(executable),
+                "image",
+                "inspect",
+                "--format",
+                OCI_IMAGE_INSPECT_FORMAT,
+                config.image,
+            ],
+            timeout=10,
+        )
+        if not metadata_ok:
+            findings.append(
+                DoctorFinding("error", "could not inspect OCI image safety metadata")
+            )
+        else:
+            try:
+                metadata = parse_oci_image_metadata(metadata_output)
+            except ValueError as exc:
+                findings.append(DoctorFinding("error", str(exc)))
+            else:
+                if metadata.os_name != config.container_os:
+                    findings.append(
+                        DoctorFinding(
+                            "error",
+                            f"OCI image reports OS {metadata.os_name!r}, expected "
+                            f"{config.container_os!r}",
+                        )
+                    )
+                if metadata.volumes:
+                    findings.append(
+                        DoctorFinding(
+                            "error",
+                            "OCI image declares unsupported writable volumes: "
+                            + ", ".join(metadata.volumes),
+                        )
+                    )
+        if config.pull == "always":
+            findings.append(
+                DoctorFinding(
+                    "info", "pull policy 'always' will refresh the image at execution"
+                )
+            )
+    elif config.pull == "never":
+        findings.append(
+            DoctorFinding(
+                "error",
+                f"OCI image is missing and pull policy is 'never': {config.image}",
+            )
+        )
+    else:
+        findings.append(
+            DoctorFinding(
+                "info",
+                f"OCI image is not local; execution will pull it: {config.image}",
+            )
+        )
+    return findings
+
+
+def _shell_sandbox_findings(profile: AgentProfile) -> list[DoctorFinding]:
+    if "run_shell" not in profile.tools:
+        return []
+    options = parse_shell_options(profile.tool_options.get("run_shell", {}))
+    if options.sandbox is None:
+        return [
+            DoctorFinding(
+                "warning",
+                "run_shell uses the legacy host runner; no OS sandbox is configured",
+            )
+        ]
+    workspace = profile.workspace_path()
+    if isinstance(options.sandbox, BubblewrapSandbox):
+        return _bubblewrap_findings(options.sandbox, workspace)
+    return _oci_findings(options.sandbox, workspace)
 
 
 def diagnose_profile(
@@ -232,6 +472,7 @@ def diagnose_profile(
             _add_requirement(requirements, name, str(consumer))
         example_names.add(name)
     findings.extend(DoctorFinding("error", message) for message in config_errors)
+    findings.extend(_shell_sandbox_findings(profile))
     for name, consumers in sorted(requirements.items()):
         used_by = ", ".join(sorted(consumers))
         if name in profile_env:

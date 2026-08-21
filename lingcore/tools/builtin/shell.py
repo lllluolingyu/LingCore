@@ -1,40 +1,23 @@
-"""The run_shell tool — the coding agent's most powerful and riskiest tool.
+"""The run_shell tool — confirmation, supervision, and bounded output.
 
-run_shell executes an arbitrary command in the workspace directory. Unlike the
-fs tools, the workspace boundary is NOT a security sandbox here: a shell
-command can `cd ..`, open a network socket, or read anything the process user
-can. The MVP mitigations are deliberately modest and layered:
-
-  * cwd is set to the workspace (a convenience boundary, not a jail);
-  * a wall-clock timeout kills the command (and its process group) on expiry;
-  * stdout/stderr are captured and truncated to a sane size;
-  * an optional confirmation gate (ctx.confirm) lets the frontend require a
-    human yes/no before each command runs.
-
-True isolation (containers, seccomp, user namespaces) is a deliberate
-post-MVP concern; this module is the plug point for it.
+Profiles may select a fail-closed sandbox backend through
+``tool_options.run_shell.sandbox``.  Omitting that block preserves the legacy
+host runner for compatibility; the result header always says which runner was
+used so the distinction cannot be mistaken.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import shlex
-import signal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from lingcore.errors import ToolError
+from lingcore.sandbox import launch_shell, parse_shell_options
 from lingcore.tools import ToolContext, tool
-from lingcore.tools.builtin._offload import DEFAULT_OFFLOAD_OVER_CHARS, offload_text
+from lingcore.tools.builtin._offload import offload_text
 
-_MAX_OUTPUT_CHARS = 16_000
-_DEFAULT_TIMEOUT = 60
-# Hard ceiling on bytes retained in memory while reading a command's output.
-# The reader keeps draining the pipe past this (so the child never blocks on a
-# full pipe) but discards the overflow, so a runaway command can't exhaust
-# memory before the timeout fires.
-_MAX_CAPTURE_BYTES = 10 * 1024 * 1024
 _SHELL_CONTROL_TOKENS = (
     ";",
     "&&",
@@ -116,14 +99,14 @@ def _matches_allowlist(command: str, patterns: list[str]) -> bool:
     )
 )
 async def run_shell(args: ShellArgs, ctx: ToolContext) -> str:
-    opts = ctx.options.get("run_shell", {}) if ctx.options else {}
-    timeout = float(opts.get("timeout", _DEFAULT_TIMEOUT))
-    require_confirmation = bool(opts.get("require_confirmation", True))
-    allow_patterns: list[str] = opts.get("allow_patterns", [])
-    max_capture = int(opts.get("max_capture_bytes", _MAX_CAPTURE_BYTES))
+    raw_options = ctx.options.get("run_shell", {}) if ctx.options else {}
+    try:
+        options = parse_shell_options(raw_options)
+    except (ValidationError, ValueError) as exc:
+        raise ToolError(f"invalid run_shell options: {exc}") from None
 
-    needs_confirm = require_confirmation and not _matches_allowlist(
-        args.command, allow_patterns
+    needs_confirm = options.require_confirmation and not _matches_allowlist(
+        args.command, options.allow_patterns
     )
 
     if needs_confirm:
@@ -136,40 +119,41 @@ async def run_shell(args: ShellArgs, ctx: ToolContext) -> str:
         if not approved:
             raise ToolError(f"user declined to run command: {args.command!r}")
 
-    # start_new_session=True puts the child in its own process group so a
-    # timeout can kill the whole tree, not just the shell.
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            args.command,
-            cwd=str(ctx.workspace),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
-        )
-    except OSError as e:
-        raise ToolError(f"failed to launch command: {e}") from None
+    execution = await launch_shell(
+        args.command,
+        workspace=ctx.workspace,
+        options=options,
+        getenv=ctx.getenv,
+    )
 
     try:
         stdout, truncated = await asyncio.wait_for(
-            _read_capped(proc, max_capture), timeout=timeout
+            _read_capped(execution.process, options.max_capture_bytes),
+            timeout=options.timeout,
         )
     except asyncio.TimeoutError:
-        await _kill_and_reap(proc)
+        await asyncio.shield(execution.abort())
         raise ToolError(
-            f"command timed out after {timeout:g}s and was killed: {args.command!r}"
+            f"command timed out after {options.timeout:g}s and was killed "
+            f"by the {execution.runner} runner: {args.command!r}"
         ) from None
     except asyncio.CancelledError:
         # The turn was cancelled (e.g. the frontend disconnected mid-command).
-        # Kill and reap the whole process group so no orphan keeps running,
-        # then propagate the cancellation.
-        await _kill_and_reap(proc)
+        # Kill and reap the process tree/container, then propagate cancellation.
+        await asyncio.shield(execution.abort())
+        raise
+    except BaseException:
+        await asyncio.shield(execution.abort())
         raise
 
-    code = proc.returncode
-    header = f"$ {args.command}\n(exit code: {code})\n"
+    code = await execution.finish()
+    header = f"$ {args.command}\n(runner: {execution.runner})\n(exit code: {code})\n"
     raw = stdout.decode("utf-8", errors="replace") if stdout else ""
     if truncated:
-        raw += f"\n... (output exceeded {max_capture} bytes and was truncated)"
+        raw += (
+            f"\n... (output exceeded {options.max_capture_bytes} bytes "
+            "and was truncated)"
+        )
     if not raw:
         return header + "(no output)"
     # Heavy logs are staged to a workspace file (read the rest with read_file)
@@ -178,38 +162,10 @@ async def run_shell(args: ShellArgs, ctx: ToolContext) -> str:
         ctx,
         source="shell",
         text=raw,
-        threshold=int(opts.get("offload_over_chars", DEFAULT_OFFLOAD_OVER_CHARS)),
-        fallback_max_chars=int(opts.get("max_output_chars", _MAX_OUTPUT_CHARS)),
+        threshold=options.offload_over_chars,
+        fallback_max_chars=options.max_output_chars,
     )
     return header + body
-
-
-def _kill_tree(proc: asyncio.subprocess.Process) -> None:
-    """Kill the process group of a timed-out command."""
-    if proc.returncode is not None:
-        return
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        # Fall back to killing just the child if the group is gone/inaccessible.
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-
-
-async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
-    """Kill the command's process group and reap it, best-effort.
-
-    Reaping avoids a leaked zombie / event-loop warning. Used by both the
-    timeout path and the cancellation path (a disconnected frontend), so a
-    command whose turn is torn down never leaves an orphan behind.
-    """
-    _kill_tree(proc)
-    try:
-        await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=5)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        pass
 
 
 async def _read_capped(

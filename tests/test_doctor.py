@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
+import pytest
 from dotenv import dotenv_values
 
 from lingcore.__main__ import main
 from lingcore.config import AgentProfile
-from lingcore.doctor import required_example_names
+from lingcore.doctor import diagnose_profile, required_example_names
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -195,3 +197,162 @@ def test_canvas_skill_example_remains_secret_free_and_complete():
     parsed = dotenv_values(path, interpolate=False)
     assert {"CANVAS_URL", "CANVAS_TOKEN"} <= set(parsed)
     assert parsed["CANVAS_TOKEN"] == ""
+
+
+def test_doctor_probes_bubblewrap_and_tracks_passed_environment(monkeypatch):
+    import lingcore.doctor as doctor_module
+
+    monkeypatch.setattr(doctor_module.sys, "platform", "linux")
+    monkeypatch.setattr(doctor_module, "_probe", lambda argv, timeout=5: True)
+    monkeypatch.setenv("SANDBOX_BUILD_TOKEN", "secret-not-for-output")
+    profile = AgentProfile.model_validate(
+        {
+            "name": "sandboxed",
+            "llm": {"model": "test"},
+            "tools": ["run_shell"],
+            "tool_options": {
+                "run_shell": {
+                    "sandbox": {
+                        "backend": "bubblewrap",
+                        "executable": sys.executable,
+                        "pass_env": ["SANDBOX_BUILD_TOKEN"],
+                    }
+                }
+            },
+        }
+    )
+
+    report = diagnose_profile(profile)
+    messages = "\n".join(finding.message for finding in report.findings)
+    assert not report.errors
+    assert "Bubblewrap isolation probe passed" in messages
+    assert "SANDBOX_BUILD_TOKEN is set by process environment" in messages
+    assert "secret-not-for-output" not in messages
+
+
+def test_doctor_checks_oci_image_without_pulling(monkeypatch):
+    import lingcore.doctor as doctor_module
+
+    calls: list[list[str]] = []
+
+    def fake_probe(argv: list[str], *, timeout: float = 5) -> bool:
+        calls.append(argv)
+        return argv[1] == "info"
+
+    monkeypatch.setattr(doctor_module, "_probe", fake_probe)
+    profile = AgentProfile.model_validate(
+        {
+            "name": "containerized",
+            "llm": {"model": "test"},
+            "tools": ["run_shell"],
+            "tool_options": {
+                "run_shell": {
+                    "sandbox": {
+                        "backend": "oci",
+                        "runtime": "docker",
+                        "executable": sys.executable,
+                        "image": "example.test/build:fixed",
+                        "pull": "missing",
+                        "container_os": "linux",
+                        "user": "1000:1000",
+                        "resources": {
+                            "cpus": 1,
+                            "memory_mb": 128,
+                            "pids": 32,
+                            "ephemeral_storage_mb": 64,
+                        },
+                    }
+                }
+            },
+        }
+    )
+
+    report = diagnose_profile(profile)
+    messages = "\n".join(finding.message for finding in report.findings)
+    assert not report.errors
+    assert "execution will pull it" in messages
+    assert any(argv[1:3] == ["image", "inspect"] for argv in calls)
+    assert all("pull" not in argv for argv in calls)
+
+
+def test_doctor_never_executes_backend_from_writable_workspace(tmp_path, monkeypatch):
+    import lingcore.doctor as doctor_module
+
+    executable = tmp_path / "fake-bwrap"
+    marker = tmp_path / "doctor-executed-backend"
+    executable.write_text(
+        f"#!/bin/sh\ntouch {marker}\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    monkeypatch.setattr(doctor_module.sys, "platform", "linux")
+    monkeypatch.setattr(
+        doctor_module,
+        "_probe",
+        lambda *args, **kwargs: pytest.fail("workspace executable was probed"),
+    )
+    profile = AgentProfile.model_validate(
+        {
+            "name": "unsafe-doctor",
+            "workspace": str(tmp_path),
+            "llm": {"model": "test"},
+            "tools": ["run_shell"],
+            "tool_options": {
+                "run_shell": {
+                    "sandbox": {
+                        "backend": "bubblewrap",
+                        "executable": str(executable),
+                    }
+                }
+            },
+        }
+    )
+
+    report = diagnose_profile(profile)
+    assert any("writable workspace" in finding.message for finding in report.errors)
+    assert not marker.exists()
+
+
+def test_doctor_rejects_oci_image_declared_volumes(monkeypatch):
+    import lingcore.doctor as doctor_module
+
+    def fake_probe(argv: list[str], *, timeout: float = 5) -> bool:
+        return argv[1] == "info" or argv[1:3] == ["image", "inspect"]
+
+    monkeypatch.setattr(doctor_module, "_probe", fake_probe)
+    monkeypatch.setattr(
+        doctor_module,
+        "_probe_output",
+        lambda argv, timeout=5: (True, b'linux\n{"/data": {}}\n'),
+    )
+    profile = AgentProfile.model_validate(
+        {
+            "name": "volume-image",
+            "llm": {"model": "test"},
+            "tools": ["run_shell"],
+            "tool_options": {
+                "run_shell": {
+                    "sandbox": {
+                        "backend": "oci",
+                        "runtime": "docker",
+                        "executable": sys.executable,
+                        "image": "example.test/volume:fixed",
+                        "pull": "never",
+                        "container_os": "linux",
+                        "user": "1000:1000",
+                        "resources": {
+                            "cpus": 1,
+                            "memory_mb": 128,
+                            "pids": 32,
+                            "ephemeral_storage_mb": 64,
+                        },
+                    }
+                }
+            },
+        }
+    )
+
+    report = diagnose_profile(profile)
+    assert any(
+        "unsupported writable volumes" in finding.message for finding in report.errors
+    )

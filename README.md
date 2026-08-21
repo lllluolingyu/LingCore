@@ -467,6 +467,7 @@ agent.py     the async run loop + Agent.from_profile  ← the core
 composer.py  PromptComposer seam: per-turn system-prompt assembly
 config.py    AgentProfile + scoped profile .env + YAML ${ENV} expansion
 doctor.py    offline profile/env/.env.example diagnostics (never prints values)
+sandbox.py   typed host/Bubblewrap/OCI shell runners + process supervision
 paths.py     confined path validation + no-follow directory-handle writes
 knowledge.py provider-neutral embedding/reranking seams + SiliconFlow adapters
 memory.py    ShortTermMemory protocol + WindowMemory (prefix-stable eviction) + SummarizingMemory (compaction)
@@ -510,6 +511,11 @@ commitments.
      environment diagnostics. `lingcore profile init/list` separates immutable
      wheel templates from writable sessions, memory, and workspaces in the
      user's application-state directory, so a wheel works without a checkout.
+   - Implemented: `run_shell` has strict, opt-in Bubblewrap and Docker/Podman
+     backends with fail-closed startup, explicit mounts/environment, network
+     isolation, OCI resource budgets, and supervised cleanup. The bundled
+     coding profiles select Bubblewrap; the legacy host runner remains only for
+     profiles that omit the `sandbox` block.
 
 2. **v0.2 — Knowledge 1.0**
    - Implemented: the `knowledge` tool's incremental `index` and `hybrid`
@@ -567,15 +573,24 @@ suite needs no network or API key.
 
 ### Safety note
 
-`run_shell` executes arbitrary commands. The workspace bounds file tools
-(path-escape is blocked and tested), but it is **not** a sandbox for the shell —
-a command can still reach outside it. The confirmation gate, command timeout,
-and output truncation/offload are the current mitigations; true isolation
-(containers, seccomp) is a deliberate next step. No commands are auto-approved
-by the shipped profiles. A configured multi-token allow pattern deliberately
-matches trailing arguments, while shell control syntax (`;`, `&`, `&&`, pipes,
-redirects, substitutions, and newlines) always falls back to confirmation and
-cannot append another command to an approved prefix.
+`run_shell` executes arbitrary commands, so confirmation and sandboxing are
+separate controls. The shipped coding profiles require confirmation and use
+Bubblewrap with no network, an empty filesystem view, `/usr` read-only, the
+workspace read-write, dropped capabilities, and a bounded tmpfs. Profiles may
+instead select Docker or Podman; Linux containers use a read-only root,
+non-root user, no-new-privileges, dropped capabilities, and mandatory CPU,
+memory, PID, and temporary-storage budgets. Native Windows containers require
+Docker Hyper-V isolation and CPU, memory, and storage budgets. A configured
+backend fails closed and never falls back to the host runner.
+
+Omitting `tool_options.run_shell.sandbox` deliberately preserves the legacy
+unsandboxed host runner for existing custom profiles; every result names its
+runner. No commands are auto-approved by the shipped profiles. A configured
+multi-token allow pattern deliberately matches trailing arguments, while shell
+control syntax (`;`, `&`, `&&`, pipes, redirects, substitutions, and newlines)
+always falls back to confirmation. See [Sandboxed shell runner](docs/sandboxing.md)
+for backend configuration, platform requirements, doctor checks, and the threat
+model.
 
 Security-sensitive workspace state (attachment ingest, Canvas downloads,
 staged tool output, and the knowledge index) uses no-follow directory
@@ -600,8 +615,9 @@ Telegram refuses to start a profile that enables `run_shell` unless
 `require_confirmation` is true and `allow_patterns` is empty. Every shell call
 therefore needs an inline, user-bound approval; approvals time out, cannot be
 reused by another user/chat, and are denied on Stop or shutdown. This is still
-consent, not sandboxing—the bot process retains the operating-system access of
-its account, so deploy it as a minimally privileged user.
+consent, not sandboxing: a custom Telegram profile may still choose the legacy
+host runner. Keep the bundled sandbox block or deploy such a bot as a minimally
+privileged user.
 
 ## License
 

@@ -343,13 +343,19 @@ class AgentProfile(BaseModel):
 
     @model_validator(mode="after")
     def _initial_tools_within_ceiling(self) -> "AgentProfile":
-        """initial_tools must be a subset of tools (the hard ceiling)."""
+        """Validate tool authorization and typed built-in options."""
         if self.initial_tools is not None:
             extra = [t for t in self.initial_tools if t not in self.tools]
             if extra:
                 raise ValueError(
                     f"initial_tools {extra} are not listed in tools (the ceiling)"
                 )
+        if "run_shell" in self.tool_options:
+            # Kept in the sandbox module so direct ToolContext callers and
+            # profile loading share one strict, extra-forbid contract.
+            from lingcore.sandbox import parse_shell_options
+
+            parse_shell_options(self.tool_options["run_shell"])
         return self
 
     @classmethod
