@@ -232,9 +232,18 @@ class ShellExecution:
     async def finish(self) -> int:
         """Obtain the command exit code and release backend resources."""
         try:
-            return await self._exit_code()
-        finally:
+            code = await self._exit_code()
+        except BaseException:
+            try:
+                await asyncio.shield(self._cleanup(False))
+            except ToolError:
+                # Cleanup is secondary: preserve cancellation or the exit-code
+                # diagnostic. OCI cleanup has already armed its watchdog.
+                pass
+            raise
+        else:
             await asyncio.shield(self._cleanup(False))
+            return code
 
     async def abort(self) -> None:
         """Kill the command tree/container and release backend resources."""
@@ -826,6 +835,13 @@ async def _launch_oci(
             await _kill_and_reap(process)
         try:
             removed = await _remove_container(executable, name, control_env)
+        except ToolError:
+            watchdog.trigger()
+            if abort:
+                # The watchdog now owns eventual removal. Cleanup is secondary
+                # to the cancellation/timeout that selected the abort path.
+                return
+            raise
         except BaseException:
             watchdog.trigger()
             raise
@@ -833,7 +849,8 @@ async def _launch_oci(
             watchdog.disarm()
         else:
             watchdog.trigger()
-            raise ToolError(f"{config.runtime} failed to remove sandbox {name}")
+            if not abort:
+                raise ToolError(f"{config.runtime} failed to remove sandbox {name}")
 
     async def exit_code() -> int:
         inspected = await _run_control(

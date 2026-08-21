@@ -14,7 +14,7 @@ import shlex
 from pydantic import BaseModel, Field, ValidationError
 
 from lingcore.errors import ToolError
-from lingcore.sandbox import launch_shell, parse_shell_options
+from lingcore.sandbox import ShellExecution, launch_shell, parse_shell_options
 from lingcore.tools import ToolContext, tool
 from lingcore.tools.builtin._offload import offload_text
 
@@ -132,7 +132,7 @@ async def run_shell(args: ShellArgs, ctx: ToolContext) -> str:
             timeout=options.timeout,
         )
     except asyncio.TimeoutError:
-        await asyncio.shield(execution.abort())
+        await _abort_best_effort(execution)
         raise ToolError(
             f"command timed out after {options.timeout:g}s and was killed "
             f"by the {execution.runner} runner: {args.command!r}"
@@ -140,10 +140,10 @@ async def run_shell(args: ShellArgs, ctx: ToolContext) -> str:
     except asyncio.CancelledError:
         # The turn was cancelled (e.g. the frontend disconnected mid-command).
         # Kill and reap the process tree/container, then propagate cancellation.
-        await asyncio.shield(execution.abort())
+        await _abort_best_effort(execution)
         raise
     except BaseException:
-        await asyncio.shield(execution.abort())
+        await _abort_best_effort(execution)
         raise
 
     code = await execution.finish()
@@ -166,6 +166,17 @@ async def run_shell(args: ShellArgs, ctx: ToolContext) -> str:
         fallback_max_chars=options.max_output_chars,
     )
     return header + body
+
+
+async def _abort_best_effort(execution: ShellExecution) -> None:
+    """Abort without letting a cleanup failure replace the primary failure."""
+    try:
+        await asyncio.shield(execution.abort())
+    except ToolError:
+        # OCI cleanup leaves its watchdog armed when synchronous removal fails.
+        # Other backends may also report a cleanup failure, but cancellation,
+        # timeout, or the original read error must remain the caller-visible one.
+        pass
 
 
 async def _read_capped(

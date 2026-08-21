@@ -551,3 +551,89 @@ async def test_oci_create_cancellation_removes_partial_container(tmp_path, monke
     assert any(call[1:4] == ["rm", "--force", "--volumes"] for call in calls)
     assert watchdog.disarmed and not watchdog.triggered
     assert staged_path is not None and not staged_path.exists()
+
+
+@pytest.mark.parametrize(
+    "scenario", ["abort", "exit_success", "exit_error", "exit_cancel"]
+)
+async def test_oci_cleanup_arms_watchdog_when_forced_removal_fails(
+    tmp_path, monkeypatch, scenario
+):
+    import lingcore.sandbox as sandbox_module
+
+    calls: list[list[str]] = []
+    inspect_started = asyncio.Event()
+
+    async def fake_control(
+        argv: list[str], *, timeout: float, environment: Mapping[str, str]
+    ) -> _ControlResult:
+        calls.append(argv)
+        if argv[1:3] == ["image", "inspect"]:
+            return _ControlResult(0, b"linux\nnull\n")
+        if argv[1] in {"create", "kill"}:
+            return _ControlResult(0, b"")
+        if argv[1] == "inspect":
+            if scenario == "exit_error":
+                return _ControlResult(1, b"inspect failed")
+            if scenario == "exit_cancel":
+                inspect_started.set()
+                await asyncio.Event().wait()
+            return _ControlResult(0, b"0\n")
+        if argv[1] == "rm":
+            return _ControlResult(1, b"daemon unavailable")
+        raise AssertionError(argv)
+
+    class FakeProcess:
+        returncode = None
+        stdout = None
+
+    class FakeWatchdog:
+        disarmed = False
+        triggered = False
+
+        def disarm(self) -> None:
+            self.disarmed = True
+
+        def trigger(self) -> None:
+            self.triggered = True
+
+    process = FakeProcess()
+    watchdog = FakeWatchdog()
+
+    async def fake_subprocess(*argv: str, **kwargs: object) -> FakeProcess:
+        return process
+
+    async def fake_kill(candidate: object) -> None:
+        assert candidate is process
+
+    monkeypatch.setattr(sandbox_module, "_run_control", fake_control)
+    monkeypatch.setattr(sandbox_module, "_start_watchdog", lambda *a, **kw: watchdog)
+    monkeypatch.setattr(
+        sandbox_module.asyncio, "create_subprocess_exec", fake_subprocess
+    )
+    monkeypatch.setattr(sandbox_module, "_kill_and_reap", fake_kill)
+
+    execution = await sandbox_module._launch_oci(
+        "echo from container",
+        tmp_path,
+        _linux_oci(executable=str(Path(sys.executable).resolve()), pull="never"),
+        {},
+    )
+    if scenario == "abort":
+        await execution.abort()
+    elif scenario == "exit_success":
+        with pytest.raises(ToolError, match="failed to remove sandbox"):
+            await execution.finish()
+    elif scenario == "exit_error":
+        with pytest.raises(ToolError, match="could not inspect sandbox exit code"):
+            await execution.finish()
+    else:
+        task = asyncio.create_task(execution.finish())
+        await inspect_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert task.cancelled()
+
+    assert any(call[1:4] == ["rm", "--force", "--volumes"] for call in calls)
+    assert watchdog.triggered and not watchdog.disarmed

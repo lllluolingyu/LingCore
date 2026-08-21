@@ -43,6 +43,19 @@ creates user, PID, IPC, UTS, and cgroup namespaces, drops all capabilities,
 disables nested user namespaces, and removes networking when `network: false`.
 The sandbox inherits neither the host home directory nor the host environment.
 
+Bubblewrap does not create or manage a resource-control cgroup. `tmpfs_mb`
+bounds `/tmp` only; CPU time, memory, process count, and writable workspace
+growth remain subject to whatever limits the host, service manager, or invoking
+user already has. Operators who need enforced per-command CPU, memory, and PID
+budgets should use the OCI backend.
+
+With `network: true`, Bubblewrap skips network-namespace isolation and gives the
+command the host network namespace, including host loopback and private
+services. It does not apply the public-address checks used by `fetch_url` or an
+egress allowlist. OCI networking is likewise all-or-nothing at this layer:
+`false` selects no network and `true` leaves the runtime's normal networking in
+place.
+
 Tools installed outside `/usr` must be explicitly mounted. The mount target is
 visible read-only:
 
@@ -167,11 +180,12 @@ lingcore doctor --profile profiles/coding
 
 Doctor validates the typed configuration, executable and mount paths, required
 environment names, and local backend capabilities. Bubblewrap gets a bounded
-namespace probe. OCI diagnostics contact the local engine and inspect image
-presence, OS metadata, and declared volumes but never pull an image. Doctor
-refuses to execute a backend binary resolved inside the writable workspace. A
-missing image is an error only under `pull: never`; otherwise doctor reports
-that execution will pull it.
+namespace capability probe, not a rehearsal of every mount used by a real
+launch. OCI diagnostics contact the local engine and inspect image presence, OS
+metadata, and declared volumes but never pull an image. Doctor refuses to
+execute a backend binary resolved inside the writable workspace. A missing
+image is an error only under `pull: never`; otherwise doctor reports that
+execution will pull it.
 
 ## Threat model and limits
 
@@ -182,7 +196,11 @@ VM-grade defense against kernel or runtime exploits.
 
 The workspace is intentionally writable and is not quota-limited; keep it under
 version control and do not place secrets there. Temporary storage is bounded,
-but workspace output can consume host disk. The runner does not currently offer
-fine-grained egress allowlists, GPU/device passthrough, an interactive TTY, or
-per-mount writable quotas. Add explicit read-only mounts and passed environment
-variables sparingly: each expands what untrusted code can observe.
+but workspace output can consume host disk. OCI commands have mandatory CPU,
+memory, temporary-storage, and (on Linux) PID budgets. Bubblewrap bounds `/tmp`
+but does not independently cap CPU, memory, or PIDs, so hostile workloads can
+consume the invoking host allocation unless limits are supplied outside
+LingCore. The runner does not currently offer fine-grained egress allowlists,
+GPU/device passthrough, an interactive TTY, or per-mount writable quotas. Add
+explicit read-only mounts and passed environment variables sparingly: each
+expands what untrusted code can observe.

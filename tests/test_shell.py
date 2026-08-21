@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
 from lingcore.errors import ToolError
+from lingcore.sandbox import ShellExecution
 from lingcore.tools import ToolContext
 from lingcore.tools.builtin.shell import ShellArgs, run_shell
 
@@ -167,6 +169,95 @@ async def test_timeout_kills_command(tmp_path):
     ctx = _ctx(tmp_path, require_confirmation=False, timeout=0.5)
     with pytest.raises(ToolError, match="timed out"):
         await run_shell(ShellArgs(command="sleep 5"), ctx)
+
+
+def _execution_with_failing_abort() -> tuple[ShellExecution, list[bool]]:
+    aborted: list[bool] = []
+
+    async def exit_code() -> int:
+        raise AssertionError("failed reads must not inspect an exit code")
+
+    async def cleanup(abort: bool) -> None:
+        aborted.append(abort)
+        raise ToolError("sandbox cleanup failed")
+
+    return ShellExecution(object(), "test", exit_code, cleanup), aborted  # type: ignore[arg-type]
+
+
+async def test_cleanup_error_does_not_replace_cancellation(tmp_path, monkeypatch):
+    import lingcore.tools.builtin.shell as shell_module
+
+    execution, aborted = _execution_with_failing_abort()
+    reading = asyncio.Event()
+
+    async def fake_launch(*args, **kwargs) -> ShellExecution:
+        return execution
+
+    async def fake_read(*args, **kwargs) -> tuple[bytes, bool]:
+        reading.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(shell_module, "launch_shell", fake_launch)
+    monkeypatch.setattr(shell_module, "_read_capped", fake_read)
+    task = asyncio.create_task(
+        run_shell(
+            ShellArgs(command="long-running"),
+            _ctx(tmp_path, require_confirmation=False),
+        )
+    )
+    await reading.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
+    assert aborted == [True]
+
+
+async def test_cleanup_error_does_not_replace_timeout(tmp_path, monkeypatch):
+    import lingcore.tools.builtin.shell as shell_module
+
+    execution, aborted = _execution_with_failing_abort()
+
+    async def fake_launch(*args, **kwargs) -> ShellExecution:
+        return execution
+
+    async def fake_read(*args, **kwargs) -> tuple[bytes, bool]:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(shell_module, "launch_shell", fake_launch)
+    monkeypatch.setattr(shell_module, "_read_capped", fake_read)
+
+    with pytest.raises(ToolError, match="command timed out"):
+        await run_shell(
+            ShellArgs(command="long-running"),
+            _ctx(tmp_path, require_confirmation=False, timeout=0.01),
+        )
+    assert aborted == [True]
+
+
+async def test_cleanup_error_does_not_replace_read_error(tmp_path, monkeypatch):
+    import lingcore.tools.builtin.shell as shell_module
+
+    execution, aborted = _execution_with_failing_abort()
+
+    async def fake_launch(*args, **kwargs) -> ShellExecution:
+        return execution
+
+    async def fake_read(*args, **kwargs) -> tuple[bytes, bool]:
+        raise RuntimeError("read failed")
+
+    monkeypatch.setattr(shell_module, "launch_shell", fake_launch)
+    monkeypatch.setattr(shell_module, "_read_capped", fake_read)
+
+    with pytest.raises(RuntimeError, match="read failed"):
+        await run_shell(
+            ShellArgs(command="broken-read"),
+            _ctx(tmp_path, require_confirmation=False),
+        )
+    assert aborted == [True]
 
 
 async def test_output_offloaded_when_large(tmp_path):

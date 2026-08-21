@@ -230,6 +230,23 @@ def test_doctor_probes_bubblewrap_and_tracks_passed_environment(monkeypatch):
     assert "secret-not-for-output" not in messages
 
 
+def test_doctor_reports_shell_options_mutated_after_validation():
+    profile = AgentProfile.model_validate(
+        {
+            "name": "mutated-shell-options",
+            "llm": {"model": "test"},
+            "tools": ["run_shell"],
+        }
+    )
+    profile.tool_options["run_shell"] = {"timeout": 0}
+
+    report = diagnose_profile(profile)
+
+    assert any(
+        "invalid tool_options.run_shell" in finding.message for finding in report.errors
+    )
+
+
 def test_doctor_checks_oci_image_without_pulling(monkeypatch):
     import lingcore.doctor as doctor_module
 

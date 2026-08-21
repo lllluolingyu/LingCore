@@ -412,7 +412,12 @@ def _oci_findings(config: OciSandbox, workspace: Path) -> list[DoctorFinding]:
 def _shell_sandbox_findings(profile: AgentProfile) -> list[DoctorFinding]:
     if "run_shell" not in profile.tools:
         return []
-    options = parse_shell_options(profile.tool_options.get("run_shell", {}))
+    try:
+        options = parse_shell_options(profile.tool_options.get("run_shell", {}))
+    except (TypeError, ValueError):
+        # _profile_requirements reports the validation error. Keep this second
+        # diagnostic pass safe for profiles mutated after model validation.
+        return []
     if options.sandbox is None:
         return [
             DoctorFinding(
