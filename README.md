@@ -24,6 +24,11 @@ OpenAI-compatible endpoint by pointing at a different `base_url`.
   model and a `@tool` decorator. The coding agent ships with file read/write/
   edit, patch, directory listing, search, URL fetch, and a confirmation-gated
   shell.
+- **Safe bounded workspace search** — recursive content and filename lookup
+  supports path scoping, globs, literal/regex and case-insensitive matching,
+  context lines, directory pruning, and hard time/file/hit budgets. Candidate
+  files are bounded no-follow reads, symlinks are skipped, and every result
+  reports scan coverage.
 - **Knowledge retrieval** — the `knowledge` tool keeps offline grep as its
   no-index default, with opt-in incremental semantic and hybrid retrieval over
   a local SQLite index. Stable source chunks retain page/line citations,
@@ -32,8 +37,9 @@ OpenAI-compatible endpoint by pointing at a different `base_url`.
   environment.
 - **Cache-aware context** — built so the request prefix stays stable and
   provider prompt-caching actually hits. Tool output is kept lean and
-  deterministic (`read_file` is paginated + line-numbered; heavy `run_shell` /
-  `fetch_url` output is offloaded to a workspace file and read back on demand);
+  deterministic (`read_file` is paginated + line-numbered; `search` has stable
+  ordering and coverage; heavy `search` / `run_shell` / `fetch_url` output is
+  offloaded to a workspace file and read back on demand);
   the conversation window evicts in stable chunks instead of sliding every turn;
   and when it nears full, the oldest history is **compacted** (summarized) rather
   than dropped. An opt-in `llm.send_prompt_cache_key` pins a session's requests
@@ -468,7 +474,7 @@ composer.py  PromptComposer seam: per-turn system-prompt assembly
 config.py    AgentProfile + scoped profile .env + YAML ${ENV} expansion
 doctor.py    offline profile/env/.env.example diagnostics (never prints values)
 sandbox.py   typed host/Bubblewrap/OCI shell runners + process supervision
-paths.py     confined path validation + no-follow directory-handle writes
+paths.py     confined path validation + no-follow directory traversal/I/O
 knowledge.py provider-neutral embedding/reranking seams + SiliconFlow adapters
 memory.py    ShortTermMemory protocol + WindowMemory (prefix-stable eviction) + SummarizingMemory (compaction)
 sessions.py  SessionStore + SessionMemory — transcript, snapshots, replay, rewind, fork
@@ -592,15 +598,15 @@ always falls back to confirmation. See [Sandboxed shell runner](docs/sandboxing.
 for backend configuration, platform requirements, doctor checks, and the threat
 model.
 
-Security-sensitive workspace state (attachment ingest, Canvas downloads,
-staged tool output, and the knowledge index) uses no-follow directory
-descriptors for every parent component and keeps the validated parent open
-through reads and atomic create/rename. The SQLite knowledge database is loaded
-through a bounded no-follow descriptor and serialized back atomically, so it
-never has to reopen an attacker-swappable workspace path. Swapping a checked
-directory for a symlink therefore cannot redirect the operation outside the
-workspace; platforms without the required secure descriptor operations fail
-closed.
+Security-sensitive workspace operations (attachment ingest, Canvas downloads,
+search traversal, staged tool output, and the knowledge index) use no-follow
+directory descriptors for every parent component and keep the validated parent
+open through reads and atomic create/rename. The SQLite knowledge database is
+loaded through a bounded no-follow descriptor and serialized back atomically,
+so it never has to reopen an attacker-swappable workspace path. Swapping a
+checked directory for a symlink therefore cannot redirect the operation
+outside the workspace; platforms without the required secure descriptor
+operations fail closed.
 
 `fetch_url` reduces SSRF risk by resolving each host (and every redirect hop)
 and refusing any that maps to a loopback, link-local, or private address —

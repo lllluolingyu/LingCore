@@ -120,6 +120,26 @@ tool_options:
     assert "no .env.example is required" in out
 
 
+def test_doctor_rejects_invalid_search_options_at_load(tmp_path, capsys):
+    root = _profile(
+        tmp_path,
+        """
+name: invalid-search
+llm:
+  model: local-model
+tools: [search]
+tool_options:
+  search:
+    max_hitz: 10
+""",
+    )
+
+    assert main(["doctor", "-p", str(root)]) == 2
+
+    err = capsys.readouterr().err
+    assert "tool_options.search.max_hitz is not supported" in err
+
+
 def test_doctor_reports_canvas_configuration(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("CANVAS_TOKEN", raising=False)
     root = _profile(
@@ -244,6 +264,24 @@ def test_doctor_reports_shell_options_mutated_after_validation():
 
     assert any(
         "invalid tool_options.run_shell" in finding.message for finding in report.errors
+    )
+
+
+def test_doctor_reports_search_options_mutated_after_validation():
+    profile = AgentProfile.model_validate(
+        {
+            "name": "mutated-search-options",
+            "llm": {"model": "test"},
+            "tools": ["search"],
+        }
+    )
+    profile.tool_options["search"] = {"max_hitz": 10}
+
+    report = diagnose_profile(profile)
+
+    assert any(
+        "tool_options.search.max_hitz is not supported" in finding.message
+        for finding in report.errors
     )
 
 

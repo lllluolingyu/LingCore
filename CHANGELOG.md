@@ -24,6 +24,12 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ### Changed
 
+- Rebuilt the `search` builtin with scoped literal/regex matching, recursive
+  filename lookup, configurable pruning and hard scan/time/result budgets,
+  worker-thread execution, confined no-follow regular-file reads, context
+  rendering, deterministic coverage reports, and oversized-output offloading.
+  Search no longer follows symlinked files or directories, including links
+  whose targets remain inside the workspace; search the target's real path.
 - `WindowMemory` resolves tiktoken lazily and falls back to a deterministic
   UTF-8 byte-ratio estimate when encoding data is unavailable offline.
 - Release wheels include immutable profile templates and a `py.typed` marker;

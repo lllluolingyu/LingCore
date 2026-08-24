@@ -275,6 +275,13 @@ temperatuer: 0.5
         AgentProfile.load(_write(tmp_path, text))
 
 
+def test_search_option_typo_rejected_at_profile_load(tmp_path):
+    text = FIXTURE + "tool_options:\n  search:\n    max_hitz: 10\n"
+
+    with pytest.raises(ConfigError, match=r"tool_options\.search\.max_hitz"):
+        AgentProfile.load(_write(tmp_path, text))
+
+
 def test_unknown_tool_rejected_at_assembly(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_KEY", "sk-xyz")
     text = FIXTURE.replace("  - list_dir", "  - list_dir\n  - ghost_tool")

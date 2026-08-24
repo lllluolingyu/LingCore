@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from lingcore.errors import ConfigError
 from lingcore.media_types import FALLBACK_TEXT_MAX_CHARS, NativeModality
 from lingcore.modality import DEFAULT_PDF_MAX_CHARS
+from lingcore.tool_options import parse_search_options
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
@@ -356,6 +357,8 @@ class AgentProfile(BaseModel):
             from lingcore.sandbox import parse_shell_options
 
             parse_shell_options(self.tool_options["run_shell"])
+        if "search" in self.tool_options:
+            parse_search_options(self.tool_options["search"])
         return self
 
     @classmethod

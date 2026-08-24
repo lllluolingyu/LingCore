@@ -5,8 +5,8 @@ sensitive file creation needs a stronger primitive: resolving a pathname and
 opening it later leaves a window in which an intermediate directory can be
 replaced by a symlink.  ``confined_directory`` walks from the workspace with
 no-follow directory descriptors and keeps the final parent descriptor open;
-``ConfinedDirectory`` then reads, creates, unlinks, stats, and renames entries
-relative to that stable descriptor.
+``ConfinedDirectory`` then enumerates entries, opens child directories, reads,
+creates, unlinks, stats, and renames entries relative to that stable descriptor.
 
 The directory-descriptor API deliberately fails closed on platforms that do
 not provide POSIX ``dir_fd`` + ``O_NOFOLLOW`` support.  Attachment ingest
@@ -106,6 +106,57 @@ class ConfinedDirectory:
             raise PathEscapeError(
                 f"confined directory changed while writing: {self.path}"
             )
+
+    def iter_entries(self) -> Iterator[tuple[str, bool, bool, bool]]:
+        """Yield no-follow metadata for entries in this opened directory.
+
+        Each tuple is ``(name, is_dir, is_file, is_symlink)``.  The scandir
+        handle is descriptor-relative, so a pathname swap cannot redirect the
+        enumeration and symlink targets are never inspected.
+        """
+        if os.scandir not in os.supports_fd:
+            raise PathEscapeError(
+                "secure confined directory iteration is unsupported on this platform"
+            )
+        self.ensure_anchored()
+        try:
+            with os.scandir(self._fd) as entries:
+                for entry in entries:
+                    try:
+                        is_symlink = entry.is_symlink()
+                        is_dir = entry.is_dir(follow_symlinks=False)
+                        is_file = entry.is_file(follow_symlinks=False)
+                    except OSError:
+                        is_symlink = is_dir = is_file = False
+                    yield entry.name, is_dir, is_file, is_symlink
+        except OSError as exc:
+            raise PathEscapeError(
+                f"cannot safely enumerate confined directory: {self.path}"
+            ) from exc
+
+    @contextmanager
+    def subdirectory(self, name: str) -> Iterator[ConfinedDirectory]:
+        """Open one no-follow child directory relative to this descriptor."""
+        leaf = _leaf_name(name)
+        self.ensure_anchored()
+        try:
+            fd = os.open(leaf, self._flags, dir_fd=self._fd)
+        except OSError as exc:
+            raise PathEscapeError(
+                f"cannot safely open confined directory: {leaf!r}"
+            ) from exc
+        child = ConfinedDirectory(
+            fd,
+            self.path / leaf,
+            self._base_fd,
+            self._parts + (leaf,),
+            self._flags,
+        )
+        try:
+            child.ensure_anchored()
+            yield child
+        finally:
+            os.close(fd)
 
     def open_exclusive(self, name: str, mode: int = 0o644) -> IO[bytes]:
         """Create a new regular-file entry without following any symlink."""

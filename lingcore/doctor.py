@@ -35,6 +35,7 @@ from lingcore.sandbox import (
     resolve_sandbox_executable,
     sandbox_environment_names,
 )
+from lingcore.tool_options import parse_search_options
 
 DoctorLevel = Literal["ok", "info", "warning", "error"]
 
@@ -159,6 +160,14 @@ def _profile_requirements(
                             reranker,
                             "tool_options.knowledge.reranker.api_key_env",
                         )
+
+    if "search" in profile.tools:
+        try:
+            parse_search_options(profile.tool_options.get("search", {}))
+        except ConfigError as exc:
+            # AgentProfile normally catches this first; retaining the branch
+            # diagnoses options mutated by an embedding application afterward.
+            config_errors.append(str(exc))
 
     if "run_shell" in profile.tools:
         raw_shell = profile.tool_options.get("run_shell", {})

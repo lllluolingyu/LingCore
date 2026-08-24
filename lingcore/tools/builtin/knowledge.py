@@ -42,6 +42,7 @@ from lingcore.knowledge import (
 from lingcore.paths import PathEscapeError, confined_directory
 from lingcore.tools import ToolContext, tool
 from lingcore.tools.builtin._offload import RUNTIME_DIRNAME
+from lingcore.tools.builtin._options import int_option
 
 _MAX_READ_BYTES = 256 * 1024
 _MAX_INDEX_SOURCE_BYTES = 4 * 1024 * 1024
@@ -154,17 +155,14 @@ def _int_option(
     maximum: int | None = None,
     option_path: str = "tool_options.knowledge",
 ) -> int:
-    raw = options.get(name, default)
-    if isinstance(raw, bool):
-        raise ConfigError(f"{option_path}.{name} must be an integer")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        raise ConfigError(f"{option_path}.{name} must be an integer") from None
-    if value < minimum or (maximum is not None and value > maximum):
-        upper = f" and <= {maximum}" if maximum is not None else ""
-        raise ConfigError(f"{option_path}.{name} must be >= {minimum}{upper}")
-    return value
+    return int_option(
+        options,
+        name,
+        default,
+        minimum=minimum,
+        maximum=maximum,
+        option_path=option_path,
+    )
 
 
 def _float_option(

@@ -38,6 +38,34 @@ tools:
   - patch_file
 
 tool_options:
+  # Search is bounded and pruned by default. Uncomment only values you want to
+  # override; .lingcore is always excluded even when exclude_dirs is replaced.
+  # search:
+  #   max_hits: 100
+  #   max_hits_per_file: 10
+  #   max_line_chars: 200  # render cap; matching uses the full bounded line
+  #   max_files_scanned: 5000
+  #   max_dir_entries: 10000
+  #   max_file_bytes: 262144
+  #   max_depth: 25
+  #   max_context_lines: 5
+  #   time_budget_ms: 5000
+  #   offload_over_chars: 8000
+  #   exclude_dirs:
+  #     - .git
+  #     - .hg
+  #     - .svn
+  #     - node_modules
+  #     - __pycache__
+  #     - .venv
+  #     - venv
+  #     - .mypy_cache
+  #     - .pytest_cache
+  #     - .ruff_cache
+  #     - .tox
+  #     - dist
+  #     - build
+  #     - .next
   run_shell:
     timeout: 60
     require_confirmation: true
