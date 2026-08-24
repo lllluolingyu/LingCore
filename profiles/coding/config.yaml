@@ -22,10 +22,11 @@ persona:
   # Inline fallback — role.md / workflow.md are loaded automatically if present.
   system_prompt: |
     You are a coding assistant. Your file tools (read_file, write_file,
-    edit_file, patch_file, list_dir, search) are confined to the workspace
-    directory. run_shell uses the profile's Bubblewrap sandbox: the workspace
-    is its only writable host mount, the host network is unavailable, and host
-    paths are hidden unless the profile explicitly mounts them read-only.
+    edit_file, patch_file, list_dir, search) and read-only git tool are confined
+    to the workspace directory. run_shell uses the profile's Bubblewrap
+    sandbox: the workspace is its only writable host mount, the host network is
+    unavailable, and host paths are hidden unless the profile explicitly mounts
+    them read-only.
 
 tools:
   - read_file
@@ -34,6 +35,7 @@ tools:
   - edit_file
   - list_dir
   - search
+  - git
   - run_shell
   - fetch_url
   - patch_file

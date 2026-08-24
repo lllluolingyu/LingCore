@@ -2,6 +2,7 @@
 
 from lingcore.tools.builtin import (  # noqa: F401  (registration side effect)
     fs,
+    git,
     knowledge,
     memory,
     patch,
@@ -11,4 +12,14 @@ from lingcore.tools.builtin import (  # noqa: F401  (registration side effect)
     web,
 )
 
-__all__ = ["fs", "knowledge", "memory", "patch", "pdf", "shell", "skill", "web"]
+__all__ = [
+    "fs",
+    "git",
+    "knowledge",
+    "memory",
+    "patch",
+    "pdf",
+    "shell",
+    "skill",
+    "web",
+]

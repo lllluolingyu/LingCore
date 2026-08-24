@@ -22,8 +22,8 @@ OpenAI-compatible endpoint by pointing at a different `base_url`.
   calls, and a hard iteration cap. No heavyweight orchestration framework.
 - **Pluggable tools** — a tool is an `async` function plus a pydantic args
   model and a `@tool` decorator. The coding agent ships with file read/write/
-  edit, patch, directory listing, search, URL fetch, and a confirmation-gated
-  shell.
+  edit, patch, directory listing, search, URL fetch, structured read-only Git
+  inspection, and a confirmation-gated shell.
 - **Safe bounded workspace search** — recursive content and filename lookup
   supports path scoping, globs, literal/regex and case-insensitive matching,
   context lines, directory pruning, and hard time/file/hit budgets. Candidate
@@ -451,8 +451,10 @@ schema, advertised to the model) and whose second is the `ToolContext`:
 from pydantic import BaseModel, Field
 from lingcore.tools import ToolContext, tool
 
+
 class GreetArgs(BaseModel):
     name: str = Field(description="Who to greet.")
+
 
 @tool(description="Return a friendly greeting.")
 async def greet(args: GreetArgs, ctx: ToolContext) -> str:
@@ -607,6 +609,15 @@ so it never has to reopen an attacker-swappable workspace path. Swapping a
 checked directory for a symlink therefore cannot redirect the operation
 outside the workspace; platforms without the required secure descriptor
 operations fail closed.
+
+The coding profiles expose a structured, read-only `git` builtin for status,
+diff, log, show, and branch inspection, so those routine operations do not need
+shell approval. It accepts no raw flags or shell text, disables pathspec magic,
+external diff/textconv helpers, hooks, filesystem monitors, credential helpers,
+lazy fetching, and optional index locks. Parent checkouts, linked/separate
+worktrees, and alternate object stores are refused so Git metadata stays rooted
+in the workspace. Repository-changing and networked Git commands still go
+through confirmation-gated `run_shell`.
 
 `fetch_url` reduces SSRF risk by resolving each host (and every redirect hop)
 and refusing any that maps to a loopback, link-local, or private address —

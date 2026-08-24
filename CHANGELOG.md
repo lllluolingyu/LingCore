@@ -7,6 +7,9 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ### Added
 
+- A structured, read-only `git` builtin for coding profiles, covering status,
+  diff, log, show, and branch inspection without shell approval while keeping
+  repository-changing and networked operations behind `run_shell`.
 - `lingcore profile list/init`, an explicit clean wheel-template manifest, and
   atomic initialization into writable per-user application state.
 - Profile-selected guardrails through dotted Python targets or the
