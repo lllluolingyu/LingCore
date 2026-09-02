@@ -39,8 +39,36 @@ tools:
   - run_shell
   - fetch_url
   - patch_file
+  - activate_skill
+  - codex_agent
+  - claude_code_agent
+
+# External-agent tools are authorized by this profile but stay hidden until
+# their matching skill is activated. All ordinary coding tools retain the
+# profile's previous initially-enabled behavior.
+initial_tools:
+  - read_file
+  - pdf2md
+  - write_file
+  - edit_file
+  - list_dir
+  - search
+  - git
+  - run_shell
+  - fetch_url
+  - patch_file
+  - activate_skill
 
 tool_options:
+  activate_skill:
+    skills_dir: skills
+    allow_concurrent: false
+  # The outer-agent runners default to a 15-minute timeout, bounded capture,
+  # and the CLI found on PATH. Override `executable` here if needed.
+  codex_agent:
+    timeout: 900
+  claude_code_agent:
+    timeout: 900
   # Search is bounded and pruned by default. Uncomment only values you want to
   # override; .lingcore is always excluded even when exclude_dirs is replaced.
   # search:

@@ -144,6 +144,7 @@ class Agent:
             else frozenset(tools.names())
         )
         self.tool_ctx = tool_ctx
+        self.tool_ctx.session_id = session_id
         self.composer = composer
         self.memory: ShortTermMemory = memory or WindowMemory()
         self.guardrail = guardrail or NoopGuardrail()

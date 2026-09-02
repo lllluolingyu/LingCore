@@ -49,6 +49,9 @@ class ToolContext:
     # Parsed values from the selected profile's .env. Kept out of ``options``
     # so callers cannot accidentally serialize or echo secrets with tool config.
     environment: Mapping[str, str] = field(default_factory=dict, repr=False)
+    # The owning LingCore conversation. Tools that keep auxiliary durable state
+    # use this to avoid leaking context between otherwise independent chats.
+    session_id: str | None = None
 
     def getenv(self, name: str, default: str | None = None) -> str | None:
         """Resolve this profile's ``.env``, then the process environment.

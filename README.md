@@ -442,6 +442,27 @@ profile exposes `activate_skill`, and its authorized `read_file`/`search` ceilin
 makes `code-review` dynamically offerable. To make it always-on in another
 profile, add `skills: [code-review]` and authorize the tools it should receive.
 
+Two bundled collaboration skills connect LingCore to independently installed
+coding-agent CLIs:
+
+- `codex` provides `codex_agent` for persistent Codex CLI consultation or an
+  explicitly confirmed implementation handoff.
+- `claude-code` provides `claude_code_agent` for the equivalent Claude Code
+  workflow.
+
+The coding profiles authorize both tools but gate them behind `activate_skill`.
+Activating either skill requires confirmation because it sends a task and
+workspace context to an external agent. Consultation is read-only;
+implementation mode asks again before allowing workspace edits. Each tool has a
+`conversation` argument (default: `default`): reuse a name for follow-up turns,
+or pass `restart: true` to point that name at a fresh external session. Aliases
+are isolated by workspace and LingCore session and survive resuming the
+LingCore session. Install and authenticate the corresponding CLI separately;
+LingCore uses the executable on `PATH`, or the path configured under
+`tool_options.codex_agent.executable` /
+`tool_options.claude_code_agent.executable`. Runner timeouts and output limits
+are configurable under those same keys.
+
 ## Writing a tool
 
 A tool is an async function whose first argument is a pydantic model (its

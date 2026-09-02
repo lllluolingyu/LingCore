@@ -31,7 +31,14 @@ import yaml
 from lingcore.errors import ConfigError
 
 DEFAULT_HIGH_RISK_TOOLS = frozenset(
-    {"run_shell", "write_file", "patch_file", "edit_file"}
+    {
+        "run_shell",
+        "write_file",
+        "patch_file",
+        "edit_file",
+        "codex_agent",
+        "claude_code_agent",
+    }
 )
 
 _FRONTMATTER = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.S)
