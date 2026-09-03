@@ -11,9 +11,11 @@ from typing import Any
 import pytest
 
 import lingcore.outer_agents as outer_agents
+import lingcore.tools.builtin  # noqa: F401  (registration side effect)
 from lingcore.agent import Agent
 from lingcore.config import AgentProfile
-from lingcore.errors import ToolError
+from lingcore.doctor import diagnose_profile
+from lingcore.errors import ConfigError, ToolError
 from lingcore.skills import DEFAULT_HIGH_RISK_TOOLS, load_skill_tools, load_skills
 from lingcore.tools import REGISTRY, ToolContext
 from tests.fakes import FakeLLMClient
@@ -77,7 +79,7 @@ def _ctx(
     executable: Path,
     *,
     confirm: Any = None,
-    session_id: str = "a" * 32,
+    session_id: str | None = "a" * 32,
 ) -> ToolContext:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
@@ -111,7 +113,11 @@ def test_bundled_outer_skills_declare_their_tools() -> None:
     assert skills["codex"].provides == ("codex_agent",)
     assert skills["claude-code"].requested_tools == ("claude_code_agent",)
     assert skills["claude-code"].provides == ("claude_code_agent",)
-    assert {"codex_agent", "claude_code_agent"} <= DEFAULT_HIGH_RISK_TOOLS
+    # Risk is declared on the tool itself; the core baseline stays builtin-only.
+    assert REGISTRY.get("codex_agent").high_risk is True
+    assert REGISTRY.get("claude_code_agent").high_risk is True
+    assert REGISTRY.get("read_file").high_risk is False
+    assert not ({"codex_agent", "claude_code_agent"} & DEFAULT_HIGH_RISK_TOOLS)
 
 
 async def test_codex_consult_starts_persistent_read_only_conversation(
@@ -141,6 +147,8 @@ async def test_codex_consult_starts_persistent_read_only_conversation(
     assert "--ephemeral" not in argv
     assert "--json" in argv
     assert "resume" not in argv
+    reviewer_override = argv.index("-c")
+    assert argv[reviewer_override + 1] == 'approvals_reviewer="user"'
     assert argv[argv.index("--sandbox") + 1] == "read-only"
     assert argv[-1] == "-"
     assert launched["kwargs"]["cwd"].endswith("workspace")
@@ -170,6 +178,9 @@ async def test_codex_follow_up_resumes_same_thread(
     result = await tool(tool.args_model(prompt="What about errors?"), ctx)
 
     assert "resume" in launches[1]
+    reviewer_override = launches[1].index("-c")
+    assert launches[1][reviewer_override + 1] == 'approvals_reviewer="user"'
+    assert reviewer_override < launches[1].index("resume")
     assert launches[1][launches[1].index("resume") + 1] == external_id
     assert "conversation 'default' (resumed)" in result
     assert "follow-up" in result
@@ -201,7 +212,9 @@ async def test_claude_consult_uses_restricted_plan_mode(
     normalize = str(uuid.UUID(argv[argv.index("--session-id") + 1]))
     assert normalize == argv[argv.index("--session-id") + 1]
     assert argv[argv.index("--permission-mode") + 1] == "plan"
+    assert "--safe-mode" in argv
     assert "--restricted" in argv
+    assert "--strict-mcp-config" in argv
 
 
 async def test_claude_follow_up_resumes_same_named_session(
@@ -225,6 +238,7 @@ async def test_claude_follow_up_resumes_same_named_session(
     assert "--resume" in launches[1]
     assert launches[1][launches[1].index("--resume") + 1] == first_id
     assert "--session-id" not in launches[1]
+    assert {"--safe-mode", "--restricted", "--strict-mcp-config"} <= set(launches[1])
     assert "conversation 'review' (resumed)" in result
 
 
@@ -365,7 +379,9 @@ async def test_claude_implementation_requires_fresh_confirmation(
     assert confirmations and "modify files" in confirmations[0]
     argv = launched["argv"]
     assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
-    assert "--restricted" not in argv
+    assert "--safe-mode" in argv
+    assert "--restricted" in argv
+    assert "--strict-mcp-config" in argv
 
 
 async def test_implementation_refuses_frontend_without_confirmation(
@@ -389,7 +405,181 @@ def test_coding_profile_gates_outer_tools_behind_skills(tmp_path: Path) -> None:
 
     assert agent.skill_state is not None
     assert {"codex", "claude-code"} <= set(agent.skill_state.skills)
-    assert "activate_skill" in agent.initial_tools
-    assert "codex_agent" not in agent.initial_tools
-    assert "claude_code_agent" not in agent.initial_tools
+    # skill_gated_tools hides exactly the two outer-agent tools; every other
+    # ceiling tool stays initially enabled without being re-listed.
+    assert agent.initial_tools == frozenset(profile.tools) - {
+        "codex_agent",
+        "claude_code_agent",
+    }
     assert {"codex_agent", "claude_code_agent"} <= set(agent.tools.names())
+    # Their self-declared risk reaches the activation gate alongside the
+    # builtin baseline, without skills.py naming them.
+    assert {"codex_agent", "claude_code_agent", "run_shell"} <= (
+        agent.skill_state.high_risk_tools
+    )
+    # The ToolContext is built whole with the session id (no post-hoc patching).
+    assert agent.tool_ctx.session_id == agent._session_id
+
+
+def test_declared_risk_is_a_floor_under_an_operator_override(tmp_path: Path) -> None:
+    profile = AgentProfile.load(REPO_ROOT / "profiles" / "coding")
+    profile.workspace = str(tmp_path / "workspace")
+    profile.tool_options["activate_skill"] = {
+        **profile.tool_options.get("activate_skill", {}),
+        "high_risk_tools": [],
+    }
+    agent = Agent.from_profile(profile, llm=FakeLLMClient([]))
+
+    assert agent.skill_state is not None
+    assert "run_shell" not in agent.skill_state.high_risk_tools
+    assert {"codex_agent", "claude_code_agent"} <= agent.skill_state.high_risk_tools
+
+
+def _gated_profile(tmp_path: Path, body: str) -> Path:
+    root = tmp_path / "gated-profile"
+    root.mkdir()
+    (root / "config.yaml").write_text(body, encoding="utf-8")
+    return root
+
+
+def test_skill_gated_tools_must_be_in_the_ceiling(tmp_path: Path) -> None:
+    root = _gated_profile(
+        tmp_path,
+        "name: gated\nllm:\n  model: m\n  api_key_env: ''\n"
+        "tools: [read_file]\nskill_gated_tools: [codex_agent]\n",
+    )
+    with pytest.raises(ConfigError, match="skill_gated_tools .* not listed in tools"):
+        AgentProfile.load(root)
+
+
+def test_skill_gated_tools_and_initial_tools_are_mutually_exclusive(
+    tmp_path: Path,
+) -> None:
+    root = _gated_profile(
+        tmp_path,
+        "name: gated\nllm:\n  model: m\n  api_key_env: ''\n"
+        "tools: [read_file, list_dir]\ninitial_tools: [read_file]\n"
+        "skill_gated_tools: [list_dir]\n",
+    )
+    with pytest.raises(ConfigError, match="declare one or the other"):
+        AgentProfile.load(root)
+
+
+def test_initial_tool_set_resolves_either_form() -> None:
+    llm = {"model": "m", "api_key_env": ""}
+    both_unset = AgentProfile(llm=llm, tools=["a", "b"])
+    inclusion = AgentProfile(llm=llm, tools=["a", "b"], initial_tools=["a"])
+    exclusion = AgentProfile(llm=llm, tools=["a", "b"], skill_gated_tools=["b"])
+
+    assert both_unset.initial_tool_set() == {"a", "b"}
+    assert inclusion.initial_tool_set() == {"a"}
+    assert exclusion.initial_tool_set() == {"a"}
+
+
+def test_configured_executable_expands_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    executable = _executable(tmp_path, "codex")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    resolved = outer_agents.resolve_outer_agent_executable(
+        outer_agents.CODEX, "~/bin/codex", workspace
+    )
+
+    assert resolved == executable.resolve()
+
+
+@pytest.mark.parametrize("configured", ["", "   "])
+def test_blank_executable_is_unset(configured: str) -> None:
+    options = outer_agents.parse_outer_agent_options({"executable": configured})
+
+    assert options.executable is None
+
+
+def test_executable_inside_workspace_is_refused(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    inside = _executable(workspace, "codex")
+
+    with pytest.raises(ToolError, match="inside the writable workspace"):
+        outer_agents.resolve_outer_agent_executable(
+            outer_agents.CODEX, str(inside), workspace
+        )
+
+
+async def test_restart_of_unknown_alias_reports_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _load_outer_skills()
+    executable = _executable(tmp_path, "claude")
+
+    async def fake_exec(*argv: str, **kwargs: Any) -> _FakeProcess:
+        return _FakeProcess()
+
+    monkeypatch.setattr(outer_agents.asyncio, "create_subprocess_exec", fake_exec)
+    tool = REGISTRY.get("claude_code_agent")
+    result = await tool(
+        tool.args_model(prompt="Begin", restart=True),
+        _ctx(tmp_path, "claude_code_agent", executable),
+    )
+
+    assert "conversation 'default' (started)" in result
+
+
+async def test_sessionless_contexts_share_one_workspace_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _load_outer_skills()
+    executable = _executable(tmp_path, "claude")
+    launches: list[tuple[str, ...]] = []
+
+    async def fake_exec(*argv: str, **kwargs: Any) -> _FakeProcess:
+        launches.append(argv)
+        return _FakeProcess()
+
+    monkeypatch.setattr(outer_agents.asyncio, "create_subprocess_exec", fake_exec)
+    tool = REGISTRY.get("claude_code_agent")
+    first = _ctx(tmp_path, "claude_code_agent", executable, session_id=None)
+    second = _ctx(tmp_path, "claude_code_agent", executable, session_id=None)
+    await tool(tool.args_model(prompt="First run"), first)
+    await tool(tool.args_model(prompt="Second run"), second)
+
+    minted = launches[0][launches[0].index("--session-id") + 1]
+    assert launches[1][launches[1].index("--resume") + 1] == minted
+
+
+def test_doctor_validates_outer_agent_options_and_locates_clis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    codex = _executable(tmp_path, "codex")
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    root = _gated_profile(
+        tmp_path,
+        "name: gated\nllm:\n  model: m\n  api_key_env: ''\n"
+        "tools: [activate_skill, codex_agent, claude_code_agent]\n"
+        "skill_gated_tools: [codex_agent, claude_code_agent]\n"
+        "tool_options:\n  codex_agent:\n    executable: ''\n"
+        "  claude_code_agent:\n    timout: 5\n",
+    )
+    report = diagnose_profile(AgentProfile.load(root))
+    messages = {finding.level: [] for finding in report.findings}
+    for finding in report.findings:
+        messages[finding.level].append(finding.message)
+
+    assert any(
+        m == f"Codex agent executable: {codex.resolve()}" for m in messages["ok"]
+    )
+    assert any("tool_options.claude_code_agent" in m for m in messages["error"])
+    assert not (root / "workspace").exists()
+
+    # A valid but uninstalled CLI is only a warning: the skill is optional.
+    (root / "config.yaml").write_text(
+        "name: gated\nllm:\n  model: m\n  api_key_env: ''\n"
+        "tools: [activate_skill, claude_code_agent]\n",
+        encoding="utf-8",
+    )
+    report = diagnose_profile(AgentProfile.load(root))
+    assert not report.errors
+    assert any("claude CLI is not installed" in w.message for w in report.warnings)

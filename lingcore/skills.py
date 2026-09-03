@@ -30,15 +30,13 @@ import yaml
 
 from lingcore.errors import ConfigError
 
+# Builtin tools whose grant always needs confirmation. This baseline is
+# name-based because the builtins are core; a tool shipped by a skill (or any
+# third party) declares its own risk with ``@tool(high_risk=True)`` instead, and
+# ``Agent.from_profile`` folds those declarations into ``SkillState`` — the
+# permission model never has to learn a skill's tool names.
 DEFAULT_HIGH_RISK_TOOLS = frozenset(
-    {
-        "run_shell",
-        "write_file",
-        "patch_file",
-        "edit_file",
-        "codex_agent",
-        "claude_code_agent",
-    }
+    {"run_shell", "write_file", "patch_file", "edit_file"}
 )
 
 _FRONTMATTER = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.S)

@@ -317,6 +317,12 @@ class AgentProfile(BaseModel):
     # is neither initial nor granted by an active skill is neither advertised
     # nor dispatchable.
     initial_tools: list[str] | None = None
+    # The complementary (exclusion) form of ``initial_tools``: ceiling tools that
+    # are *hidden* until a skill grants them; everything else in ``tools`` stays
+    # initially enabled. Prefer it when only a few tools are skill-gated, so a
+    # tool later added to ``tools`` is not silently gated by a stale inclusion
+    # list. Mutually exclusive with ``initial_tools``.
+    skill_gated_tools: list[str] = Field(default_factory=list)
     # Skills the profile *statically engages*: their bundled tool code is loaded
     # and their instructions are injected as a prompt layer (always-on). Distinct
     # from the model-invoked ``activate_skill`` tool (dynamic). A profile may use
@@ -351,6 +357,16 @@ class AgentProfile(BaseModel):
                 raise ValueError(
                     f"initial_tools {extra} are not listed in tools (the ceiling)"
                 )
+            if self.skill_gated_tools:
+                raise ValueError(
+                    "initial_tools and skill_gated_tools both narrow the initially "
+                    "enabled set; declare one or the other"
+                )
+        gated_extra = [t for t in self.skill_gated_tools if t not in self.tools]
+        if gated_extra:
+            raise ValueError(
+                f"skill_gated_tools {gated_extra} are not listed in tools (the ceiling)"
+            )
         if "run_shell" in self.tool_options:
             # Kept in the sandbox module so direct ToolContext callers and
             # profile loading share one strict, extra-forbid contract.
@@ -360,6 +376,17 @@ class AgentProfile(BaseModel):
         if "search" in self.tool_options:
             parse_search_options(self.tool_options["search"])
         return self
+
+    def initial_tool_set(self) -> frozenset[str]:
+        """Tools enabled with no skill active, from whichever form is declared.
+
+        ``initial_tools`` is taken verbatim when set; otherwise every ceiling
+        tool not named in ``skill_gated_tools`` (so both unset ⇒ all of
+        ``tools``). Statically-engaged skills widen this at assembly.
+        """
+        if self.initial_tools is not None:
+            return frozenset(self.initial_tools)
+        return frozenset(self.tools) - frozenset(self.skill_gated_tools)
 
     @classmethod
     def load(cls, path: str | Path) -> "AgentProfile":

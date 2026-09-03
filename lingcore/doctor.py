@@ -25,6 +25,11 @@ from lingcore.knowledge import (
     embedding_options,
     reranker_options,
 )
+from lingcore.outer_agents import (
+    OUTER_AGENTS,
+    parse_outer_agent_options,
+    resolve_outer_agent_executable,
+)
 from lingcore.sandbox import (
     OCI_IMAGE_INSPECT_FORMAT,
     BubblewrapSandbox,
@@ -440,6 +445,40 @@ def _shell_sandbox_findings(profile: AgentProfile) -> list[DoctorFinding]:
     return _oci_findings(options.sandbox, workspace)
 
 
+def _outer_agent_findings(profile: AgentProfile) -> list[DoctorFinding]:
+    """Validate outer-agent options and locate their CLIs without running them.
+
+    The tools validate ``tool_options.<tool>`` only when first called, so this
+    is where a typo'd key surfaces before a session starts. A CLI missing from
+    PATH is a warning (the skill is optional and fails loudly on activation);
+    an explicitly configured executable that does not resolve is an error.
+    """
+    findings: list[DoctorFinding] = []
+    workspace = profile.workspace_path()
+    for spec in OUTER_AGENTS:
+        if spec.tool not in profile.tools:
+            continue
+        try:
+            options = parse_outer_agent_options(profile.tool_options.get(spec.tool, {}))
+        except ConfigError as exc:
+            findings.append(
+                DoctorFinding("error", f"invalid tool_options.{spec.tool}: {exc}")
+            )
+            continue
+        try:
+            resolved = resolve_outer_agent_executable(
+                spec, options.executable, workspace
+            )
+        except ToolError as exc:
+            level: DoctorLevel = "error" if options.executable else "warning"
+            findings.append(DoctorFinding(level, str(exc)))
+        else:
+            findings.append(
+                DoctorFinding("ok", f"{spec.label} agent executable: {resolved}")
+            )
+    return findings
+
+
 def diagnose_profile(
     profile: AgentProfile,
     *,
@@ -487,6 +526,7 @@ def diagnose_profile(
         example_names.add(name)
     findings.extend(DoctorFinding("error", message) for message in config_errors)
     findings.extend(_shell_sandbox_findings(profile))
+    findings.extend(_outer_agent_findings(profile))
     for name, consumers in sorted(requirements.items()):
         used_by = ", ".join(sorted(consumers))
         if name in profile_env:

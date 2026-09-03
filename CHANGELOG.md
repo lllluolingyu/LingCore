@@ -24,6 +24,16 @@ Notable user-facing changes to LingCore are documented here. The project uses
   and graceful shutdown.
 - PTB-free Telegram configuration diagnostics through
   `lingcore doctor --telegram-config`.
+- Bundled `codex` and `claude-code` collaboration skills: named, resumable
+  conversations with an external Codex or Claude Code CLI, read-only
+  consultation by default, confirmation-gated implementation mode, bounded
+  supervised execution, hardened non-interactive sandbox/configuration
+  boundaries, and `lingcore doctor` validation of their options and executables.
+- `skill_gated_tools:` — the exclusion form of `initial_tools:` for hiding a
+  few ceiling tools until a skill grants them.
+- `@tool(high_risk=True)` lets a tool (builtin, skill-shipped, or third-party)
+  declare that skill activation must confirm before granting it, alongside the
+  name-based builtin baseline.
 
 ### Changed
 

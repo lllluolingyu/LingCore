@@ -144,7 +144,6 @@ class Agent:
             else frozenset(tools.names())
         )
         self.tool_ctx = tool_ctx
-        self.tool_ctx.session_id = session_id
         self.composer = composer
         self.memory: ShortTermMemory = memory or WindowMemory()
         self.guardrail = guardrail or NoopGuardrail()
@@ -330,13 +329,10 @@ class Agent:
             load_skill_tools(to_import)
 
         tools = REGISTRY.subset(profile.tools)
-        # The initially-enabled subset (None ⇒ all of the ceiling). Skills unlock
-        # the rest, if any, on activation.
-        initial_tools_set = (
-            frozenset(profile.initial_tools)
-            if profile.initial_tools is not None
-            else frozenset(profile.tools)
-        )
+        # The initially-enabled subset (``initial_tools`` or the complement of
+        # ``skill_gated_tools``; neither ⇒ all of the ceiling). Skills unlock the
+        # rest, if any, on activation.
+        initial_tools_set = profile.initial_tool_set()
         # A statically-engaged skill (profile ``skills:``) is always on: its
         # requested tools are granted from the start, exactly like an activated
         # dynamic skill's — intersected with the ceiling, never beyond it
@@ -360,13 +356,6 @@ class Agent:
         effective_tool_options = (
             tool_options if tool_options is not None else dict(profile.tool_options)
         )
-        tool_ctx = ToolContext(
-            workspace=workspace,
-            confirm=confirm,
-            options=effective_tool_options,
-            profile_dir=source_dir,
-            environment=dict(getattr(profile, "_profile_env", {})),
-        )
         # Persistent-memory auto-compaction: inject the summarizer (the main
         # client, duck-typed) so the memory tool can condense memory.md at its
         # length limit instead of hard-failing. Opt-in via tool_options.memory.
@@ -374,7 +363,7 @@ class Agent:
         if "memory" in profile.tools and mem_tool_opts.get("auto_compact", False):
             from lingcore.tools.builtin.memory import MEMORY_SUMMARIZER_KEY
 
-            tool_ctx.options[MEMORY_SUMMARIZER_KEY] = client
+            effective_tool_options[MEMORY_SUMMARIZER_KEY] = client
         mem = WindowMemory(
             max_messages=profile.memory.max_messages,
             max_tokens=profile.memory.max_tokens,
@@ -408,6 +397,18 @@ class Agent:
         # LLMClient we built (a test-injected fake is left untouched).
         if profile.llm.send_prompt_cache_key and sid and isinstance(client, LLMClient):
             client._prompt_cache_key = sid
+        # Built whole once the session id is known: a tool that keeps per-chat
+        # auxiliary state (e.g. external-agent conversation aliases) scopes it by
+        # ``session_id``, so the context must carry the resumed/fresh id from
+        # the start rather than have it patched in afterwards.
+        tool_ctx = ToolContext(
+            workspace=workspace,
+            confirm=confirm,
+            options=effective_tool_options,
+            profile_dir=source_dir,
+            environment=dict(getattr(profile, "_profile_env", {})),
+            session_id=sid,
+        )
         guardrail = build_guardrail(profile.guardrail.policy, profile.guardrail.options)
 
         # --- Dynamic skill state (only when the activate_skill tool is enabled) ---
@@ -428,14 +429,25 @@ class Agent:
                 for name, sk in loaded_skills.items()
                 if not sk.requested_tools or (ptools & frozenset(sk.requested_tools))
             }
+            # The name-based baseline (or the operator's override of it) plus
+            # every authorized tool that declares itself ``high_risk`` — a
+            # tool's own declaration is a floor the override cannot lower, so
+            # skill-shipped code stays confirmation-gated without the core
+            # permission model listing its names.
             high_risk = sk_opts.get("high_risk_tools")
+            declared_high_risk = frozenset(
+                name for name in tools.names() if tools.get(name).high_risk
+            )
             skill_state = SkillState(
                 skills=offerable,
                 profile_tools=ptools,
                 allow_concurrent=bool(sk_opts.get("allow_concurrent", False)),
-                high_risk_tools=frozenset(high_risk)
-                if high_risk is not None
-                else SkillState.high_risk_tools,
+                high_risk_tools=(
+                    frozenset(high_risk)
+                    if high_risk is not None
+                    else SkillState.high_risk_tools
+                )
+                | declared_high_risk,
             )
             if session_store is not None and sid is not None:
                 persisted = session_store.active_skill_state(sid)

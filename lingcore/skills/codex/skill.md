@@ -16,9 +16,13 @@ CLI agent that shares the current workspace.
 - Use `mode: implement` only when the user explicitly asks the external agent
   to make changes. It requires fresh confirmation and grants Codex write access
   only to the workspace.
+- Every invocation pins Codex's human approval reviewer so inherited
+  auto-review settings cannot approve a sandbox escape, including on resumed
+  threads.
 - Reuse the same `conversation` name for follow-up questions. Names are scoped
   to the current LingCore session and workspace, and survive resuming that
-  LingCore session. Use `restart: true` to replace a name with a fresh Codex
+  LingCore session (a run without a persisted session shares one workspace-wide
+  namespace instead). Use `restart: true` to replace a name with a fresh Codex
   thread; the old Codex transcript is left intact.
 - On the first turn, give Codex a self-contained brief: objective, relevant
   scope, constraints, known evidence, and the exact result you want back. On

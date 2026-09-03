@@ -83,6 +83,10 @@ class Tool:
     description: str
     args_model: type[BaseModel]
     fn: ToolFn
+    # Self-declared risk: a tool that can run code or mutate the workspace sets
+    # this so skill activation asks for confirmation before granting it, without
+    # the core permission model having to know the tool's name.
+    high_risk: bool = False
 
     def json_schema(self) -> dict[str, Any]:
         """Render to an OpenAI ``function`` tool spec."""
@@ -150,11 +154,15 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     registry: ToolRegistry | None = None,
+    *,
+    high_risk: bool = False,
 ) -> Callable[[ToolFn], Tool]:
     """Decorator: register an async function as a Tool.
 
     The function's first parameter must be annotated with a pydantic model;
     that model becomes the argument schema advertised to the LLM.
+    ``high_risk=True`` marks a tool whose grant should require confirmation
+    when a skill requests it (see ``Tool.high_risk``).
     """
 
     def decorator(fn: ToolFn) -> Tool:
@@ -181,6 +189,7 @@ def tool(
             description=description or (fn.__doc__ or "").strip(),
             args_model=args_model,
             fn=fn,
+            high_risk=high_risk,
         )
         (registry if registry is not None else REGISTRY).register(built)
         return built

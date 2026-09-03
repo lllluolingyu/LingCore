@@ -450,18 +450,32 @@ coding-agent CLIs:
 - `claude-code` provides `claude_code_agent` for the equivalent Claude Code
   workflow.
 
-The coding profiles authorize both tools but gate them behind `activate_skill`.
-Activating either skill requires confirmation because it sends a task and
-workspace context to an external agent. Consultation is read-only;
-implementation mode asks again before allowing workspace edits. Each tool has a
-`conversation` argument (default: `default`): reuse a name for follow-up turns,
-or pass `restart: true` to point that name at a fresh external session. Aliases
-are isolated by workspace and LingCore session and survive resuming the
-LingCore session. Install and authenticate the corresponding CLI separately;
-LingCore uses the executable on `PATH`, or the path configured under
+The coding profiles authorize both tools but hide them until their skill is
+activated, using the exclusion form of the initial-tool gate:
+
+```yaml
+tools: [read_file, ..., activate_skill, codex_agent, claude_code_agent]
+skill_gated_tools: [codex_agent, claude_code_agent]   # everything else starts enabled
+```
+
+(`initial_tools:` is the equivalent inclusion form; declare one or the other.)
+Both tools mark themselves `high_risk`, so activating either skill requires
+confirmation — it sends a task and workspace context to an external agent.
+Consultation is read-only; implementation mode asks again before allowing
+workspace edits. Codex invocations pin the non-interactive approval boundary;
+Claude Code invocations disable inherited customizations and MCP servers and
+confine built-in file tools to the workspace. Each tool has a `conversation`
+argument (default: `default`): reuse a name for follow-up turns, or pass
+`restart: true` to point that name at a fresh external session. Aliases are
+isolated by workspace and LingCore session and survive resuming the LingCore
+session; a run without a persisted session (`--no-session`) falls back to a
+workspace-wide alias namespace. Install and authenticate the corresponding CLI
+separately; LingCore uses the executable on `PATH`, or the path configured under
 `tool_options.codex_agent.executable` /
-`tool_options.claude_code_agent.executable`. Runner timeouts and output limits
-are configurable under those same keys.
+`tool_options.claude_code_agent.executable` (`~` is expanded; a blank value is
+treated as unset). Runner timeouts and output limits are configurable under
+those same keys, and `lingcore doctor` validates them and reports whether each
+CLI resolves.
 
 ## Writing a tool
 
@@ -484,7 +498,10 @@ async def greet(args: GreetArgs, ctx: ToolContext) -> str:
 
 The `@tool` decorator registers it; a profile activates it by listing `greet`
 under `tools`. `ctx` carries the workspace path and a confirmation callback —
-tools never reach for globals, so concurrent sessions stay isolated.
+tools never reach for globals, so concurrent sessions stay isolated. A tool that
+runs code or mutates the workspace should declare `@tool(..., high_risk=True)`:
+a skill requesting it then needs user confirmation before activation, the same
+gate the builtin `run_shell`/`write_file`/`edit_file`/`patch_file` get by name.
 
 ## Architecture
 
@@ -497,6 +514,7 @@ composer.py  PromptComposer seam: per-turn system-prompt assembly
 config.py    AgentProfile + scoped profile .env + YAML ${ENV} expansion
 doctor.py    offline profile/env/.env.example diagnostics (never prints values)
 sandbox.py   typed host/Bubblewrap/OCI shell runners + process supervision
+outer_agents.py  shared runner/aliases/spec for the codex + claude-code skills
 paths.py     confined path validation + no-follow directory traversal/I/O
 knowledge.py provider-neutral embedding/reranking seams + SiliconFlow adapters
 memory.py    ShortTermMemory protocol + WindowMemory (prefix-stable eviction) + SummarizingMemory (compaction)

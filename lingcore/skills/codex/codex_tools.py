@@ -1,49 +1,32 @@
-"""Tool shipped by the bundled Codex collaboration skill."""
+"""Tool shipped by the bundled Codex collaboration skill.
+
+Only the Codex-specific parts live here: the durable thread id is minted by
+Codex and read back from its ``--json`` event stream, and follow-ups go through
+``codex exec resume <id>``. Everything else — argument schema, prompt brief,
+alias persistence, supervised execution — is shared in
+``lingcore.outer_agents``.
+"""
 
 from __future__ import annotations
 
 import json
-from typing import Literal
-
-from pydantic import BaseModel, Field
+from dataclasses import replace
 
 from lingcore.errors import ToolError
 from lingcore.outer_agents import (
+    CODEX,
+    OuterAgentArgs,
     confirm_outer_agent_write,
     conversation_lock,
+    frame_prompt,
     load_conversation_session,
     normalize_external_session_id,
+    render_outer_agent_reply,
     run_outer_agent,
     save_conversation_session,
+    turn_header,
 )
 from lingcore.tools import ToolContext, tool
-
-
-class CodexAgentArgs(BaseModel):
-    prompt: str = Field(
-        min_length=1,
-        max_length=100_000,
-        description="Task or follow-up question to send to the external Codex agent.",
-    )
-    mode: Literal["consult", "implement"] = Field(
-        default="consult",
-        description=(
-            "consult is read-only; implement may edit the workspace and requires "
-            "fresh user confirmation"
-        ),
-    )
-    conversation: str = Field(
-        default="default",
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
-        description=(
-            "Logical conversation name. Reusing it continues the prior Codex "
-            "session in this LingCore chat."
-        ),
-    )
-    restart: bool = Field(
-        default=False,
-        description="Start this named conversation afresh instead of resuming it.",
-    )
 
 
 def _text_content(value: object) -> str | None:
@@ -107,33 +90,30 @@ def _codex_jsonl(raw: str) -> tuple[str | None, str]:
 
 
 @tool(
-    name="codex_agent",
+    name=CODEX.tool,
     description=(
         "Start or continue a named conversation with an external Codex CLI agent. "
         "Use only when the user asks to involve Codex. Consultation is read-only; "
         "implementation requires confirmation."
     ),
+    high_risk=True,
 )
-async def codex_agent(args: CodexAgentArgs, ctx: ToolContext) -> str:
+async def codex_agent(args: OuterAgentArgs, ctx: ToolContext) -> str:
     write = args.mode == "implement"
     if write:
-        await confirm_outer_agent_write(ctx, "Codex")
-    action = (
-        "Implement the requested change in the shared workspace. Stay within the "
-        "stated scope, verify your work, and report changed files and checks run."
-        if write
-        else "Analyze the request without modifying files. Return concise findings with file references."
-    )
-    prompt = (
-        "You are an external Codex collaborator called by a LingCore agent. "
-        f"{action} Do not delegate to another agent.\n\n"
-        f"Task from the orchestrating agent:\n{args.prompt.strip()}"
-    )
-    async with conversation_lock(ctx, "codex", args.conversation):
-        existing = load_conversation_session(ctx, "codex", args.conversation)
+        await confirm_outer_agent_write(ctx, CODEX)
+    prompt = frame_prompt(CODEX, args)
+    async with conversation_lock(ctx, CODEX, args.conversation):
+        existing = load_conversation_session(ctx, CODEX, args.conversation)
         session_id = None if args.restart else existing
         arguments = [
             "exec",
+            # Headless exec normally denies escalation, but an inherited
+            # ``approvals_reviewer=auto_review`` re-enables it and can defeat
+            # even an explicit read-only sandbox. Pin the human reviewer; exec
+            # has no interactive approver, so its deny-by-default policy holds.
+            "-c",
+            'approvals_reviewer="user"',
             "--json",
             "--color",
             "never",
@@ -146,33 +126,19 @@ async def codex_agent(args: CodexAgentArgs, ctx: ToolContext) -> str:
         if session_id is not None:
             arguments.extend(["resume", session_id])
         arguments.append("-")
-        returned_session: str | None = None
-
-        def transform(raw: str) -> str:
-            nonlocal returned_session
-            returned_session, text = _codex_jsonl(raw)
-            if session_id is None and returned_session is None:
-                raise ToolError(
-                    "Codex completed but did not report a resumable thread id"
-                )
-            return text
-
-        result = await run_outer_agent(
-            program="codex",
-            arguments=arguments,
-            prompt=prompt,
-            ctx=ctx,
-            option_key="codex_agent",
-            label="Codex",
-            output_source="codex-agent",
-            transform_output=transform,
+        output = await run_outer_agent(
+            CODEX, arguments=arguments, prompt=prompt, ctx=ctx
         )
+        returned_session, message = _codex_jsonl(output.text)
+        # Codex mints the thread id; a resumed turn may omit it, so fall back to
+        # the id we resumed. Only a brand-new thread with no id is unusable.
         active_session = returned_session or session_id
-        assert active_session is not None
-        save_conversation_session(ctx, "codex", args.conversation, active_session)
-        state = "restarted" if args.restart else "resumed" if existing else "started"
-        return result.replace(
-            "Codex response:",
-            f"Codex conversation {args.conversation!r} ({state}):",
-            1,
+        if active_session is None:
+            raise ToolError("Codex completed but did not report a resumable thread id")
+        save_conversation_session(ctx, CODEX, args.conversation, active_session)
+        return render_outer_agent_reply(
+            CODEX,
+            ctx,
+            replace(output, text=message),
+            header=turn_header(CODEX, args, existing=existing),
         )

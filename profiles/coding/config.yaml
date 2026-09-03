@@ -43,21 +43,12 @@ tools:
   - codex_agent
   - claude_code_agent
 
-# External-agent tools are authorized by this profile but stay hidden until
-# their matching skill is activated. All ordinary coding tools retain the
-# profile's previous initially-enabled behavior.
-initial_tools:
-  - read_file
-  - pdf2md
-  - write_file
-  - edit_file
-  - list_dir
-  - search
-  - git
-  - run_shell
-  - fetch_url
-  - patch_file
-  - activate_skill
+# The external-agent tools are authorized above but hidden until their skill
+# is activated (activate_skill asks for confirmation first). Everything else in
+# `tools` stays enabled from the start.
+skill_gated_tools:
+  - codex_agent
+  - claude_code_agent
 
 tool_options:
   activate_skill:

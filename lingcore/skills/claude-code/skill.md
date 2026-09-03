@@ -12,14 +12,18 @@ Use `claude_code_agent` to start or continue a conversation with an external
 Claude Code agent that shares the current workspace.
 
 - Use `mode: consult` for analysis, review, planning, debugging advice, or a
-  second opinion. It runs in Claude Code's restricted planning mode and cannot
-  modify the workspace.
+  second opinion. It runs in Claude Code's isolated, restricted planning mode
+  and cannot modify the workspace.
 - Use `mode: implement` only when the user explicitly asks the external agent
-  to make changes. It requires fresh confirmation and allows file edits without
-  bypassing Claude Code's other permission checks.
+  to make changes. It requires fresh confirmation and allows Claude Code's
+  built-in file tools inside the workspace. Shell/code tools, WebFetch, local
+  hooks, plugins, skills, MCP servers, and user/project permission overrides are
+  disabled rather than inherited. Claude Code may therefore report partial
+  work when a task needs a command; relay that honestly.
 - Reuse the same `conversation` name for follow-up questions. Names are scoped
   to the current LingCore session and workspace, and survive resuming that
-  LingCore session. Use `restart: true` to replace a name with a fresh Claude
+  LingCore session (a run without a persisted session shares one workspace-wide
+  namespace instead). Use `restart: true` to replace a name with a fresh Claude
   Code session; the old Claude transcript is left intact.
 - On the first turn, give Claude Code a self-contained brief: objective,
   relevant scope, constraints, known evidence, and the exact result you want
