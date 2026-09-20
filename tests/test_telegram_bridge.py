@@ -95,7 +95,7 @@ stream_edit_interval: 0
     config = load_telegram_config(profile, require_secrets=False)
 
     class Encoding:
-        def encode(self, text):
+        def encode(self, text, *, disallowed_special=()):
             return list(text)
 
     monkeypatch.setattr("lingcore.memory._encoding", lambda _: Encoding())
@@ -184,7 +184,7 @@ allow_absolute_state_dir: true
     config = load_telegram_config(profile, require_secrets=False)
 
     class Encoding:
-        def encode(self, text):
+        def encode(self, text, *, disallowed_special=()):
             return list(text)
 
     monkeypatch.setattr("lingcore.memory._encoding", lambda _: Encoding())

@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+
+import pytest
+import tiktoken
+import tiktoken.load
+import tiktoken.registry
+
 import lingcore.memory as memory_module
 from lingcore.memory import WindowMemory
 from lingcore.message import Message, ToolCall, ToolResult
@@ -33,6 +40,92 @@ def test_encoding_is_lazy_and_offline_failure_uses_estimate(monkeypatch):
     assert rendered[-1].content == "hello"
     assert mem._tokens(rendered[-1]) > 0
     assert calls == ["local/offline"]  # failed resolution is not retried
+
+
+@pytest.mark.parametrize("model", ["gpt-4o", "local/offline"])
+@pytest.mark.parametrize("cache_state", ["empty", "disabled", "corrupt"])
+def test_cold_encoding_never_downloads(monkeypatch, tmp_path, model, cache_state):
+    monkeypatch.setattr(tiktoken.registry, "ENCODINGS", {})
+    monkeypatch.setenv(
+        "TIKTOKEN_CACHE_DIR", "" if cache_state == "disabled" else str(tmp_path)
+    )
+    if cache_state == "corrupt":
+        for name in ("o200k_base", "cl100k_base"):
+            url = (
+                f"https://openaipublic.blob.core.windows.net/encodings/{name}.tiktoken"
+            )
+            (tmp_path / hashlib.sha1(url.encode()).hexdigest()).write_bytes(b"bad")
+
+    def forbidden_download(*args, **kwargs):
+        pytest.fail("memory counting must never download a tokenizer vocabulary")
+
+    monkeypatch.setattr(tiktoken.load, "read_file", forbidden_download)
+    mem = WindowMemory(model=model)
+    mem.add(Message.user("hello"))
+
+    assert mem.render("system")[-1].content == "hello"
+    assert mem._text_tokens("hello") == 2
+    assert mem._text_tokens("你好世界") == 3
+    assert mem._text_tokens("") == 0
+
+
+def _byte_encoding():
+    """A real offline tokenizer, with one token per byte and one special token."""
+    return tiktoken.Encoding(
+        name="test_bytes",
+        pat_str=r"[\s\S]",
+        mergeable_ranks={bytes([i]): i for i in range(256)},
+        special_tokens={"<|endoftext|>": 256},
+    )
+
+
+def test_cold_encoding_does_not_invoke_constructor(monkeypatch):
+    def forbidden_constructor():
+        pytest.fail("memory counting must not initialize tokenizer plugins")
+
+    monkeypatch.setattr(tiktoken.registry, "ENCODINGS", {})
+    monkeypatch.setattr(
+        tiktoken.registry,
+        "ENCODING_CONSTRUCTORS",
+        {"o200k_base": forbidden_constructor},
+    )
+
+    assert WindowMemory(model="gpt-4o")._text_tokens("hello") == 2
+
+
+@pytest.mark.parametrize(
+    ("model", "encoding_name"),
+    [("gpt-4o", "o200k_base"), ("local/offline", "cl100k_base")],
+)
+def test_memory_reuses_loaded_encoding(monkeypatch, model, encoding_name):
+    monkeypatch.setattr(
+        tiktoken.registry, "ENCODINGS", {encoding_name: _byte_encoding()}
+    )
+    mem = WindowMemory(model=model)
+
+    assert mem._text_tokens("hello") == 5
+    assert mem._text_tokens("你好世界") == 12
+
+
+def test_special_token_spelling_is_counted_as_ordinary_text(monkeypatch):
+    monkeypatch.setattr(
+        tiktoken.registry, "ENCODINGS", {"o200k_base": _byte_encoding()}
+    )
+    mem = WindowMemory(model="gpt-4o")
+    literal = "<|endoftext|>"
+    mem.add(Message.user(literal))
+    mem.add(
+        Message.assistant(
+            content=literal,
+            tool_calls=[ToolCall(id="c1", name="echo", arguments={"text": literal})],
+        )
+    )
+    mem.add(
+        Message.from_tool_result(ToolResult(call_id="c1", name="echo", content=literal))
+    )
+
+    assert mem._text_tokens(literal) == 13
+    assert [message.content for message in mem.render(literal)] == [literal] * 4
 
 
 def test_message_count_cap_keeps_recent():

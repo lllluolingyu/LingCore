@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+import regex
 from pydantic import BaseModel, Field
 
 from lingcore.errors import ToolError
@@ -241,7 +242,10 @@ class SearchArgs(BaseModel):
             "semantics. A leading `**/` also matches files at the scope root."
         ),
     )
-    regex: bool = Field(default=False, description="Treat query as a Python regex.")
+    regex: bool = Field(
+        default=False,
+        description="Use Python regex syntax with timed regex VERSION0 matching.",
+    )
     ignore_case: bool = Field(
         default=False, description="Match content without case sensitivity."
     )
@@ -285,7 +289,9 @@ def _search_options(ctx: ToolContext) -> SearchOptions:
     return parse_search_options(raw)
 
 
-def _search_matcher(args: SearchArgs) -> Callable[[str], bool] | None:
+def _search_matcher(
+    args: SearchArgs, state: _SearchState
+) -> Callable[[str], bool] | None:
     query = args.query
     if query is None:
         if args.mode == "content":
@@ -295,10 +301,25 @@ def _search_matcher(args: SearchArgs) -> Callable[[str], bool] | None:
         raise ToolError("search query must not be empty")
     if args.regex:
         try:
-            pattern = re.compile(query, re.IGNORECASE if args.ignore_case else 0)
-        except re.error as exc:
+            # Keep Python regex syntax validation. The timed engine uses its
+            # VERSION0 semantics (Unicode case folding can differ from re).
+            re.compile(query, re.IGNORECASE if args.ignore_case else 0)
+            pattern = regex.compile(
+                query, regex.VERSION0 | (regex.IGNORECASE if args.ignore_case else 0)
+            )
+        except (re.error, regex.error) as exc:
             raise ToolError(f"invalid search regex: {exc}") from None
-        return lambda line: pattern.search(line) is not None
+
+        def match(line: str) -> bool:
+            remaining = state.deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            # A deadline between lines cannot interrupt catastrophic
+            # backtracking within a line. Bound each match by the remaining
+            # scan budget and release the GIL so other turns can keep running.
+            return pattern.search(line, timeout=remaining, concurrent=True) is not None
+
+        return match
     if args.ignore_case:
         needle = query.casefold()
         return lambda line: needle in line.casefold()
@@ -420,7 +441,14 @@ def _record_content_matches(
             stop = True
             completed = False
             break
-        if not matcher(line):
+        try:
+            matched = matcher(line)
+        except TimeoutError:
+            state.stopped_time = True
+            stop = True
+            completed = False
+            break
+        if not matched:
             continue
         matches_seen += 1
         if len(line_numbers) >= options.max_hits_per_file:
@@ -462,7 +490,12 @@ def _record_file_content_match(
     for lineno, line in enumerate(lines, start=1):
         if (lineno - 1) % _SEARCH_CHECK_BATCH == 0 and _deadline_reached(state):
             return True
-        if not matcher(line):
+        try:
+            matched = matcher(line)
+        except TimeoutError:
+            state.stopped_time = True
+            return True
+        if not matched:
             continue
         if state.matches >= hit_cap:
             state.hit_match_cap = True
@@ -663,7 +696,8 @@ def _coverage_footer(state: _SearchState, options: SearchOptions, hit_cap: int) 
 
 
 def _search_sync(args: SearchArgs, ctx: ToolContext, options: SearchOptions) -> str:
-    matcher = _search_matcher(args)
+    state = _SearchState(deadline=time.monotonic() + options.time_budget_ms / 1_000)
+    matcher = _search_matcher(args, state)
     base = ctx.workspace.resolve()
     try:
         scope_path = resolve_confined(base, args.path)
@@ -671,7 +705,6 @@ def _search_sync(args: SearchArgs, ctx: ToolContext, options: SearchOptions) -> 
         raise ToolError(str(exc)) from None
     if not scope_path.is_dir():
         raise ToolError(f"not a directory: {args.path!r}")
-    state = _SearchState(deadline=time.monotonic() + options.time_budget_ms / 1_000)
     hit_cap = min(args.limit or options.max_hits, options.max_hits)
     context = min(args.context, options.max_context_lines)
     try:
@@ -725,7 +758,7 @@ def _search_sync(args: SearchArgs, ctx: ToolContext, options: SearchOptions) -> 
     description=(
         "Search the workspace with a bounded, recursive, pruned scan. Use `path` "
         "to scope it; basename or relative-path `glob` filters filenames; literal "
-        "content matching is the default, with optional Python `regex`, "
+        "content matching is the default, with optional timed `regex`, "
         "`ignore_case`, and context lines. Set mode=`files` to return paths whose "
         "content matches, or omit query in that mode to find files by name. Every "
         "result ends with a coverage footer reporting scanned/skipped/pruned work "

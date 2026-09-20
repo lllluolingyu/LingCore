@@ -14,6 +14,7 @@ operator indexes again rather than returning stale citations.
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import hashlib
 import math
@@ -22,6 +23,7 @@ import re
 import secrets
 import sqlite3
 import struct
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Literal, Mapping, Sequence, cast
@@ -39,7 +41,12 @@ from lingcore.knowledge import (
     reranker_enabled,
     reranker_options,
 )
-from lingcore.paths import PathEscapeError, confined_directory
+from lingcore.paths import (
+    ConfinedDirectory,
+    ConfinedLockFile,
+    PathEscapeError,
+    confined_directory,
+)
 from lingcore.tools import ToolContext, tool
 from lingcore.tools.builtin._offload import RUNTIME_DIRNAME
 from lingcore.tools.builtin._options import int_option
@@ -180,7 +187,9 @@ def _float_option(
     return value
 
 
-def _iter_source_files(base: Path, sources: Sequence[str]) -> Iterator[Path]:
+def _iter_source_files(
+    base: Path, sources: Sequence[str], *, index_path: Path | None = None
+) -> Iterator[Path]:
     """Yield each confined source once, deterministically."""
     seen: set[Path] = set()
     for pattern in sources:
@@ -199,7 +208,11 @@ def _iter_source_files(base: Path, sources: Sequence[str]) -> Iterator[Path]:
             if full in seen or not _confined(base, full) or not full.is_file():
                 continue
             rel = full.relative_to(base)
-            if RUNTIME_DIRNAME in rel.parts:
+            if RUNTIME_DIRNAME in rel.parts or (
+                index_path is not None
+                and full
+                in (index_path, index_path.with_name(index_path.name + ".lock"))
+            ):
                 continue
             seen.add(full)
             yield full
@@ -443,7 +456,13 @@ def _index_path(base: Path, options: Mapping[str, Any]) -> Path:
     return resolved
 
 
-def _open_index(base: Path, path: Path, *, create: bool) -> sqlite3.Connection | None:
+def _open_index(
+    base: Path,
+    path: Path,
+    *,
+    create: bool,
+    directory: ConfinedDirectory | None = None,
+) -> sqlite3.Connection | None:
     """Load a confined SQLite file into an in-memory connection.
 
     SQLite's pathname API cannot accept an already-open no-follow descriptor.
@@ -455,7 +474,12 @@ def _open_index(base: Path, path: Path, *, create: bool) -> sqlite3.Connection |
     rel = path.relative_to(base)
     payload: bytes | None = None
     try:
-        with confined_directory(base, rel.parent, create=create) as directory:
+        parent = (
+            nullcontext(directory)
+            if directory is not None
+            else confined_directory(base, rel.parent, create=create)
+        )
+        with parent as directory:
             if not directory.entry_exists(rel.name):
                 if not create:
                     return None
@@ -503,7 +527,13 @@ def _open_index(base: Path, path: Path, *, create: bool) -> sqlite3.Connection |
         ) from None
 
 
-def _save_index(base: Path, path: Path, connection: sqlite3.Connection) -> None:
+def _save_index(
+    base: Path,
+    path: Path,
+    connection: sqlite3.Connection,
+    *,
+    directory: ConfinedDirectory,
+) -> None:
     """Atomically publish an in-memory index through a confined directory."""
     try:
         payload = connection.serialize()
@@ -512,14 +542,13 @@ def _save_index(base: Path, path: Path, connection: sqlite3.Connection) -> None:
                 f"knowledge index exceeds the {_MAX_INDEX_BYTES}-byte size limit"
             )
         rel = path.relative_to(base)
-        with confined_directory(base, rel.parent, create=True) as directory:
-            part = f".{rel.name}.{secrets.token_hex(8)}.part"
-            try:
-                with directory.open_exclusive(part) as handle:
-                    handle.write(payload)
-                directory.replace(part, rel.name)
-            finally:
-                directory.unlink(part, missing_ok=True)
+        part = f".{rel.name}.{secrets.token_hex(8)}.part"
+        try:
+            with directory.open_exclusive(part) as handle:
+                handle.write(payload)
+            directory.replace(part, rel.name)
+        finally:
+            directory.unlink(part, missing_ok=True)
     except ToolError:
         raise
     except (OSError, PathEscapeError, sqlite3.DatabaseError) as exc:
@@ -650,10 +679,32 @@ async def _index_sources(
 ) -> str:
     base = ctx.workspace.resolve()
     path = _index_path(base, options)
+    try:
+        with confined_directory(
+            base, path.relative_to(base).parent, create=True
+        ) as directory:
+            with directory.open_lock_file(path.name + ".lock") as lock:
+                while not lock.try_acquire():
+                    await asyncio.sleep(0.05)
+                return await _update_index_sources(
+                    ctx, options, sources, selectors, base, path, directory, lock
+                )
+    except (OSError, PathEscapeError) as exc:
+        raise ToolError(f"cannot safely lock knowledge index {path}: {exc}") from None
+
+
+async def _update_index_sources(
+    ctx: ToolContext,
+    options: Mapping[str, Any],
+    sources: Sequence[str],
+    selectors: tuple[str, ...] | None,
+    base: Path,
+    path: Path,
+    directory: ConfinedDirectory,
+    lock: ConfinedLockFile,
+) -> str:
     provider = _embedder(ctx, options)
     vector_identity = _provider_identity(provider)
-    connection = _open_index(base, path, create=True)
-    assert connection is not None
     chunk_chars, overlap_lines, config_fingerprint = _chunk_config(options)
     max_source_bytes = _int_option(
         options,
@@ -662,11 +713,13 @@ async def _index_sources(
         minimum=1,
         maximum=100 * 1024 * 1024,
     )
+    connection = _open_index(base, path, create=True, directory=directory)
+    assert connection is not None
 
     snapshots: list[_SourceSnapshot] = []
     skipped: list[str] = []
     try:
-        all_files = list(_iter_source_files(base, sources))
+        all_files = list(_iter_source_files(base, sources, index_path=path))
         for full in all_files:
             rel = full.relative_to(base).as_posix()
             if not _selected(rel, selectors):
@@ -865,7 +918,8 @@ async def _index_sources(
         total_chunks = int(
             connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
         )
-        _save_index(base, path, connection)
+        lock.ensure_anchored()
+        _save_index(base, path, connection, directory=directory)
         report = (
             f"indexed files={total_files} "
             f"(new={new_count}, updated={updated_count}, "
@@ -889,9 +943,10 @@ def _stale_state(
     sources: Sequence[str],
     config_fingerprint: str,
     max_source_bytes: int,
+    index_path: Path,
 ) -> _StaleState:
     current: dict[str, tuple[Path, int, int]] = {}
-    for full in _iter_source_files(base, sources):
+    for full in _iter_source_files(base, sources, index_path=index_path):
         try:
             info = full.stat()
         except OSError:
@@ -1131,6 +1186,7 @@ async def _query_index(
                 minimum=1,
                 maximum=100 * 1024 * 1024,
             ),
+            path,
         )
         vectors = await provider.embed([query])
         if len(vectors) != 1:
@@ -1273,7 +1329,8 @@ def _status(
     backend: Literal["grep", "index", "hybrid"],
 ) -> str:
     base = ctx.workspace.resolve()
-    source_count = sum(1 for _ in _iter_source_files(base, sources))
+    path = _index_path(base, options) if backend != "grep" else None
+    source_count = sum(1 for _ in _iter_source_files(base, sources, index_path=path))
     enabled = embedding_enabled(options)
     prefix = (
         f"backend={backend}, embedding={'true' if enabled else 'false'}, "
@@ -1281,7 +1338,7 @@ def _status(
     )
     if backend == "grep":
         return prefix
-    path = _index_path(base, options)
+    assert path is not None
     connection = _open_index(base, path, create=False)
     if connection is None:
         return f"{prefix}, indexed files=0, chunks=0, embedded chunks=0, stale files=0"
@@ -1299,6 +1356,7 @@ def _status(
                 minimum=1,
                 maximum=100 * 1024 * 1024,
             ),
+            path,
         )
         indexed = int(
             connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]

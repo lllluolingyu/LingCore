@@ -29,6 +29,10 @@ OpenAI-compatible endpoint by pointing at a different `base_url`.
   context lines, directory pruning, and hard time/file/hit budgets. Candidate
   files are bounded no-follow reads, symlinks are skipped, and every result
   reports scan coverage.
+  Regex matching shares the scan deadline, including time spent inside a
+  single expensive match; timed-out searches retain earlier results and report
+  partial coverage. Patterns use Python regex syntax with the `regex` package's
+  VERSION0 matching; Unicode case-insensitive matches can differ from stdlib `re`.
 - **Knowledge retrieval** — the `knowledge` tool keeps offline grep as its
   no-index default, with opt-in incremental semantic and hybrid retrieval over
   a local SQLite index. Stable source chunks retain page/line citations,
@@ -45,6 +49,9 @@ OpenAI-compatible endpoint by pointing at a different `base_url`.
   than dropped. An opt-in `llm.send_prompt_cache_key` pins a session's requests
   to the same cache node, and the persistent `memory.md` can likewise
   auto-compact at a size limit instead of refusing writes.
+  Token counting reuses an encoding already loaded in the process, or uses a
+  deterministic UTF-8 byte estimate. Rendering never downloads tokenizer data;
+  a disk cache alone does not enable exact token counting.
 - **Multimodal with graceful degradation** — attach any file via CLI `@path`
   or the web UI; it is copied into the workspace and announced to the model,
   and the agent can also attach a workspace image/PDF with `read_file`. A
@@ -377,7 +384,9 @@ uv run lingcore --profile my-agent --workspace /path/to/corpus
 ```
 
 The index lives at `<workspace>/.lingcore/knowledge.sqlite3` by default and is
-updated incrementally. A full index removes deleted files; `paths` on the
+updated incrementally. Concurrent index updates are serialized across tasks
+and processes using a persistent adjacent `.lock` file; waiting for the lock
+can be cancelled. A full index removes deleted files; `paths` on the
 `index` action updates only selected workspace-relative files/directories/globs.
 Queries never return changed or deleted indexed content: they show a stale-index
 notice until it is rebuilt. UTF-8 text is chunked with line ranges; PDFs are

@@ -442,7 +442,8 @@ async def test_index_parent_swap_fails_closed(tmp_path, monkeypatch):
     with pytest.raises(ToolError, match="cannot safely write knowledge index"):
         await knowledge(knowledge.args_model(action="index"), ctx)
     assert not list(outside.iterdir())
-    assert not list(held.iterdir())
+    assert [path.name for path in held.iterdir()] == ["knowledge.sqlite3.lock"]
+    assert (held / "knowledge.sqlite3.lock").read_bytes() == b""
 
 
 async def test_source_parent_swap_cannot_redirect_index_read(tmp_path, monkeypatch):

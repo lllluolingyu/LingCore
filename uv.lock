@@ -424,6 +424,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+    { name = "regex" },
     { name = "rich" },
     { name = "tiktoken" },
 ]
@@ -455,6 +456,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = "==1.2.2" },
     { name = "python-telegram-bot", extras = ["rate-limiter", "webhooks"], marker = "extra == 'telegram'", specifier = "==22.8" },
     { name = "pyyaml", specifier = "==6.0.3" },
+    { name = "regex", specifier = "==2026.5.9" },
     { name = "rich", specifier = "==15.0.0" },
     { name = "tiktoken", specifier = "==0.13.0" },
 ]

@@ -194,7 +194,13 @@ def load_skill_tools(skills: dict[str, Skill]) -> frozenset[str]:
                         f"{clobbered}; a skill may only register names it declares "
                         f"in provides"
                     )
-            except Exception as e:
+                missing = [t for t in skill.provides if t not in reg.names()]
+                if missing:
+                    raise ConfigError(
+                        f"skill {skill.name!r} declares provides={list(skill.provides)} "
+                        f"but did not register: {missing}"
+                    )
+            except BaseException as e:
                 # Restore the catalog and sys.modules to exactly their prior
                 # state — a failed load leaves no trace, so a fixed retry runs
                 # cleanly. (REGISTRY has no transaction API; restore in place to
@@ -202,19 +208,21 @@ def load_skill_tools(skills: dict[str, Skill]) -> frozenset[str]:
                 reg._tools.clear()
                 reg._tools.update(before_tools)
                 sys.modules.pop(mod_name, None)
-                if isinstance(e, ConfigError):
+                if isinstance(e, ConfigError) or not isinstance(e, Exception):
                     raise
                 raise ConfigError(
                     f"failed to import skill module for {skill.name!r} "
                     f"({mod_path}): {e!r}"
                 ) from e
-        # Validate the declared contract regardless of import vs. cache hit.
-        missing = [t for t in skill.provides if t not in reg.names()]
-        if missing:
-            raise ConfigError(
-                f"skill {skill.name!r} declares provides={list(skill.provides)} "
-                f"but did not register: {missing}"
-            )
+        else:
+            # Cache hits still validate the contract, without undoing a prior
+            # successful import when the declaration has changed.
+            missing = [t for t in skill.provides if t not in reg.names()]
+            if missing:
+                raise ConfigError(
+                    f"skill {skill.name!r} declares provides={list(skill.provides)} "
+                    f"but did not register: {missing}"
+                )
         newly |= set(skill.provides)
     return frozenset(newly)
 

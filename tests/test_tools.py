@@ -477,6 +477,39 @@ async def test_search_time_budget_returns_partial_result(ctx, monkeypatch):
     assert "stopped after the 1 ms budget" in out
 
 
+@pytest.mark.parametrize(
+    "mode,same_file", [("content", False), ("files", False), ("content", True)]
+)
+def test_search_interrupts_expensive_regex_and_keeps_prior_matches(
+    tmp_path, mode, same_file
+):
+    from lingcore.tool_options import parse_search_options
+    from lingcore.tools.builtin.fs import _search_sync
+
+    expensive = "a" * 30 + "!\n"
+    (tmp_path / "a.txt").write_text(
+        "aaaa\n" + (expensive if same_file else ""), encoding="utf-8"
+    )
+    if not same_file:
+        (tmp_path / "b.txt").write_text(expensive, encoding="utf-8")
+    local_ctx = ToolContext(workspace=tmp_path)
+    start = time.monotonic()
+
+    out = _search_sync(
+        SearchArgs(query=r"^(a|aa)+$", regex=True, mode=mode),
+        local_ctx,
+        parse_search_options({"time_budget_ms": 20}),
+    )
+
+    assert "stopped after the 20 ms budget" in out
+    assert "1 match in 1 file" in out
+    if mode == "content":
+        assert "a.txt:1: aaaa" in out
+    else:
+        assert out.startswith("a.txt\n")
+    assert time.monotonic() - start < 1.0
+
+
 async def test_search_counts_oversized_binary_and_non_utf8_skips(tmp_path):
     (tmp_path / "large.txt").write_bytes(b"12345")
     (tmp_path / "binary.txt").write_bytes(b"x\x00")

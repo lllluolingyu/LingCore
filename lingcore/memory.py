@@ -31,6 +31,7 @@ import math
 from typing import Any, Protocol
 
 import tiktoken
+import tiktoken.registry
 
 from lingcore.events import Compacted
 from lingcore.message import Message
@@ -49,11 +50,19 @@ class ShortTermMemory(Protocol):
     def messages(self) -> list[Message]: ...
 
 
-def _encoding(model: str) -> tiktoken.Encoding:
+def _encoding(model: str) -> tiktoken.Encoding | None:
+    """Reuse an already-loaded encoding without initiating I/O.
+
+    The pinned tiktoken loaders can download without a timeout, even when a
+    disk cache exists but is corrupt. Only inspect the process cache: a disk
+    vocabulary alone is insufficient, and a cold process uses the estimate.
+    Never invoke constructors or mutate tiktoken's shared registry.
+    """
     try:
-        return tiktoken.encoding_for_model(model)
+        name = tiktoken.encoding_name_for_model(model)
     except KeyError:
-        return tiktoken.get_encoding("cl100k_base")
+        name = "cl100k_base"
+    return tiktoken.registry.ENCODINGS.get(name)
 
 
 class WindowMemory:
@@ -73,10 +82,9 @@ class WindowMemory:
         # before the next eviction, so the prefix stays stable across many
         # turns. evict_to_ratio == 1.0 reproduces the legacy slide-every-render.
         self._evict_to_tokens = max(1, int(max_tokens * evict_to_ratio))
-        # Resolving a tiktoken encoding can download its vocabulary on first
-        # use. Agent assembly must remain offline-safe (especially for the
-        # Ollama profile), so resolution is lazy and a deterministic estimate
-        # takes over if the vocabulary is unavailable.
+        # Encoding lookup stays lazy and never downloads a vocabulary. Reuse
+        # an already-loaded encoding, or keep a deterministic estimate for
+        # this window's lifetime so counting stays stable across turns.
         self._model = model
         self._enc: tiktoken.Encoding | None = None
         self._encoding_resolved = False
@@ -132,11 +140,11 @@ class WindowMemory:
             try:
                 self._enc = _encoding(self._model)
             except Exception:
-                # Network/cache/plugin failures must not make local agent
-                # construction or rendering depend on an external download.
+                # An unavailable/incompatible tokenizer cache must not break
+                # local memory accounting.
                 self._enc = None
         if self._enc is not None:
-            return len(self._enc.encode(text))
+            return len(self._enc.encode(text, disallowed_special=()))
         if not text:
             return 0
         return math.ceil(len(text.encode("utf-8")) / 4)

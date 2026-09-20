@@ -43,8 +43,9 @@ Notable user-facing changes to LingCore are documented here. The project uses
   rendering, deterministic coverage reports, and oversized-output offloading.
   Search no longer follows symlinked files or directories, including links
   whose targets remain inside the workspace; search the target's real path.
-- `WindowMemory` resolves tiktoken lazily and falls back to a deterministic
-  UTF-8 byte-ratio estimate when encoding data is unavailable offline.
+- `WindowMemory` reuses tiktoken encodings already loaded in the process and
+  otherwise uses a deterministic UTF-8 byte-ratio estimate. Rendering never
+  downloads vocabulary data, including when the disk cache is missing.
 - Release wheels include immutable profile templates and a `py.typed` marker;
   writable workspaces, memory, and sessions are created only in initialized
   external/user-state profiles.
@@ -55,6 +56,15 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ### Fixed
 
+- Regex searches interrupt expensive individual matches at the scan deadline,
+  retain earlier matches, and report partial coverage. Matching uses the timed
+  `regex` VERSION0 engine; Unicode case folding can differ from stdlib `re`.
+- Concurrent knowledge index updates are serialized across tasks and processes
+  so partial updates cannot silently overwrite each other.
+- Skill modules missing a declared tool roll back all their registrations and
+  their module-cache entry, allowing a corrected module to be loaded again.
+- Token counting treats special-token-like text as ordinary text instead of
+  raising an error while rendering retained history.
 - Telegram delivery failures no longer abort and roll back an otherwise valid
   Agent turn; terminal replies use a best-effort plain-message fallback.
 - Invalid active-session selections self-heal to a fresh session instead of

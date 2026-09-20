@@ -172,6 +172,33 @@ class ConfinedDirectory:
         fd = os.open(leaf, flags, mode, dir_fd=self._fd)
         return os.fdopen(fd, "wb")
 
+    @contextmanager
+    def open_lock_file(self, name: str) -> Iterator[ConfinedLockFile]:
+        """Open a persistent, no-follow advisory lock beside confined state.
+
+        The entry is deliberately never removed: unlinking a released lock
+        would let waiters and new arrivals lock different inodes. Closing the
+        descriptor releases any acquired lock, including on cancellation.
+        """
+        leaf = _leaf_name(name)
+        self.ensure_anchored()
+        fd = os.open(
+            leaf,
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_NOFOLLOW
+            | os.O_NONBLOCK
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=self._fd,
+        )
+        try:
+            lock = ConfinedLockFile(self, leaf, fd)
+            lock.ensure_anchored()
+            yield lock
+        finally:
+            os.close(fd)
+
     def entry_exists(self, name: str) -> bool:
         """Whether an entry exists, including a dangling symlink."""
         self.ensure_anchored()
@@ -281,6 +308,44 @@ class ConfinedDirectory:
             src_dir_fd=self._fd,
             dst_dir_fd=self._fd,
         )
+
+
+class ConfinedLockFile:
+    """A persistent regular-file lock anchored to its opened parent."""
+
+    def __init__(self, directory: ConfinedDirectory, name: str, fd: int) -> None:
+        self._directory = directory
+        self._name = name
+        self._fd = fd
+
+    def ensure_anchored(self) -> None:
+        self._directory.ensure_anchored()
+        opened = os.fstat(self._fd)
+        named = os.stat(self._name, dir_fd=self._directory._fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(named.st_mode)
+            or opened.st_nlink != 1
+            or named.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+        ):
+            raise PathEscapeError(
+                f"confined lock file changed or is unsafe: {self._name!r}"
+            )
+
+    def try_acquire(self) -> bool:
+        """Try once without blocking; callers may wait asynchronously."""
+        try:
+            import fcntl
+        except ImportError:
+            raise PathEscapeError("secure confined locks are unsupported") from None
+        self.ensure_anchored()
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        self.ensure_anchored()
+        return True
 
 
 @contextmanager
