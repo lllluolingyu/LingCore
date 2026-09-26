@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from lingcore.message import ToolCall, ToolResult
+from lingcore.usage import TokenUsage
 
 
 @dataclass(slots=True)
@@ -98,6 +99,20 @@ class TurnCancelled:
     reason: str = "stopped by user"
 
 
+@dataclass(slots=True)
+class UsageReported:
+    """Provider-reported usage of one model request made during the turn.
+
+    Emitted after each request completes — the visible reply, a compaction or
+    memory-condensing summary, or a vision fallback description — and before
+    the turn's terminal event. A request interrupted by Stop never reports;
+    ``Agent.drain_usage()`` returns anything recorded but not yet emitted.
+    Frontends that do not account for usage can ignore it.
+    """
+
+    usage: TokenUsage
+
+
 AgentEvent = (
     TextDelta
     | ToolCallStarted
@@ -108,4 +123,5 @@ AgentEvent = (
     | SkillActivated
     | Compacted
     | TurnCancelled
+    | UsageReported
 )

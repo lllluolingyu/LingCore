@@ -147,6 +147,11 @@ class LLMCfg(BaseModel):
     # Off by default: a strict OpenAI-compatible server (Ollama/vLLM/proxy) may
     # reject the unknown body field. Flip it on for an endpoint that honors it.
     send_prompt_cache_key: bool = False
+    # Request the provider's usage block on every streamed response
+    # (``stream_options.include_usage``) and emit it as ``UsageReported``
+    # events. On by default so frontends can account for spend; turn it off
+    # for a strict OpenAI-compatible server that rejects ``stream_options``.
+    stream_usage: bool = True
 
     @field_validator("modalities")
     @classmethod

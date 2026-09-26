@@ -7,6 +7,12 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ### Added
 
+- Provider-reported token usage: `lingcore/usage.py` (`TokenUsage`/`UsageMeter`),
+  `stream_options.include_usage` on every streamed request (opt out with
+  `llm.stream_usage: false`), and a `UsageReported` agent event covering the
+  main model, the compaction/memory summarizer, and the vision fallback.
+  `Agent.drain_usage()` returns usage billed before a Stop landed.
+
 - A structured, read-only `git` builtin for coding profiles, covering status,
   diff, log, show, and branch inspection without shell approval while keeping
   repository-changing and networked operations behind `run_shell`.

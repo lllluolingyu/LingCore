@@ -18,6 +18,7 @@ from lingcore.events import (
     ToolCallStarted,
     ToolResultEvent,
     TurnCancelled,
+    UsageReported,
 )
 from lingcore.integrations.telegram.protocol import TelegramSender, message_id
 
@@ -134,6 +135,8 @@ class TelegramTurnRenderer:
             await self._render_status()
         elif isinstance(event, TurnCancelled):
             await self._discard_for_terminal(f"⏹️ {event.reason}")
+        elif isinstance(event, UsageReported):
+            pass  # accounting only; never rendered into a chat
         elif isinstance(event, Error):
             await self._discard_for_terminal(f"❌ {event.message}")
 

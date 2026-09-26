@@ -31,6 +31,7 @@ from lingcore.events import (
     ToolCallStarted,
     ToolResultEvent,
     TurnCancelled,
+    UsageReported,
 )
 from lingcore.guardrails import Guardrail, NoopGuardrail, build_guardrail
 from lingcore.ingest import ingest_attachments
@@ -43,6 +44,7 @@ from lingcore.media_types import (
 from lingcore.memory import ShortTermMemory, WindowMemory
 from lingcore.message import Attachment, Message, ToolCall, ToolResult, UserInput
 from lingcore.tools import Tool, ToolContext, ToolOutput, ToolRegistry
+from lingcore.usage import UsageMeter
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -121,6 +123,7 @@ class Agent:
         initial_tools: "frozenset[str] | None" = None,
         session_store: "SessionStore | None" = None,
         system_prompt: str | None = None,
+        usage_meter: UsageMeter | None = None,
     ) -> None:
         # v0.1 accepted a static prompt as the fourth positional argument or
         # as ``system_prompt=``. Keep both forms while routing new code through
@@ -156,6 +159,10 @@ class Agent:
         # Text-fallback adapter for attachment kinds the model lacks
         # (None — the all-native default — costs nothing).
         self.media_adapter = media_adapter
+        # Provider usage reported by this agent's clients; drained into
+        # ``UsageReported`` events by ``run``. An injected client may record
+        # into ``agent.usage_meter`` itself.
+        self.usage_meter = usage_meter or UsageMeter()
         self._session_store = session_store
         if session_store is not None and (
             session_id is None or not hasattr(self.memory, "last_sequence")
@@ -249,6 +256,9 @@ class Agent:
         from lingcore.llm import LLMClient
         from lingcore.tools import REGISTRY, ToolContext
 
+        # One meter per agent: the main client doubles as the compaction and
+        # memory summarizer, so every request it makes is accounted here.
+        usage_meter = UsageMeter()
         client: _LLMLike = llm or LLMClient(
             model=profile.llm.model,
             api_key=profile.llm.resolve_api_key(getattr(profile, "_profile_env", {})),
@@ -257,6 +267,8 @@ class Agent:
             max_retries=profile.llm.max_retries,
             timeout=profile.llm.timeout,
             modalities=profile.llm.modalities,
+            stream_usage=profile.llm.stream_usage,
+            usage_sink=usage_meter.record,
         )
 
         # --- Modality fallbacks (only when the model lacks a native kind) ----
@@ -280,6 +292,8 @@ class Agent:
                     sampling=fb.image.sampling.as_kwargs(),
                     max_retries=fb.image.max_retries,
                     timeout=fb.image.timeout,
+                    stream_usage=fb.image.stream_usage,
+                    usage_sink=usage_meter.record,
                 )
             media_adapter = MediaAdapter(
                 native,
@@ -551,9 +565,20 @@ class Agent:
             media_adapter=media_adapter,
             initial_tools=initial_tools_set,
             session_store=session_store,
+            usage_meter=usage_meter,
         )
         agent._turn_index = restored_turn_index
         return agent
+
+    def drain_usage(self) -> list[UsageReported]:
+        """Return usage recorded but not yet emitted by ``run``.
+
+        A frontend that stops a turn calls this after
+        ``finalize_cancelled_turn()``: requests that completed before the
+        cancellation landed were billed even though their events never
+        reached the stream.
+        """
+        return [UsageReported(usage) for usage in self.usage_meter.drain()]
 
     def cancel_turn(self) -> bool:
         """Request cancellation of the task currently driving ``run``.
@@ -721,6 +746,10 @@ class Agent:
                         event = await anext(turn)
                     except StopAsyncIteration:
                         break
+                    # Usage precedes the event that followed its request, so
+                    # it always arrives before the turn's terminal event.
+                    for usage in self.usage_meter.drain():
+                        yield UsageReported(usage)
                     yield event
         except asyncio.CancelledError:
             # Cancellation alone deliberately retains the checkpoint for the
@@ -760,6 +789,8 @@ class Agent:
                 message += (
                     f"; rollback failed: {type(rollback_exc).__name__}: {rollback_exc}"
                 )
+            for usage in self.usage_meter.drain():
+                yield UsageReported(usage)
             yield Error(message)
         except BaseException:
             # Do not turn process-level exits into ordinary agent events, but

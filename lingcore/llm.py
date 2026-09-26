@@ -24,6 +24,12 @@ open already spent the SDK's budget or the request itself is invalid. The
 agent loop owns the recovery for retryable failures (discard the partial
 turn, announce it, re-request) — so already-emitted tokens are never silently
 replayed or duplicated.
+
+Usage is requested with ``stream_options.include_usage`` (unless the profile
+opts out with ``llm.stream_usage: false``) and handed to an optional
+``usage_sink`` once per request, including a request whose stream was then
+classified as truncated — its tokens were still billed. The sink receives an
+SDK-free :class:`~lingcore.usage.TokenUsage`.
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ from openai import AsyncOpenAI
 
 from lingcore.errors import LLMStreamError
 from lingcore.message import NATIVE_MODALITIES, Message, ToolCall
+from lingcore.usage import UsageSink, usage_from_openai
 
 # Connect phase fails fast even when ``timeout`` (the read/inactivity window) is
 # generous — a black-hole host shouldn't hold a slot for the full read window.
@@ -114,8 +121,15 @@ class LLMClient:
         http_client: Any = None,
         modalities: Collection[str] | None = None,
         prompt_cache_key: str | None = None,
+        stream_usage: bool = True,
+        usage_sink: UsageSink | None = None,
     ) -> None:
         self.model = model
+        # Ask for the trailing usage-only chunk and report it to ``usage_sink``.
+        # A strict OpenAI-compatible server that rejects ``stream_options`` can
+        # opt out through ``llm.stream_usage: false``.
+        self._stream_usage = stream_usage
+        self.usage_sink = usage_sink
         self.sampling = sampling or {}
         # Optional OpenAI prompt-cache routing key (typically the session id):
         # sent with every request so same-key traffic prefers the same warm
@@ -161,6 +175,8 @@ class LLMClient:
         # Route same-session requests to the same warm prompt-cache node.
         if self._prompt_cache_key is not None:
             kwargs["prompt_cache_key"] = self._prompt_cache_key
+        if self._stream_usage:
+            kwargs["stream_options"] = {"include_usage": True}
         # The SDK applies the client's retry policy to this request: a transient
         # 429/5xx/connection failure before the stream opens is retried (with
         # backoff that honors Retry-After), and once the stream is yielding
@@ -195,9 +211,18 @@ class LLMClient:
 
         accumulators: dict[int, _ToolCallAccumulator] = {}
         finish_reason: str | None = None
+        usage: Any = None
+        served_model: str | None = None
 
         try:
             async for event in stream:
+                # The usage block normally rides a trailing chunk with no
+                # choices, after the finish reason; keep the last one seen.
+                if getattr(event, "usage", None) is not None:
+                    usage = event.usage
+                model_name = getattr(event, "model", None)
+                if isinstance(model_name, str) and model_name:
+                    served_model = model_name
                 if not event.choices:
                     continue  # e.g. a trailing usage-only chunk
                 choice = event.choices[0]
@@ -219,10 +244,14 @@ class LLMClient:
                     finish_reason = choice.finish_reason
         except Exception as e:
             await _close_quietly(stream)
+            self._report_usage(served_model, usage)
             raise LLMStreamError(
                 f"stream interrupted: {_describe(e)}", retryable=True
             ) from e
 
+        # Reported before the terminal chunk: a consumer may stop iterating as
+        # soon as it has the tool calls, and billed tokens must not be lost.
+        self._report_usage(served_model, usage)
         if finish_reason is None:
             # The server closed the stream without ever sending a finish
             # reason: a truncated response. Surfacing it beats silently
@@ -239,3 +268,12 @@ class LLMClient:
             else None
         )
         yield LLMChunk(tool_calls=tool_calls, finish_reason=finish_reason)
+
+    def _report_usage(self, served_model: str | None, usage: Any) -> None:
+        if self.usage_sink is None:
+            return
+        # Prefer the id the provider says served the request (it may be a
+        # dated snapshot of the configured alias).
+        parsed = usage_from_openai(served_model or self.model, usage)
+        if parsed is not None:
+            self.usage_sink(parsed)

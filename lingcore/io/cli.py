@@ -28,6 +28,7 @@ from lingcore.events import (
     ToolCallStarted,
     ToolResultEvent,
     TurnCancelled,
+    UsageReported,
 )
 from lingcore.media import attachment_from_path
 from lingcore.media_types import (
@@ -222,6 +223,9 @@ class CLIFrontend:
             case TurnCancelled(reason):
                 self._break_line()
                 self.console.print(f"[yellow]■ {escape(reason)}[/]")
+            case UsageReported():
+                # Accounting detail; a terminal session stays readable without it.
+                pass
             case Final(_):
                 self._break_line()
             case Error(message):

@@ -104,6 +104,8 @@ class _Choice:
 @dataclass
 class _Event:
     choices: list[_Choice] = field(default_factory=list)
+    usage: Any = None
+    model: str | None = None
 
 
 async def make_openai_stream(events: list[_Event]):
