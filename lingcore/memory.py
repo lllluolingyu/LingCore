@@ -94,9 +94,23 @@ class WindowMemory:
         # retention is bounded by the window rather than growing with the whole
         # conversation — the store keeps full history for resume, not this list.
         self._floor = 0
+        # Live state (e.g. the todo list) that must outlive eviction; see
+        # ``set_pinned_note``.
+        self._pinned_note = ""
 
     def add(self, message: Message) -> None:
         self._messages.append(message)
+
+    def set_pinned_note(self, note: str) -> None:
+        """Text that must stay visible to the model after old history goes.
+
+        The note is not rendered on every request, because that would change
+        the cached prefix whenever the note changes. Eviction inserts it as one
+        synthetic message at the head of the retained set. Compaction appends it
+        to the summary. Between those points the rendered list stays append-only.
+        Pass ``""`` to clear it.
+        """
+        self._pinned_note = note.strip()
 
     def replace(self, messages: list[Message]) -> None:
         """Replace the retained working set and begin a fresh cache epoch."""
@@ -193,6 +207,11 @@ class WindowMemory:
         msgs = sum(block_msgs)
         if toks <= self.max_tokens and msgs <= self.max_messages:
             return  # within budget — prefix stays byte-stable, cache hits
+        if self._pinned_note:
+            # Reserve room for the note re-inserted below, or it would push the
+            # window straight back over a cap and re-evict on the next render.
+            toks += self._tokens(_pinned_message(self._pinned_note))
+            msgs += 1
         drop = 0
         while drop < n - 1 and (
             toks > self._evict_to_tokens or msgs > self.max_messages
@@ -201,7 +220,14 @@ class WindowMemory:
             msgs -= block_msgs[drop]
             drop += 1
         if drop:
-            self._messages = [m for block in blocks[drop:] for m in block]
+            # A previous pinned note is always the oldest block, so it is among
+            # the dropped ones; filtering is only a guard against duplicates.
+            retained = [
+                m for block in blocks[drop:] for m in block if not _is_pinned(m)
+            ]
+            if self._pinned_note:
+                retained.insert(0, _pinned_message(self._pinned_note))
+            self._messages = retained
             self._floor += drop
 
     async def maybe_compact(self, system_prompt: str = "") -> Compacted | None:
@@ -212,6 +238,21 @@ class WindowMemory:
     @property
     def messages(self) -> list[Message]:
         return list(self._messages)
+
+
+_PINNED_NAME = "pinned"
+
+
+def _pinned_message(note: str) -> Message:
+    return Message(
+        role="user",
+        name=_PINNED_NAME,
+        content=f"[Earlier conversation was trimmed]\n{note}",
+    )
+
+
+def _is_pinned(message: Message) -> bool:
+    return message.role == "user" and message.name == _PINNED_NAME
 
 
 # Prompt for the compaction summarizer. Kept terse and instruction-only so the
@@ -270,7 +311,17 @@ class SummarizingMemory:
         return self._w.messages
 
     # --- compaction ----------------------------------------------------
+    def set_pinned_note(self, note: str) -> None:
+        """Pin live state (e.g. the todo list) through compaction *and* eviction.
+
+        Compaction appends the note verbatim to its summary instead of
+        summarizing it; eviction inserts it at the retained head (see
+        ``WindowMemory.set_pinned_note``).
+        """
+        self._w.set_pinned_note(note)
+
     async def maybe_compact(self, system_prompt: str = "") -> Compacted | None:
+        pinned = self._w._pinned_note
         msgs = self._w._messages
         if not msgs:
             return None
@@ -311,7 +362,8 @@ class SummarizingMemory:
         summary_msg = Message(
             role="user",
             name="summary",
-            content=f"[Earlier conversation, summarized]\n{summary}",
+            content=f"[Earlier conversation, summarized]\n{summary}"
+            + (f"\n\n{pinned}" if pinned else ""),
         )
         tail_msgs = [m for b in blocks[split:] for m in b]
         self._w._messages = [summary_msg, *tail_msgs]

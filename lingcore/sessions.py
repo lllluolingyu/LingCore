@@ -44,6 +44,7 @@ import re
 import sqlite3
 import threading
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +55,7 @@ from pydantic import BaseModel, Field
 from lingcore.errors import ConfigError, SessionError
 from lingcore.events import Compacted
 from lingcore.message import Message
+from lingcore.todos import TodoItem, todos_from_payload, todos_payload
 
 if TYPE_CHECKING:
     from lingcore.config import AgentProfile
@@ -66,7 +68,7 @@ _SCHEMA_VERSION = 2
 _TITLE_LIMIT = 60
 _ID_RE = re.compile(r"[0-9a-f]{32}")
 _PREFIX_RE = re.compile(r"[0-9a-f]{1,32}")
-_SESSION_EVENT_KINDS = frozenset({"compaction", "skill_state"})
+_SESSION_EVENT_KINDS = frozenset({"compaction", "skill_state", "todo_state"})
 
 _DDL = [
     """
@@ -673,6 +675,47 @@ class SessionStore:
             },
         )
 
+    def save_todo_state(
+        self, session_id: str, todos: Sequence[TodoItem]
+    ) -> SessionEvent:
+        """Persist the complete todo checklist, anchored to the latest message.
+
+        Rows are complete snapshots (each bounded by the tool's item and
+        content caps), so rewinding a branch restores the previous list simply
+        by removing the later rows.
+        """
+        message_seq = self.next_sequence(session_id) - 1
+        if message_seq < 0:
+            raise SessionError("cannot save todo state before the first message")
+        return self.append_event(
+            session_id,
+            message_seq=message_seq,
+            kind="todo_state",
+            payload=todos_payload(todos),
+        )
+
+    def latest_todos(self, session_id: str) -> tuple[TodoItem, ...]:
+        """Newest persisted todo checklist; empty when absent or corrupt.
+
+        Unlike skill state this grants nothing, so a corrupt latest row simply
+        yields an empty list rather than needing a fail-closed tombstone.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT e.payload FROM session_events e "
+                "WHERE e.session_id = ? AND e.kind = 'todo_state' "
+                "AND EXISTS(SELECT 1 FROM messages m "
+                "WHERE m.session_id = e.session_id AND m.seq = e.message_seq) "
+                "ORDER BY e.event_seq DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return ()
+        try:
+            return todos_from_payload(json.loads(row[0])) or ()
+        except ValueError:
+            return ()
+
     def fork_session(
         self,
         session_id: str,
@@ -899,6 +942,11 @@ class SessionStore:
                                     )
                                     if not metadata.snapshot_superseded:
                                         continue
+                            elif event.kind == "todo_state":
+                                todos = todos_from_payload(event.payload)
+                                if todos is None:
+                                    raise ValueError("invalid todo-state payload")
+                                event.payload = todos_payload(todos)
                             else:
                                 normalized = _normalized_skill_event_payload(
                                     event.payload
@@ -1385,6 +1433,12 @@ class SessionMemory:
     def set_compaction_turn_index(self, turn_index: int) -> None:
         """Supply the agent's validated iteration count for the next snapshot."""
         self._compaction_turn_index = turn_index
+
+    def set_pinned_note(self, note: str) -> None:
+        """Forward live state (todo list) that must survive compaction/eviction."""
+        setter = getattr(self._inner, "set_pinned_note", None)
+        if callable(setter):
+            setter(note)
 
     async def maybe_compact(self, system_prompt: str = "") -> Compacted | None:
         # The transcript remains lossless, while the derived working-set

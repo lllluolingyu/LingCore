@@ -28,6 +28,7 @@ from lingcore.events import (
     SkillActivated,
     StreamRetry,
     TextDelta,
+    TodoUpdated,
     ToolCallStarted,
     ToolResultEvent,
     TurnCancelled,
@@ -43,6 +44,7 @@ from lingcore.media_types import (
 )
 from lingcore.memory import ShortTermMemory, WindowMemory
 from lingcore.message import Attachment, Message, ToolCall, ToolResult, UserInput
+from lingcore.todos import TodoItem, TodoState
 from lingcore.tools import Tool, ToolContext, ToolOutput, ToolRegistry
 from lingcore.usage import UsageMeter
 
@@ -124,6 +126,7 @@ class Agent:
         session_store: "SessionStore | None" = None,
         system_prompt: str | None = None,
         usage_meter: UsageMeter | None = None,
+        todo_state: TodoState | None = None,
     ) -> None:
         # v0.1 accepted a static prompt as the fourth positional argument or
         # as ``system_prompt=``. Keep both forms while routing new code through
@@ -156,6 +159,8 @@ class Agent:
         self._session_id = session_id
         # Shared skill runtime state (None when skills are not configured).
         self.skill_state = skill_state
+        # Shared todo checklist (None unless the todo_write tool is enabled).
+        self.todo_state = todo_state
         # Text-fallback adapter for attachment kinds the model lacks
         # (None — the all-native default — costs nothing).
         self.media_adapter = media_adapter
@@ -186,6 +191,7 @@ class Agent:
         self._turn_index_checkpoint: int | None = None
         self._turn_skills_checkpoint: list[str] | None = None
         self._turn_skill_approvals_checkpoint: dict[str, frozenset[str]] | None = None
+        self._turn_todos_checkpoint: tuple[TodoItem, ...] | None = None
         self._turn_message_seq: int | None = None
         self._turn_cancel_requested = False
         # If durable rollback fails after the in-memory lease is released, no
@@ -485,6 +491,16 @@ class Agent:
             # Share the live state object with the activate_skill tool.
             tool_ctx.options[SKILL_STATE_KEY] = skill_state
 
+        # --- Todo checklist (only when the todo_write tool is enabled) -------
+        todo_state: TodoState | None = None
+        if "todo_write" in profile.tools:
+            from lingcore.tools.builtin.todo import TODO_STATE_KEY
+
+            todo_state = TodoState()
+            if session_store is not None and sid is not None:
+                todo_state.items = session_store.latest_todos(sid)
+            tool_ctx.options[TODO_STATE_KEY] = todo_state
+
         # --- Build composer ----------------------------------------------
         # LayeredComposer when .md layers, memory, or skills exist; else Static.
         composer: PromptComposer
@@ -533,6 +549,7 @@ class Agent:
             bool(layers or includes or static_skill_layers)
             or memory_path is not None
             or skill_state is not None
+            or bool(profile.persona.project_instructions)
         )
         if needs_layering:
             # persona.system_prompt is the inline *fallback* persona: fold it in
@@ -546,6 +563,8 @@ class Agent:
                 layers=base_layers + includes + static_skill_layers,
                 memory_path=memory_path,
                 skill_instructions=skill_state.instruction_map() if skill_state else {},
+                workspace=workspace,
+                project_instructions=tuple(profile.persona.project_instructions),
             )
         else:
             composer = StaticComposer(profile.persona.system_prompt)
@@ -566,6 +585,7 @@ class Agent:
             initial_tools=initial_tools_set,
             session_store=session_store,
             usage_meter=usage_meter,
+            todo_state=todo_state,
         )
         agent._turn_index = restored_turn_index
         return agent
@@ -641,6 +661,8 @@ class Agent:
                 self.skill_state.approved_high_risk = dict(
                     self._turn_skill_approvals_checkpoint or {}
                 )
+            if self.todo_state is not None and self._turn_todos_checkpoint is not None:
+                self.todo_state.items = self._turn_todos_checkpoint
             if (
                 self._session_store is not None
                 and self._session_id is not None
@@ -670,6 +692,7 @@ class Agent:
         self._turn_index_checkpoint = None
         self._turn_skills_checkpoint = None
         self._turn_skill_approvals_checkpoint = None
+        self._turn_todos_checkpoint = None
         self._turn_message_seq = None
         self._turn_cancel_requested = False
 
@@ -718,6 +741,9 @@ class Agent:
             if self.skill_state is not None
             else None
         )
+        turn_todos_checkpoint = (
+            self.todo_state.items if self.todo_state is not None else None
+        )
         lease = object()
         self._active_turn_task = asyncio.current_task()
         self._turn_lease = lease
@@ -726,6 +752,7 @@ class Agent:
         self._turn_index_checkpoint = turn_index_checkpoint
         self._turn_skills_checkpoint = turn_skills_checkpoint
         self._turn_skill_approvals_checkpoint = turn_skill_approvals_checkpoint
+        self._turn_todos_checkpoint = turn_todos_checkpoint
         self._turn_message_seq = None
         self._turn_cancel_requested = False
 
@@ -856,6 +883,15 @@ class Agent:
             )
             system_prompt = await self.composer.compose(compose_ctx)
 
+            # The live todo list is carried by tool results, which compaction
+            # summarizes away and eviction drops. Memory re-pins this note in
+            # front of whatever survives either, so the model never loses the
+            # list while TodoState still holds it. Refreshed every iteration
+            # because the previous tool batch may have changed it.
+            set_pinned = getattr(self.memory, "set_pinned_note", None)
+            if callable(set_pinned) and self.todo_state is not None:
+                set_pinned(self.todo_state.pinned_note())
+
             # Turn-boundary compaction: once per turn, before the first request,
             # so that request already sees the compacted context. Done here (not
             # mid tool-loop) so within-turn iterations stay append-only and
@@ -943,6 +979,7 @@ class Agent:
             before_approvals = (
                 dict(self.skill_state.approved_high_risk) if self.skill_state else {}
             )
+            before_todos = self.todo_state.items if self.todo_state else None
             results = await self._dispatch(assistant.tool_calls)
             for result in results:
                 self.memory.add(Message.from_tool_result(result))
@@ -1008,6 +1045,13 @@ class Agent:
                     yield SkillActivated(name=name, active=True)
                 for name in deactivated:
                     yield SkillActivated(name=name, active=False)
+
+            if self.todo_state is not None and self.todo_state.items != before_todos:
+                if self._session_store is not None and self._session_id is not None:
+                    self._session_store.save_todo_state(
+                        self._session_id, self.todo_state.items
+                    )
+                yield TodoUpdated(todos=self.todo_state.items)
 
         self._clear_turn_state(lease)
         yield Error(f"reached max iterations ({self.max_iters}) without a final reply")

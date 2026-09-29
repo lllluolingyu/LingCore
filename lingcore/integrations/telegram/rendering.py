@@ -15,6 +15,7 @@ from lingcore.events import (
     SkillActivated,
     StreamRetry,
     TextDelta,
+    TodoUpdated,
     ToolCallStarted,
     ToolResultEvent,
     TurnCancelled,
@@ -132,6 +133,17 @@ class TelegramTurnRenderer:
             self._activity.append(
                 f"context compacted: {event.summarized_messages} messages"
             )
+            await self._render_status()
+        elif isinstance(event, TodoUpdated):
+            done = sum(1 for item in event.todos if item.status == "completed")
+            current = next(
+                (item.content for item in event.todos if item.status == "in_progress"),
+                None,
+            )
+            summary = f"todos: {done}/{len(event.todos)} done"
+            if current:
+                summary += f" — now: {current}"
+            self._activity.append(summary)
             await self._render_status()
         elif isinstance(event, TurnCancelled):
             await self._discard_for_terminal(f"⏹️ {event.reason}")

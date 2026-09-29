@@ -38,6 +38,14 @@ _SHELL_CONTROL_TOKENS = (
 
 class ShellArgs(BaseModel):
     command: str = Field(description="The shell command to execute in the workspace.")
+    timeout: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Optional timeout in seconds for a slow build or test run; clamped "
+            "to the profile's run_shell.max_timeout. Omit for the default."
+        ),
+    )
 
 
 def _has_shell_control(command: str) -> bool:
@@ -126,15 +134,16 @@ async def run_shell(args: ShellArgs, ctx: ToolContext) -> str:
         getenv=ctx.getenv,
     )
 
+    timeout = options.effective_timeout(args.timeout)
     try:
         stdout, truncated = await asyncio.wait_for(
             _read_capped(execution.process, options.max_capture_bytes),
-            timeout=options.timeout,
+            timeout=timeout,
         )
     except asyncio.TimeoutError:
         await _abort_best_effort(execution)
         raise ToolError(
-            f"command timed out after {options.timeout:g}s and was killed "
+            f"command timed out after {timeout:g}s and was killed "
             f"by the {execution.runner} runner: {args.command!r}"
         ) from None
     except asyncio.CancelledError:

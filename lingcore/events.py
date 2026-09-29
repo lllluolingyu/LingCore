@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from lingcore.message import ToolCall, ToolResult
+from lingcore.todos import TodoItem
 from lingcore.usage import TokenUsage
 
 
@@ -113,6 +114,17 @@ class UsageReported:
     usage: TokenUsage
 
 
+@dataclass(slots=True)
+class TodoUpdated:
+    """The model rewrote its task checklist (``todo_write``).
+
+    Carries the complete new list, emitted after the tool batch that changed
+    it. Frontends may render it as a checklist or ignore it.
+    """
+
+    todos: tuple[TodoItem, ...]
+
+
 AgentEvent = (
     TextDelta
     | ToolCallStarted
@@ -124,4 +136,5 @@ AgentEvent = (
     | Compacted
     | TurnCancelled
     | UsageReported
+    | TodoUpdated
 )

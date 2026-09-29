@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import sys
 from pathlib import Path
 
@@ -216,6 +217,21 @@ def _print_sessions(store: SessionStore | None, notice: str | None) -> int:
     return 0
 
 
+def _print_saved_session(
+    frontend: CLIFrontend, store: SessionStore | None, agent: Agent
+) -> None:
+    if store is None:
+        return
+    sid = getattr(agent.memory, "session_id", None)
+    if not isinstance(sid, str):
+        raise RuntimeError("session-backed memory did not expose its id")
+    if store.get(sid) is not None:  # row exists only if something was said
+        frontend.console.print(
+            f"[dim]session [/][cyan]{sid[:8]}[/][dim] saved — resume with: "
+            f"lingcore --resume {sid[:8]}[/]"
+        )
+
+
 async def _main_async(args: argparse.Namespace) -> int:
     profile_path = Path(args.profile)
     try:
@@ -298,62 +314,77 @@ async def _main_async(args: argparse.Namespace) -> int:
                     )
                     return 2
 
-        # tool_options is a shared mutable dict: the frontend's "allow always"
-        # action writes into it and the agent's ToolContext reads from it on
-        # every tool call.
-        tool_options = dict(profile.tool_options)
-        frontend = CLIFrontend(agent_name=profile.name, tool_options=tool_options)
-        try:
-            agent = Agent.from_profile(
-                profile,
-                confirm=frontend.confirm,
-                base_dir=Path.cwd(),
-                tool_options=tool_options,
-                session_store=store,
-                session_id=resume_meta.id if resume_meta else None,
-            )
-        except LingCoreError as e:
-            print(f"failed to build agent: {e}", file=sys.stderr)
-            return 2
-
-        frontend.console.print(
-            f"[bold]LingCore[/] · agent [cyan]{profile.name}[/] · "
-            f"model [cyan]{profile.llm.model}[/] · workspace [cyan]{agent.tool_ctx.workspace}[/]"
-        )
-        if notice:
-            frontend.console.print(f"[dim]{notice}[/]")
-        if resume_meta is not None:
-            frontend.show_resume(resume_meta, agent.memory.messages)
-        frontend.console.print("[dim]Type your message. /exit to quit.[/]")
-
-        try:
-            await run_session(agent, frontend)
-        except asyncio.CancelledError:
-            # asyncio.Runner implements Ctrl-C by cancelling the main task.
-            # Agent.run deliberately retains its checkpoint on cancellation;
-            # repair it before the store closes, then let Runner translate the
-            # cancellation to KeyboardInterrupt (main returns exit status 130).
-            if agent.turn_pending_finalization:
-                try:
-                    frontend.render(agent.finalize_cancelled_turn(reason="interrupted"))
-                except Exception as exc:
-                    frontend.console.print(
-                        f"failed to clean up interrupted turn: {exc}",
-                        style="red",
-                        markup=False,
-                    )
-            raise
-        except KeyboardInterrupt:
-            frontend.console.print("\n[dim]interrupted[/]")
-
-        if store is not None:
-            sid = getattr(agent.memory, "session_id", None)
-            if not isinstance(sid, str):
-                raise RuntimeError("session-backed memory did not expose its id")
-            if store.get(sid) is not None:  # row exists only if something was said
-                frontend.console.print(
-                    f"[dim]session [/][cyan]{sid[:8]}[/][dim] saved — resume with: lingcore -c[/]"
+        frontend = CLIFrontend(agent_name=profile.name, store=store)
+        session_id = resume_meta.id if resume_meta else None
+        first = True
+        while True:
+            # tool_options is a shared mutable dict: the frontend's "allow
+            # always" action writes into it and the agent's ToolContext reads
+            # from it on every tool call. Deep-copied per session so a session
+            # allowlist never leaks into the profile or the next session.
+            tool_options = copy.deepcopy(profile.tool_options)
+            frontend.attach(tool_options)
+            try:
+                agent = Agent.from_profile(
+                    profile,
+                    confirm=frontend.confirm,
+                    base_dir=Path.cwd(),
+                    tool_options=tool_options,
+                    session_store=store,
+                    session_id=session_id,
                 )
+            except LingCoreError as e:
+                print(f"failed to build agent: {e}", file=sys.stderr)
+                return 2
+
+            if first:
+                frontend.console.print(
+                    f"[bold]LingCore[/] · agent [cyan]{profile.name}[/] · "
+                    f"model [cyan]{profile.llm.model}[/] · workspace "
+                    f"[cyan]{agent.tool_ctx.workspace}[/]"
+                )
+                if notice:
+                    frontend.console.print(f"[dim]{notice}[/]")
+            if session_id is not None and store is not None:
+                meta = store.get(session_id)
+                if meta is not None:
+                    frontend.show_resume(meta, agent.memory.messages)
+            elif not first:
+                frontend.console.print("[dim]started a new session[/]")
+            if first:
+                frontend.console.print(
+                    "[dim]Type your message. /help for commands, Ctrl-C stops a "
+                    "turn, /exit to quit.[/]"
+                )
+            first = False
+
+            try:
+                await run_session(agent, frontend)
+            except asyncio.CancelledError:
+                # asyncio.Runner implements Ctrl-C by cancelling the main task.
+                # Agent.run deliberately retains its checkpoint on cancellation;
+                # repair it before the store closes, then let Runner translate
+                # the cancellation to KeyboardInterrupt (exit status 130).
+                if agent.turn_pending_finalization:
+                    try:
+                        frontend.render(
+                            agent.finalize_cancelled_turn(reason="interrupted")
+                        )
+                    except Exception as exc:
+                        frontend.console.print(
+                            f"failed to clean up interrupted turn: {exc}",
+                            style="red",
+                            markup=False,
+                        )
+                raise
+            except KeyboardInterrupt:
+                frontend.console.print("\n[dim]interrupted[/]")
+
+            _print_saved_session(frontend, store, agent)
+            switch = frontend.take_session_switch()
+            if switch is None:
+                break
+            session_id = switch.session_id
         return 0
     finally:
         if store is not None:

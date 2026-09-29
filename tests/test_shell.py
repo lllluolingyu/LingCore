@@ -295,3 +295,26 @@ async def test_capture_reports_only_discarded_bytes_as_truncated(
     ctx = _ctx(tmp_path, require_confirmation=False, max_capture_bytes=5)
     out = await run_shell(ShellArgs(command=f"printf {output}"), ctx)
     assert ("output exceeded 5 bytes" in out) is expected_truncated
+
+
+async def test_per_call_timeout_is_clamped_to_max_timeout(tmp_path):
+    from lingcore.sandbox import parse_shell_options
+
+    # max_timeout below timeout is a configuration error.
+    with pytest.raises(ValueError):
+        parse_shell_options({"timeout": 30, "max_timeout": 0.5})
+    ctx = _ctx(tmp_path, require_confirmation=False, timeout=0.2, max_timeout=0.4)
+    with pytest.raises(ToolError, match=r"timed out after 0\.4s"):
+        await run_shell(ShellArgs(command="sleep 5", timeout=600), ctx)
+
+
+async def test_per_call_timeout_can_extend_up_to_ceiling(tmp_path):
+    ctx = _ctx(tmp_path, require_confirmation=False, timeout=0.1, max_timeout=10)
+    out = await run_shell(ShellArgs(command="sleep 0.3; echo done", timeout=5), ctx)
+    assert "done" in out
+
+
+async def test_without_max_timeout_a_call_can_only_shorten(tmp_path):
+    ctx = _ctx(tmp_path, require_confirmation=False, timeout=0.3)
+    with pytest.raises(ToolError, match=r"timed out after 0\.3s"):
+        await run_shell(ShellArgs(command="sleep 5", timeout=60), ctx)

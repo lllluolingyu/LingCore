@@ -27,6 +27,19 @@ persona:
     unavailable, and host paths are hidden unless the profile explicitly mounts
     them read-only.
 
+    Work in small, verifiable steps: read a file before editing it, keep
+    changes minimal, and run the project's own tests or checks after changing
+    code. Report what you verified and what failed; never claim a check passed
+    without running it. Prefer `search` and the `git` tool over shell commands,
+    which need confirmation. Track work with three or more steps with
+    `todo_write`, keeping one item in_progress. Do not commit, push, or delete
+    files unless asked.
+  # The workspace's own agent instructions (build/test commands, conventions)
+  # are re-read into the prompt each request; the first file found wins.
+  project_instructions:
+    - AGENTS.md
+    - CLAUDE.md
+
 tools:
   - read_file
   - pdf2md
@@ -38,6 +51,7 @@ tools:
   - run_shell
   - fetch_url
   - patch_file
+  - todo_write
   - activate_skill
   - codex_agent
   - claude_code_agent
@@ -88,7 +102,10 @@ tool_options:
   #     - build
   #     - .next
   run_shell:
-    timeout: 60
+    # Default per-command timeout; the model may request up to max_timeout for
+    # a slow build or test suite by passing `timeout` on the call.
+    timeout: 120
+    max_timeout: 1800
     require_confirmation: true
     allow_patterns: []
     sandbox:
@@ -110,11 +127,19 @@ tool_options:
 #     base_url: http://localhost:11434/v1
 
 memory:
-  max_messages: 50
-  max_tokens: 16000
+  # Keep this within your local server's context window (Ollama's num_ctx).
+  max_messages: 200
+  max_tokens: 32000
+  evict_to_ratio: 0.5
+  compaction:
+    enabled: true
+    compact_at_ratio: 0.85
+    keep_recent_ratio: 0.35
+    max_summary_chars: 6000
 
 loop:
-  max_iters: 30
+  # Tool round-trips per user turn (read, edit, test, fix loops add up).
+  max_iters: 60
   parallel_tools: true
 
 guardrail:

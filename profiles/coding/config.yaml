@@ -27,6 +27,11 @@ persona:
     sandbox: the workspace is its only writable host mount, the host network is
     unavailable, and host paths are hidden unless the profile explicitly mounts
     them read-only.
+  # The workspace's own agent instructions (build/test commands, conventions)
+  # are re-read into the prompt each request; the first file found wins.
+  project_instructions:
+    - AGENTS.md
+    - CLAUDE.md
 
 tools:
   - read_file
@@ -39,6 +44,7 @@ tools:
   - run_shell
   - fetch_url
   - patch_file
+  - todo_write
   - activate_skill
   - codex_agent
   - claude_code_agent
@@ -89,7 +95,10 @@ tool_options:
   #     - build
   #     - .next
   run_shell:
-    timeout: 60
+    # Default per-command timeout; the model may request up to max_timeout for
+    # a slow build or test suite by passing `timeout` on the call.
+    timeout: 120
+    max_timeout: 1800
     require_confirmation: true
     # Stage shell output longer than this to <workspace>/.lingcore/tool-output/
     # and return a lean preview + path (read the rest with read_file). Set to 0
@@ -102,9 +111,16 @@ tool_options:
     # arguments (`git diff --no-index /dev/null /etc/passwd` reads any file;
     # `python -m pytest /tmp/x.py` runs arbitrary code) — so every pattern here
     # is an explicit operator decision. Shell control syntax (`;`, `&`, `&&`,
-    # pipes, redirects, substitutions, newlines) is never auto-approved. Example:
+    # pipes, redirects, substitutions, newlines) is never auto-approved. In the
+    # CLI, answering [A] at a prompt allows that token prefix for the current
+    # session only. A reasonable starting point for a Python project, since
+    # the sandbox keeps the network off and the workspace the only writable
+    # mount (each one still runs project code, e.g. conftest.py):
     # allow_patterns:
-    #   - "git status --short"
+    #   - "uv run pytest"
+    #   - "uv run ruff check"
+    #   - "uv run ruff format --check"
+    #   - "uv run mypy"
     allow_patterns: []
     sandbox:
       backend: bubblewrap
@@ -129,8 +145,10 @@ tool_options:
     max_entries: 200
 
 memory:
-  max_messages: 50
-  max_tokens: 16000
+  # Sized for real repositories: a few file reads plus test output must fit
+  # without immediately compacting away what the agent just read.
+  max_messages: 400
+  max_tokens: 120000
   # Evict in one chunk down to 50% of the budget (hysteresis) so the rendered
   # prefix stays stable across many turns — the key to prompt-cache hits.
   evict_to_ratio: 0.5
@@ -139,10 +157,11 @@ memory:
     enabled: true
     compact_at_ratio: 0.85
     keep_recent_ratio: 0.35
-    max_summary_chars: 4000
+    max_summary_chars: 8000
 
 loop:
-  max_iters: 30
+  # Tool round-trips per user turn (read, edit, test, fix loops add up).
+  max_iters: 100
   parallel_tools: true
 
 guardrail:

@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from lingcore.errors import ConfigError
 from lingcore.media_types import FALLBACK_TEXT_MAX_CHARS, NativeModality
 from lingcore.modality import DEFAULT_PDF_MAX_CHARS
-from lingcore.tool_options import parse_search_options
+from lingcore.tool_options import parse_search_options, parse_todo_max_items
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
@@ -189,6 +189,26 @@ class PersonaCfg(BaseModel):
 
     system_prompt: str = "You are a helpful assistant."
     include: list[str] = Field(default_factory=list)
+    # Workspace-relative instruction files (e.g. AGENTS.md, CLAUDE.md) tried in
+    # order; the first regular file found is re-read into the system prompt on
+    # every request. Repository content: read-only context, never permissions.
+    project_instructions: list[str] = Field(default_factory=list)
+
+    @field_validator("project_instructions")
+    @classmethod
+    def _check_project_instructions(cls, names: list[str]) -> list[str]:
+        for name in names:
+            parts = name.replace("\\", "/").split("/")
+            if (
+                not name.strip()
+                or name.startswith("/")
+                or any(part in ("", ".", "..") for part in parts)
+            ):
+                raise ValueError(
+                    "persona.project_instructions entries must be plain "
+                    f"workspace-relative file paths, got {name!r}"
+                )
+        return names
 
 
 class MediaFallbackCfg(BaseModel):
@@ -380,6 +400,8 @@ class AgentProfile(BaseModel):
             parse_shell_options(self.tool_options["run_shell"])
         if "search" in self.tool_options:
             parse_search_options(self.tool_options["search"])
+        if "todo_write" in self.tool_options:
+            parse_todo_max_items(self.tool_options["todo_write"])
         return self
 
     def initial_tool_set(self) -> frozenset[str]:

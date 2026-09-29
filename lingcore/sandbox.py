@@ -212,12 +212,27 @@ class ShellOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     timeout: float = Field(default=DEFAULT_SHELL_TIMEOUT, gt=0)
+    # Ceiling for a per-call ``timeout`` the model may request for a slow build
+    # or test run. Unset keeps ``timeout`` as the ceiling, so a call can only
+    # shorten it.
+    max_timeout: float | None = Field(default=None, gt=0)
     require_confirmation: bool = True
     allow_patterns: list[str] = Field(default_factory=list)
     max_capture_bytes: int = Field(default=DEFAULT_MAX_CAPTURE_BYTES, ge=1)
     offload_over_chars: int = Field(default=8_000, ge=0)
     max_output_chars: int = Field(default=DEFAULT_MAX_OUTPUT_CHARS, ge=1)
     sandbox: SandboxConfig | None = None
+
+    @model_validator(mode="after")
+    def _check_timeout_ceiling(self) -> ShellOptions:
+        if self.max_timeout is not None and self.max_timeout < self.timeout:
+            raise ValueError("run_shell.max_timeout must be at least run_shell.timeout")
+        return self
+
+    def effective_timeout(self, requested: float | None) -> float:
+        """Clamp a per-call timeout request to the configured ceiling."""
+        ceiling = self.max_timeout if self.max_timeout is not None else self.timeout
+        return min(requested if requested is not None else self.timeout, ceiling)
 
 
 @dataclass(slots=True)

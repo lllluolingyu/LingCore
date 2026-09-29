@@ -114,3 +114,106 @@ async def test_compose_called_per_iteration(tmp_path: Path):
     # Second LLM call must have seen the memory content in the system prompt.
     second_system = llm.calls[1][0]  # first message is system
     assert "remembered" in second_system.content
+
+
+# --- project instructions (AGENTS.md / CLAUDE.md) ---------------------------
+
+
+async def test_project_instructions_first_found_wins(tmp_path: Path):
+    (tmp_path / "CLAUDE.md").write_text("claude rules", encoding="utf-8")
+    c = LayeredComposer(
+        layers=["base"],
+        memory_path=None,
+        workspace=tmp_path,
+        project_instructions=("AGENTS.md", "CLAUDE.md"),
+    )
+    out = await c.compose(_ctx())
+    assert out.startswith("base\n\n# Project instructions (CLAUDE.md)")
+    assert "claude rules" in out
+
+    (tmp_path / "AGENTS.md").write_text("agents rules", encoding="utf-8")
+    out = await c.compose(_ctx())  # re-read on every compose
+    assert "agents rules" in out
+    assert "claude rules" not in out
+
+
+async def test_project_instructions_absent_adds_nothing(tmp_path: Path):
+    c = LayeredComposer(
+        layers=["base"],
+        memory_path=None,
+        workspace=tmp_path,
+        project_instructions=("AGENTS.md",),
+    )
+    assert await c.compose(_ctx()) == "base"
+
+
+async def test_project_instructions_never_follow_symlinks(tmp_path: Path):
+    outside = tmp_path / "outside.md"
+    outside.write_text("host secret", encoding="utf-8")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "AGENTS.md").symlink_to(outside)
+    (ws / "docs").symlink_to(tmp_path, target_is_directory=True)
+    from lingcore.composer import read_project_instructions
+
+    assert read_project_instructions(ws, ["AGENTS.md", "docs/outside.md"]) is None
+
+
+def test_project_instructions_are_bounded(tmp_path: Path):
+    from lingcore import composer
+
+    (tmp_path / "AGENTS.md").write_text(
+        "x" * (composer.PROJECT_INSTRUCTIONS_MAX_CHARS + 50), encoding="utf-8"
+    )
+    out = composer.read_project_instructions(tmp_path, ["AGENTS.md"])
+    assert out is not None and "truncated" in out
+    assert len(out) < composer.PROJECT_INSTRUCTIONS_MAX_CHARS + 1000
+
+    (tmp_path / "AGENTS.md").write_bytes(
+        b"y" * (composer.PROJECT_INSTRUCTIONS_MAX_BYTES + 1)
+    )
+    out = composer.read_project_instructions(tmp_path, ["AGENTS.md"])
+    assert out is not None and "was not loaded" in out
+    assert "yyyy" not in out
+
+
+async def test_from_profile_injects_workspace_instructions(tmp_path: Path):
+    from lingcore.agent import Agent
+    from lingcore.config import AgentProfile
+    from tests.fakes import FakeLLMClient
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "AGENTS.md").write_text("run make check", encoding="utf-8")
+    cfg = tmp_path / "p.yaml"
+    cfg.write_text(
+        f"""
+name: p
+workspace: {ws}
+llm: {{model: m}}
+persona:
+  system_prompt: inline persona
+  project_instructions: [AGENTS.md]
+tools: [read_file]
+""",
+        encoding="utf-8",
+    )
+    agent = Agent.from_profile(AgentProfile.load(cfg), llm=FakeLLMClient([]))
+    out = await agent.composer.compose(_ctx())
+    assert "inline persona" in out
+    assert "run make check" in out
+
+
+@pytest.mark.parametrize("bad", ["../AGENTS.md", "/etc/passwd", "a//b", "", "./x"])
+def test_project_instructions_config_rejects_unsafe_paths(tmp_path: Path, bad):
+    from lingcore.config import AgentProfile
+    from lingcore.errors import ConfigError
+
+    cfg = tmp_path / "p.yaml"
+    cfg.write_text(
+        "name: p\nllm: {model: m}\ntools: []\n"
+        f"persona: {{project_instructions: [{bad!r}]}}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="project_instructions"):
+        AgentProfile.load(cfg)

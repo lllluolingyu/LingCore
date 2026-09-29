@@ -23,7 +23,12 @@ OpenAI-compatible endpoint by pointing at a different `base_url`.
 - **Pluggable tools** — a tool is an `async` function plus a pydantic args
   model and a `@tool` decorator. The coding agent ships with file read/write/
   edit, patch, directory listing, search, URL fetch, structured read-only Git
-  inspection, and a confirmation-gated shell.
+  inspection, a confirmation-gated shell, and a `todo_write` task checklist.
+- **Task checklist** — `todo_write` lets the agent keep a whole-list-replaced
+  todo list for multi-step work. The list persists with the session, rolls back
+  with Stop/Edit, survives compaction verbatim, and frontends render it from a
+  `TodoUpdated` event. It is never injected into the system prompt, so updates
+  do not invalidate the cached prompt prefix.
 - **Safe bounded workspace search** — recursive content and filename lookup
   supports path scoping, globs, literal/regex and case-insensitive matching,
   context lines, directory pruning, and hard time/file/hit budgets. Candidate
@@ -246,8 +251,21 @@ success/failure only, never full result bodies. PTB rate-limits requests and
 retries one `RetryAfter`; if rendering still fails, LingCore keeps the completed
 turn and makes a best-effort plain-message delivery instead of rolling it back.
 
-Type a message; the agent streams its reply and shows each tool call. Shell
-commands prompt for confirmation before running. Type `/exit` to quit.
+Type a message; the agent streams its reply and shows each tool call, with a
+colored diff preview for `edit_file`/`patch_file` and a dim token-usage footer
+after each turn. Shell commands prompt for confirmation before running; `[A]`
+allows the displayed token prefix for the rest of the session. **Ctrl-C stops
+the running turn** (the submitted message is kept, its partial reply and tool
+state are discarded) and a second Ctrl-C quits. In-session commands:
+
+| Command | Effect |
+|---|---|
+| `/new` | start a fresh session |
+| `/sessions` | list stored sessions for the profile |
+| `/resume <id>` | switch to a stored session by id prefix |
+| `/usage` | token usage for the current session |
+| `/help` | list commands |
+| `/exit` | quit (also `/quit`, `/q`, Ctrl-D) |
 
 By default the agent works in a `workspace/` folder inside the profile
 directory (auto-created) — point it at a real project with
@@ -300,6 +318,10 @@ my-agent/
 `world.md`, `role.md`, and `workflow.md` are loaded automatically if present and
 composed in that order to form the system prompt. `config.yaml` may also set
 `persona.system_prompt` as an inline fallback and `persona.include` for extra files.
+`persona.project_instructions` lists workspace-relative instruction files (the
+coding profiles use `[AGENTS.md, CLAUDE.md]`): the first regular file found is
+re-read into the prompt on every request, through no-follow confined reads and
+bounded in size. It is read-only context and can never grant a tool.
 
 `--profile` accepts a directory or a direct path to any YAML file. LingCore
 loads only the `.env` beside that selected YAML—never one discovered from the

@@ -8,7 +8,9 @@ that is the whole point of routing everything through ``AgentEvent``.
 
 from __future__ import annotations
 
-from contextlib import aclosing
+import asyncio
+from collections.abc import Callable
+from contextlib import AbstractContextManager, aclosing, nullcontext
 from typing import Protocol
 
 from lingcore.agent import Agent
@@ -30,6 +32,30 @@ class Frontend(Protocol):
         ...
 
 
+class InterruptibleFrontend(Frontend, Protocol):
+    """Optional extension: a frontend that can stop a running turn.
+
+    ``run_session`` enters ``interrupt_scope(stop)`` around each turn; the
+    frontend calls ``stop()`` (``Agent.cancel_turn``) when the user asks to
+    stop, and ``run_session`` performs the await -> finalize handshake.
+    """
+
+    def interrupt_scope(
+        self, stop: Callable[[], bool]
+    ) -> AbstractContextManager[None]: ...
+
+
+async def _drive(agent: Agent, incoming: UserInput, frontend: Frontend) -> None:
+    turn = agent.run(incoming)
+    # ``async for`` does not guarantee immediate async-generator closure
+    # when code in its body raises. Own the stream explicitly so a broken
+    # renderer cannot leave Agent's turn checkpoint leased until a later
+    # garbage-collection pass.
+    async with aclosing(turn):
+        async for event in turn:
+            frontend.render(event)
+
+
 async def run_session(agent: Agent, frontend: Frontend) -> None:
     """Read user turns and stream agent events back until input ends.
 
@@ -48,11 +74,25 @@ async def run_session(agent: Agent, frontend: Frontend) -> None:
         )
         if not incoming.text.strip() and not incoming.attachments:
             continue
-        turn = agent.run(incoming)
-        # ``async for`` does not guarantee immediate async-generator closure
-        # when code in its body raises. Own the stream explicitly so a broken
-        # renderer cannot leave Agent's turn checkpoint leased until a later
-        # garbage-collection pass.
-        async with aclosing(turn):
-            async for event in turn:
-                frontend.render(event)
+        # The turn runs in its own task so a frontend-requested stop cancels
+        # only the turn, never the session loop.
+        task = asyncio.create_task(_drive(agent, incoming, frontend))
+        scope_factory = getattr(frontend, "interrupt_scope", None)
+        scope: AbstractContextManager[None] = (
+            scope_factory(agent.cancel_turn) if scope_factory else nullcontext()
+        )
+        try:
+            with scope:
+                await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if (current is not None and current.cancelling()) or not task.cancelled():
+                raise  # the session itself is being cancelled
+            # The user stopped the turn: repair it, keep the submitted message,
+            # and report requests billed before the cancellation landed.
+            if agent.turn_pending_finalization:
+                terminal = agent.finalize_cancelled_turn()
+                # Usage precedes the terminal event, as it does on a live turn.
+                for usage_event in agent.drain_usage():
+                    frontend.render(usage_event)
+                frontend.render(terminal)

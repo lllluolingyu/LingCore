@@ -5,6 +5,46 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+### Added
+
+- `todo_write`, a task-checklist tool for multi-step work. Each call replaces
+  the whole list (`content` + `pending`/`in_progress`/`completed`, at most one
+  in progress, `tool_options.todo_write.max_items` default 30). The loop emits
+  a new `TodoUpdated` event after the tool batch that changed it, persists the
+  list as a `todo_state` session event (no schema migration; older releases
+  skip the kind), restores it on resume and fork, and rolls it back with Stop
+  and Edit. Compaction appends the live list verbatim to its summary, and
+  window eviction re-inserts it as one synthetic message at the head of the
+  retained history (new `set_pinned_note` memory hook), so the model keeps
+  seeing the list after its tool result is gone. The list never enters the
+  system prompt, keeping the cached prefix stable. The CLI and
+  Telegram render it; both coding profiles enable it.
+- `persona.project_instructions`: workspace-relative instruction files (for
+  example `AGENTS.md`, `CLAUDE.md`) tried in order, with the first regular file
+  re-read into the system prompt on every request. Reads are confined and
+  no-follow, larger files are truncated or skipped with a note, and the content
+  is framed as repository context that cannot grant tools.
+- `run_shell` accepts a per-call `timeout`, clamped to the new
+  `tool_options.run_shell.max_timeout` (default: `timeout`, so a call can only
+  shorten it unless the profile raises the ceiling).
+- CLI: Ctrl-C stops the running turn through the cancel -> await -> finalize
+  handshake instead of quitting (a second Ctrl-C quits). `run_session` runs each
+  turn in its own task and accepts an optional frontend `interrupt_scope(stop)`.
+- CLI: `/new`, `/sessions`, `/resume <id>`, `/usage` and `/help`; diff previews
+  for `edit_file`/`patch_file`; a per-turn token-usage footer; and the shell
+  confirmation prompt now shows the exact pattern `[A]` would allow.
+
+### Changed
+
+- The coding profiles are sized for real repositories: a 120k-token working set
+  (32k for `coding_ollama`, which now also compacts), 100 tool iterations per
+  turn (60 local), a 120 s default shell timeout with a 30 min ceiling, and
+  project instructions enabled. The coding prompt layers were rewritten around
+  an explore -> plan -> edit -> verify -> report workflow with explicit safety
+  rules.
+- CLI session allowlists are deep-copied per session, so an `[A]` approval no
+  longer mutates the loaded profile's `tool_options` or survives `/new`.
+
 ## [0.3.0] - 2026-09-29
 
 ### Added

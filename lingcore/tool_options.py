@@ -188,3 +188,26 @@ def parse_search_options(raw: object) -> SearchOptions:
         ),
         exclude_dirs=frozenset(excludes),
     )
+
+
+TODO_OPTION_PATH = "tool_options.todo_write"
+_TODO_OPTION_NAMES = frozenset({"max_items"})
+
+
+def parse_todo_max_items(raw: object) -> int:
+    """Validate ``tool_options.todo_write`` and return its item cap."""
+    from lingcore.todos import DEFAULT_MAX_TODOS
+
+    if not isinstance(raw, Mapping):
+        raise ConfigError(f"{TODO_OPTION_PATH} must be a mapping")
+    unknown = sorted(str(name) for name in raw if name not in _TODO_OPTION_NAMES)
+    if unknown:
+        raise ConfigError(f"unknown {TODO_OPTION_PATH} option(s): {', '.join(unknown)}")
+    return int_option(
+        raw,
+        "max_items",
+        DEFAULT_MAX_TODOS,
+        minimum=1,
+        maximum=100,
+        option_path=TODO_OPTION_PATH,
+    )

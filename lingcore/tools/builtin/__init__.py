@@ -9,6 +9,7 @@ from lingcore.tools.builtin import (  # noqa: F401  (registration side effect)
     pdf,
     shell,
     skill,
+    todo,
     web,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "pdf",
     "shell",
     "skill",
+    "todo",
     "web",
 ]
