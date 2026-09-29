@@ -5,8 +5,19 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-29
+
 ### Added
 
+- Opt-in `run_shell` sandboxing through `tool_options.run_shell.sandbox`:
+  a Bubblewrap backend (empty mount namespace, read-only system paths,
+  private namespaces, dropped capabilities, bounded `/tmp`, networking off by
+  default) and a Docker/Podman OCI backend (fresh non-root container per
+  command, read-only root, mandatory CPU/memory/PID/storage budgets, and a
+  watchdog that removes containers after cancellation or process death).
+  Configured backends fail closed and never fall back to the host; every
+  result names its runner. `lingcore doctor` checks sandbox configuration and
+  executables. See `docs/sandboxing.md`.
 - Provider-reported token usage: `lingcore/usage.py` (`TokenUsage`/`UsageMeter`),
   `stream_options.include_usage` on every streamed request (opt out with
   `llm.stream_usage: false`), and a `UsageReported` agent event covering the
@@ -75,6 +86,26 @@ Notable user-facing changes to LingCore are documented here. The project uses
   Agent turn; terminal replies use a best-effort plain-message fallback.
 - Invalid active-session selections self-heal to a fresh session instead of
   permanently blocking messages and `/new`.
+- Shell cancellation, timeout, and exit-code diagnostics are no longer replaced
+  by a secondary sandbox cleanup failure; OCI cleanup failures leave the
+  removal watchdog armed.
+
+### Compatibility
+
+- Requires Python 3.11 or newer. `regex` is a new base dependency; Telegram
+  support is the optional `lingcore[telegram]` extra.
+- The bundled `coding` and `coding_ollama` profiles now run `run_shell` inside
+  Bubblewrap (`/usr/bin/bwrap`). Without it, shell calls fail closed with a tool
+  error; install Bubblewrap, switch the profile to the OCI backend, or remove
+  the `sandbox` block to return to the legacy host runner. Custom profiles that
+  omit `sandbox` keep the host runner unchanged.
+- The bundled coding profiles also enable `activate_skill` with the `codex` and
+  `claude-code` skills; their tools stay hidden until a confirmed activation.
+- Usage is requested on every stream via `stream_options.include_usage`. Set
+  `llm.stream_usage: false` for an OpenAI-compatible server that rejects it.
+- Session databases need no migration; schema v2 is unchanged.
+- LingChat builds that consume `UsageReported`/`drain_usage()` or
+  `skill_gated_tools` require `lingcore>=0.3.0`.
 
 ## [0.2.0] - 2026-07-20
 
@@ -144,5 +175,7 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 - Initial tagged preview of the config-driven async agent runtime.
 
+[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/lllluolingyu/LingCore/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/lllluolingyu/LingCore/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/lllluolingyu/LingCore/releases/tag/v0.1.0

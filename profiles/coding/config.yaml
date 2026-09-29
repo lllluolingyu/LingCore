@@ -9,8 +9,8 @@ name: coding
 workspace: ${LINGCORE_WORKSPACE:-}
 
 llm:
-  model: ${LINGCORE_MODEL:-claude-opus-5}
-  base_url: ${LINGCORE_BASE_URL:-https://cf-fast.cctq.ai}
+  model: ${LINGCORE_MODEL:-claude-opus-5-5}
+  base_url: ${LINGCORE_BASE_URL:-https://www.cctq.ai}
   api_key_env: ${LINGCORE_API_KEY_ENV:-LLY_API_KEY}
   # Route same-session requests to the same warm prompt-cache node. Turn off if
   # your endpoint rejects the prompt_cache_key field.
