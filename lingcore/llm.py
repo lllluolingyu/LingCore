@@ -10,6 +10,12 @@ accumulates them internally and yields a single terminal chunk carrying the
 fully-assembled, parsed ``ToolCall`` list — so the loop never sees partial
 JSON.
 
+Reasoning state is opt-in (``preserve_reasoning``): a thinking-mode provider
+such as DeepSeek streams ``reasoning_content`` beside ``content`` and rejects a
+later tool-bearing request whose assistant messages don't carry it back. When
+enabled, the client yields those deltas as ``reasoning_delta`` (the loop stores
+them on the assistant ``Message``) and renders them back onto the wire.
+
 Transient-failure retry is two-tier. *Opening* the stream is delegated to the
 OpenAI SDK rather than hand-rolled: the SDK is header-aware (it honors
 ``Retry-After`` / ``retry-after-ms`` timing and the ``x-should-retry`` hint)
@@ -77,11 +83,14 @@ class LLMChunk:
     """One unit of streamed output.
 
     ``text_delta`` carries incremental assistant text for live rendering.
+    ``reasoning_delta`` carries incremental ``reasoning_content`` — only when
+    the client preserves reasoning; it is state to replay, not reply text.
     ``tool_calls`` is populated only on the final chunk of a turn, once all
     tool-call fragments have been assembled and their arguments parsed.
     """
 
     text_delta: str = ""
+    reasoning_delta: str = ""
     tool_calls: list[ToolCall] | None = None
     finish_reason: str | None = None
 
@@ -123,8 +132,13 @@ class LLMClient:
         prompt_cache_key: str | None = None,
         stream_usage: bool = True,
         usage_sink: UsageSink | None = None,
+        preserve_reasoning: bool = False,
     ) -> None:
         self.model = model
+        # Capture streamed ``reasoning_content`` and echo it back on assistant
+        # messages (DeepSeek thinking mode). Off ⇒ the field is neither read
+        # nor sent, so strict servers never see an unknown message key.
+        self._preserve_reasoning = preserve_reasoning
         # Ask for the trailing usage-only chunk and report it to ``usage_sink``.
         # A strict OpenAI-compatible server that rejects ``stream_options`` can
         # opt out through ``llm.stream_usage: false``.
@@ -201,7 +215,13 @@ class LLMClient:
         no SDK retry ever covers it and only the caller can decide to discard
         the partial turn and re-request.
         """
-        wire = [m.to_openai(attachment_modalities=self._modalities) for m in messages]
+        wire = [
+            m.to_openai(
+                attachment_modalities=self._modalities,
+                include_reasoning=self._preserve_reasoning,
+            )
+            for m in messages
+        ]
         try:
             stream = await self._open_stream(wire, tools)
         except Exception as e:
@@ -227,6 +247,11 @@ class LLMClient:
                     continue  # e.g. a trailing usage-only chunk
                 choice = event.choices[0]
                 delta = choice.delta
+
+                if self._preserve_reasoning:
+                    reasoning = getattr(delta, "reasoning_content", None)
+                    if isinstance(reasoning, str) and reasoning:
+                        yield LLMChunk(reasoning_delta=reasoning)
 
                 if getattr(delta, "content", None):
                     yield LLMChunk(text_delta=delta.content)

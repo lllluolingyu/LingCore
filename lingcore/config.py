@@ -152,6 +152,12 @@ class LLMCfg(BaseModel):
     # events. On by default so frontends can account for spend; turn it off
     # for a strict OpenAI-compatible server that rejects ``stream_options``.
     stream_usage: bool = True
+    # Preserve the model's streamed ``reasoning_content`` on each assistant
+    # message and send it back on later requests. Required by thinking-mode
+    # providers such as DeepSeek, which reject (400) a tool-bearing request
+    # whose earlier assistant messages omit it. Off by default: other
+    # OpenAI-compatible servers may reject the unknown message field.
+    preserve_reasoning: bool = False
 
     @field_validator("modalities")
     @classmethod

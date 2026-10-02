@@ -291,3 +291,16 @@ def test_old_style_image_dict_still_validates():
         }
     )
     assert att.kind == "image" and att.media_type == "image/png"
+
+
+def test_reasoning_content_round_trips_and_renders_only_on_request() -> None:
+    msg = Message.assistant("hi", reasoning_content="because")
+    assert Message.model_validate_json(msg.model_dump_json()) == msg
+    assert "reasoning_content" not in msg.to_openai()
+    assert msg.to_openai(include_reasoning=True)["reasoning_content"] == "because"
+    # Legacy rows lack the field entirely and still load.
+    legacy = Message.model_validate_json('{"role": "assistant", "content": "x"}')
+    assert legacy.to_openai(include_reasoning=True)["reasoning_content"] == ""
+    assert "reasoning_content" not in Message.user("q").to_openai(
+        include_reasoning=True
+    )

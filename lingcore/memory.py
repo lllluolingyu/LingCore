@@ -121,6 +121,9 @@ class WindowMemory:
         # Approximate but stable: encode content plus any tool-call argument
         # text. Exact accounting is the API's job; this only drives trimming.
         n = self._text_tokens(message.content or "")
+        if message.reasoning_content:
+            # Preserved reasoning is echoed on the wire, so it costs context.
+            n += self._text_tokens(message.reasoning_content)
         for attachment in message.attachments:
             # Floors reflect the wire cost a fallback can't capture: a native
             # image/PDF part (no fallback_text but real tokens), versus text

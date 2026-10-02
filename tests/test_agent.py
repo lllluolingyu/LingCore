@@ -114,6 +114,30 @@ async def test_tool_call_then_final(workspace):
     assert any(m.role == "tool" and m.content == "1\thello" for m in second_turn_msgs)
 
 
+async def test_reasoning_is_kept_on_assistant_and_replayed(workspace):
+    call = ToolCall(id="c1", name="read_file", arguments={"path": "a.txt"})
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(
+                tool_calls=[call], finish_reason="tool_calls", reasoning="need file"
+            ),
+            ScriptedTurn(text="hello", reasoning="got it"),
+        ]
+    )
+    agent = _agent(llm, workspace)
+    events = await _drain(agent, "read a.txt")
+
+    # Reasoning is state, not reply text: it never reaches the frontend.
+    assert "".join(e.text for e in events if isinstance(e, TextDelta)) == "hello"
+    assistants = [m for m in llm.calls[1] if m.role == "assistant"]
+    assert assistants[0].reasoning_content == "need file"
+    assert assistants[0].tool_calls == [call]
+
+    await _drain(agent, "again")
+    replayed = [m.reasoning_content for m in llm.calls[2] if m.role == "assistant"]
+    assert replayed == ["need file", "got it"]
+
+
 async def test_tool_output_attachments_are_hoisted(workspace):
     local_reg = ToolRegistry()
 

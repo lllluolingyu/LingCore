@@ -200,6 +200,76 @@ def test_full_modalities_normalize_to_native_fast_path():
 
 
 # --------------------------------------------------------------------------- #
+# Reasoning preservation — DeepSeek thinking mode needs reasoning echoed back. #
+# --------------------------------------------------------------------------- #
+
+
+async def test_reasoning_ignored_by_default(client, monkeypatch):
+    events = [
+        _Event([_Choice(_Delta(reasoning_content="think"))]),
+        _Event([_Choice(_Delta(content="ok"), finish_reason="stop")]),
+    ]
+    chunks = await _collect(client, monkeypatch, events)
+    assert all(c.reasoning_delta == "" for c in chunks)
+    assert "".join(c.text_delta for c in chunks) == "ok"
+
+
+async def test_reasoning_streamed_and_echoed_when_preserved(monkeypatch):
+    from lingcore.message import Message
+
+    client = LLMClient(
+        model="x",
+        api_key="k",
+        base_url="http://localhost/v1",
+        preserve_reasoning=True,
+    )
+    captured: dict = {}
+
+    async def fake_open(messages, tools):
+        captured["messages"] = messages
+        return make_openai_stream(
+            [
+                _Event([_Choice(_Delta(reasoning_content="step 1; "))]),
+                _Event([_Choice(_Delta(reasoning_content="step 2"))]),
+                _Event([_Choice(_Delta(content="answer"), finish_reason="stop")]),
+            ]
+        )
+
+    monkeypatch.setattr(client, "_open_stream", fake_open)
+    history = [
+        Message.user("q1"),
+        Message.assistant("a1", reasoning_content="earlier thought"),
+        Message.assistant("legacy"),  # recorded before reasoning was kept
+        Message.user("q2"),
+    ]
+    chunks = [c async for c in client.stream(history)]
+    assert "".join(c.reasoning_delta for c in chunks) == "step 1; step 2"
+    assert "".join(c.text_delta for c in chunks) == "answer"
+
+    wire = captured["messages"]
+    assert wire[1]["reasoning_content"] == "earlier thought"
+    # Every assistant message carries the field; DeepSeek 400s on omission.
+    assert wire[2]["reasoning_content"] == ""
+    assert "reasoning_content" not in wire[0]
+    assert "reasoning_content" not in wire[3]
+
+
+async def test_reasoning_not_sent_when_not_preserved(client, monkeypatch):
+    from lingcore.message import Message
+
+    captured: dict = {}
+
+    async def fake_open(messages, tools):
+        captured["messages"] = messages
+        return make_openai_stream([_Event([_Choice(_Delta(), finish_reason="stop")])])
+
+    monkeypatch.setattr(client, "_open_stream", fake_open)
+    history = [Message.user("q"), Message.assistant("a", reasoning_content="t")]
+    [c async for c in client.stream(history)]
+    assert "reasoning_content" not in captured["messages"][1]
+
+
+# --------------------------------------------------------------------------- #
 # prompt_cache_key — opt-in routing hint, passed through to create().          #
 # --------------------------------------------------------------------------- #
 
@@ -486,6 +556,37 @@ async def test_retry_and_timeout_flow_from_profile_to_client(tmp_path, monkeypat
     Agent.from_profile(AgentProfile.load(root))  # llm=None → builds the (spy) client
     assert captured["max_retries"] == 7
     assert captured["timeout"] == 42.0
+
+
+async def test_preserve_reasoning_flows_from_profile_to_client(tmp_path, monkeypatch):
+    import lingcore.llm as llm_mod
+    from lingcore.agent import Agent
+    from lingcore.config import AgentProfile
+
+    captured: dict = {}
+
+    class _SpyClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def stream(self, messages, tools=None):  # never called here
+            yield None
+
+    monkeypatch.setattr(llm_mod, "LLMClient", _SpyClient)
+    root = tmp_path / "p"
+    root.mkdir()
+    config = root / "config.yaml"
+    config.write_text("name: t\nllm:\n  model: m\ntools: []\n", encoding="utf-8")
+    Agent.from_profile(AgentProfile.load(root))
+    assert captured["preserve_reasoning"] is False
+
+    config.write_text(
+        "name: t\nllm:\n  model: deepseek-flash\n  preserve_reasoning: true\n"
+        "tools: []\n",
+        encoding="utf-8",
+    )
+    Agent.from_profile(AgentProfile.load(root))
+    assert captured["preserve_reasoning"] is True
 
 
 async def test_stream_retries_flow_from_profile_to_agent(tmp_path):

@@ -275,6 +275,7 @@ class Agent:
             modalities=profile.llm.modalities,
             stream_usage=profile.llm.stream_usage,
             usage_sink=usage_meter.record,
+            preserve_reasoning=profile.llm.preserve_reasoning,
         )
 
         # --- Modality fallbacks (only when the model lacks a native kind) ----
@@ -922,9 +923,12 @@ class Agent:
             attempt = 0
             while True:
                 content_parts: list[str] = []
+                reasoning_parts: list[str] = []
                 tool_calls: list[ToolCall] = []
                 try:
                     async for chunk in self.llm.stream(messages, tools=schemas):
+                        if chunk.reasoning_delta:
+                            reasoning_parts.append(chunk.reasoning_delta)
                         if chunk.text_delta:
                             content_parts.append(chunk.text_delta)
                             yield TextDelta(chunk.text_delta)
@@ -961,7 +965,9 @@ class Agent:
                     return
 
             assistant = Message.assistant(
-                content="".join(content_parts), tool_calls=tool_calls
+                content="".join(content_parts),
+                tool_calls=tool_calls,
+                reasoning_content="".join(reasoning_parts) or None,
             )
             self.memory.add(assistant)
 

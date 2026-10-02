@@ -170,6 +170,10 @@ class Message(BaseModel):
     # this beside the enriched content lets frontends edit what the user wrote
     # without duplicating derived notes when attachments are regenerated.
     input_text: str | None = None
+    # Assistant chain-of-thought streamed as ``reasoning_content`` (DeepSeek
+    # thinking mode). Kept only when the client preserves reasoning, because
+    # such providers require it echoed back on later requests that carry tools.
+    reasoning_content: str | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
     tool_call_id: str | None = None
     name: str | None = None
@@ -202,9 +206,18 @@ class Message(BaseModel):
 
     @classmethod
     def assistant(
-        cls, content: str = "", tool_calls: list[ToolCall] | None = None
+        cls,
+        content: str = "",
+        tool_calls: list[ToolCall] | None = None,
+        *,
+        reasoning_content: str | None = None,
     ) -> Message:
-        return cls(role="assistant", content=content, tool_calls=tool_calls or [])
+        return cls(
+            role="assistant",
+            content=content,
+            tool_calls=tool_calls or [],
+            reasoning_content=reasoning_content,
+        )
 
     @classmethod
     def from_tool_result(cls, result: ToolResult) -> Message:
@@ -217,7 +230,10 @@ class Message(BaseModel):
 
     # --- wire format --------------------------------------------------
     def to_openai(
-        self, *, attachment_modalities: frozenset[str] | None = None
+        self,
+        *,
+        attachment_modalities: frozenset[str] | None = None,
+        include_reasoning: bool = False,
     ) -> dict[str, Any]:
         """Render to a chat-completions message dict.
 
@@ -227,6 +243,11 @@ class Message(BaseModel):
         present, else a placeholder note — and when *no* native part remains
         the whole content collapses to a plain string, because text-only
         servers may reject a parts array outright.
+
+        ``include_reasoning`` echoes ``reasoning_content`` on every assistant
+        message — an empty string when none was recorded (legacy rows, another
+        model's turns), since a reasoning-preserving provider rejects an
+        assistant message that omits the field once tools are in play.
         """
         if self.role == "tool":
             return {
@@ -278,6 +299,8 @@ class Message(BaseModel):
             else:
                 content = text
         msg: dict[str, Any] = {"role": self.role, "content": content}
+        if include_reasoning and self.role == "assistant":
+            msg["reasoning_content"] = self.reasoning_content or ""
         if self.tool_calls:
             msg["tool_calls"] = [tc.to_openai() for tc in self.tool_calls]
         return msg

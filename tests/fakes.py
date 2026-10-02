@@ -28,6 +28,7 @@ class ScriptedTurn:
     text: str = ""
     tool_calls: list[ToolCall] | None = None
     finish_reason: str = "stop"
+    reasoning: str = ""
 
 
 @dataclass
@@ -61,6 +62,9 @@ class FakeLLMClient:
             yield LLMChunk(tool_calls=None, finish_reason="stop")
             return
         turn = self._turns.pop(0)
+        if isinstance(turn, ScriptedTurn) and turn.reasoning:
+            for piece in _chunk_text(turn.reasoning):
+                yield LLMChunk(reasoning_delta=piece)
         if turn.text:
             for piece in _chunk_text(turn.text):
                 yield LLMChunk(text_delta=piece)
@@ -93,6 +97,7 @@ class _ToolCallDelta:
 class _Delta:
     content: str | None = None
     tool_calls: list[_ToolCallDelta] | None = None
+    reasoning_content: str | None = None
 
 
 @dataclass

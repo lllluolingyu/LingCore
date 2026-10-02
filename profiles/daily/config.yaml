@@ -19,6 +19,10 @@ llm:
   # attached images/PDFs degrade to text via media_fallback below instead of
   # erroring mid-turn. (Omitting this key means [image, file], full native.)
   modalities: []
+  # DeepSeek thinking mode: keep each reply's streamed reasoning_content and
+  # send it back on later requests — the API rejects (400) a tool-bearing
+  # request whose earlier assistant messages omit it.
+  preserve_reasoning: true
   sampling:
     temperature: 0.6
 
