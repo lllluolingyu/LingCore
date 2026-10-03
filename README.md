@@ -334,6 +334,71 @@ launching process. Real `.env` files are gitignored; commit a secret-free
 `coding_ollama` needs none. Run `lingcore doctor --profile <path>` after copying
 or editing one. To create a new agent type, add a directory—no code required.
 
+### Native Anthropic, caching, and thinking
+
+Select `backend: anthropic` to use the native Messages API. Its default endpoint
+is `https://api.anthropic.com`; set `base_url` explicitly for a compatible proxy.
+
+Prompt caching is enabled by default (`llm.prompt_caching: true`). The adapter
+places explicit five-minute `cache_control` breakpoints on the last tool
+definition, the system prompt, and the last two user/tool-result turns. Keeping
+the previous turn's breakpoint lets large parallel tool batches reuse the
+previous cache entry beyond the normal 20-block lookup window. This uses at
+most four breakpoints and leaves signed thinking blocks unchanged.
+
+Set `llm.prompt_caching: false` to disable these default markers for a proxy
+that rejects them. Native `sampling.cache_control` (or its `extra_body`
+equivalent), explicit block-level markers, and `extra_body` overrides of tools,
+system, or messages take precedence over the default policy. For example,
+`sampling.cache_control: {type: ephemeral, ttl: 1h}` selects Anthropic's automatic
+one-hour caching on endpoints that support it. `llm.send_prompt_cache_key`
+applies only to OpenAI; it does not enable Anthropic caching.
+
+A first request writes the cache; subsequent requests can read it while the
+prefix remains identical. Cache hits still depend on the provider/proxy
+honoring the markers, the model's minimum cacheable length, and the cache TTL.
+Changing tools or the system prompt, or compacting history, invalidates affected
+prefixes. Check `UsageReported.usage.cached_input_tokens` for reported cache
+reads. See [Anthropic's prompt-caching documentation](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).
+
+For a model that supports adaptive thinking:
+
+```yaml
+llm:
+  backend: anthropic
+  model: claude-sonnet-4-6
+  api_key_env: ANTHROPIC_API_KEY
+  preserve_reasoning: true
+  sampling:
+    max_tokens: 16000
+    thinking:
+      type: adaptive
+      display: summarized
+      block_binding:
+        prefix_mismatch_behavior: drop_block
+    extra_headers:
+      anthropic-beta: thinking-binding-controls-2026-08-01
+```
+
+The binding control and matching beta header let Anthropic drop stale thinking
+after prompt/tool changes or history trimming. Keep both settings for models
+with prefix-bound thinking: LingCore's skill activation and memory compaction
+can change earlier context, and omitting these controls can then cause a 400.
+See [Anthropic's preserved-thinking guidance](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking).
+
+For models that support manual extended thinking, use
+`thinking: {type: enabled, budget_tokens: 10000}` instead. Set `max_tokens` high
+enough for both thinking and the answer. Mode availability and budget rules
+depend on the model; see [Anthropic's thinking documentation](https://platform.claude.com/docs/en/build-with-claude/thinking).
+
+Returned thinking signatures and redacted blocks are always preserved in order
+through tool calls and saved sessions, including when a model thinks by default.
+`preserve_reasoning: true` additionally stores readable thinking in
+`Message.reasoning_content` and streams it as `LLMChunk.reasoning_delta` to direct
+client callers. The agent keeps this separate from reply text. This flag does
+not enable thinking; the `sampling.thinking` setting controls that.
+Provider-reported thinking tokens appear in `UsageReported.usage.reasoning_tokens`.
+
 ### Guardrails
 
 `guardrail.policy: noop` remains the default. A profile can select a third-party

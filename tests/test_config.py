@@ -52,6 +52,65 @@ def test_load_valid_profile(tmp_path, monkeypatch):
     assert prof.loop.max_iters == 5
 
 
+@pytest.mark.parametrize(
+    "backend, expected_url",
+    [
+        ("openai", "https://api.openai.com/v1"),
+        ("anthropic", "https://api.anthropic.com"),
+    ],
+)
+def test_backend_selects_default_endpoint_and_preserves_custom_url(
+    backend, expected_url
+):
+    from lingcore.config import LLMCfg
+
+    assert LLMCfg(model="m", backend=backend).base_url == expected_url
+    assert (
+        LLMCfg(model="m", backend=backend, base_url="http://proxy/v1").base_url
+        == "http://proxy/v1"
+    )
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("prompt_caching", [False, True])
+async def test_from_profile_selects_anthropic_for_main_and_vision(
+    tmp_path, fallback, prompt_caching
+):
+    from lingcore.llm_anthropic import AnthropicLLMClient
+    from lingcore.usage import TokenUsage
+
+    anthropic_config = {
+        "model": "claude-test",
+        "backend": "anthropic",
+        "max_retries": 2,
+        "timeout": 37,
+        "prompt_caching": prompt_caching,
+    }
+    data = {"llm": anthropic_config, "sessions": {"enabled": False}}
+    if fallback:
+        data.update(
+            llm={"model": "main", "modalities": []},
+            media_fallback={"image": anthropic_config},
+        )
+    profile = AgentProfile.model_validate(data)
+    agent = Agent.from_profile(
+        profile,
+        base_dir=tmp_path,
+        llm=FakeLLMClient([]) if fallback else None,
+    )
+    client = agent.media_adapter.vision if fallback else agent.llm
+    try:
+        assert isinstance(client, AnthropicLLMClient)
+        assert str(client._client.base_url).rstrip("/") == "https://api.anthropic.com"
+        assert client._client.max_retries == 2
+        assert client._client.timeout.read == 37
+        assert client._prompt_caching is prompt_caching
+        client.usage_sink(TokenUsage("claude-test", 10, 2))
+        assert agent.usage_meter.drain()[0].input_tokens == 10
+    finally:
+        await client._client.close()
+
+
 def test_env_substitution_uses_set_value(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_MODEL", "from-env")
     monkeypatch.setenv("TEST_KEY", "sk-xyz")

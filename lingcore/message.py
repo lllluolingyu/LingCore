@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from copy import deepcopy
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -174,6 +175,11 @@ class Message(BaseModel):
     # thinking mode). Kept only when the client preserves reasoning, because
     # such providers require it echoed back on later requests that carry tools.
     reasoning_content: str | None = None
+    # A thinking-enabled Anthropic response must be replayed in its original
+    # block order, with signatures and redacted data intact. Keep the complete
+    # content beside the SDK-independent text/tool projections. Other backends
+    # ignore this state; legacy messages have no snapshot.
+    anthropic_content: list[dict[str, Any]] | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
     tool_call_id: str | None = None
     name: str | None = None
@@ -211,12 +217,14 @@ class Message(BaseModel):
         tool_calls: list[ToolCall] | None = None,
         *,
         reasoning_content: str | None = None,
+        anthropic_content: list[dict[str, Any]] | None = None,
     ) -> Message:
         return cls(
             role="assistant",
             content=content,
             tool_calls=tool_calls or [],
             reasoning_content=reasoning_content,
+            anthropic_content=anthropic_content,
         )
 
     @classmethod
@@ -229,6 +237,103 @@ class Message(BaseModel):
         )
 
     # --- wire format --------------------------------------------------
+    def to_anthropic(
+        self,
+        *,
+        attachment_modalities: frozenset[str] | None = None,
+    ) -> dict[str, Any]:
+        """Render to an Anthropic Messages API message dict.
+
+        System messages are returned with role="system" for the caller to
+        extract. Tool results become content blocks with type="tool_result".
+        """
+        if self.role == "system":
+            return {"role": "system", "content": self.content}
+
+        if self.role == "assistant" and self.anthropic_content is not None:
+            # Never reconstruct signed thinking from the plain reasoning text
+            # or regroup interleaved thinking/text/tool blocks.
+            return {"role": "assistant", "content": deepcopy(self.anthropic_content)}
+
+        if self.role == "tool":
+            return {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": self.tool_call_id,
+                        "content": self.content,
+                    }
+                ],
+            }
+
+        content: str | list[dict[str, Any]] = self.content
+        if self.role == "user" and self.attachments:
+            modalities = (
+                NATIVE_MODALITIES
+                if attachment_modalities is None
+                else attachment_modalities
+            )
+            parts: list[dict[str, Any]] = []
+            fallback_chunks: list[str] = []
+
+            for attachment in self.attachments:
+                if attachment.kind not in modalities:
+                    fallback_chunks.append(_fallback_block(attachment))
+                    continue
+                if attachment.kind == "image":
+                    parts.append(
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": attachment.media_type,
+                                "data": attachment.data,
+                            },
+                        }
+                    )
+                elif attachment.kind == "file":
+                    parts.append(
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": attachment.media_type,
+                                "data": attachment.data,
+                            },
+                        }
+                    )
+
+            text = "\n\n".join(
+                chunk for chunk in (self.content, *fallback_chunks) if chunk
+            )
+            if text:
+                parts.insert(0, {"type": "text", "text": text})
+
+            content = parts if parts else text
+
+        msg: dict[str, Any] = {"role": self.role, "content": content}
+
+        if self.tool_calls:
+            # Anthropic expects tool_use blocks in content
+            if isinstance(content, str):
+                content = [{"type": "text", "text": content}] if content else []
+            elif not isinstance(content, list):
+                content = []
+
+            for tc in self.tool_calls:
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.name,
+                        "input": tc.arguments,
+                    }
+                )
+            msg["content"] = content
+
+        return msg
+
     def to_openai(
         self,
         *,

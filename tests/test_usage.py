@@ -18,7 +18,12 @@ from lingcore.llm import LLMChunk, LLMClient
 from lingcore.memory import WindowMemory
 from lingcore.message import ToolCall
 from lingcore.tools import REGISTRY, ToolContext, ToolRegistry
-from lingcore.usage import TokenUsage, UsageMeter, usage_from_openai
+from lingcore.usage import (
+    TokenUsage,
+    UsageMeter,
+    usage_from_anthropic,
+    usage_from_openai,
+)
 from tests.fakes import _Choice, _Delta, _Event, make_openai_stream
 
 
@@ -56,6 +61,46 @@ def test_usage_parser_clamps_malformed_counts() -> None:
         },
     )
     assert parsed == TokenUsage("m", 0, 0, 0, 0)
+
+
+@pytest.mark.parametrize("sdk_object", [False, True])
+def test_anthropic_usage_normalizes_cache_tokens(sdk_object):
+    values = {
+        "input_tokens": 12,
+        "output_tokens": 9,
+        "cache_read_input_tokens": 80,
+        "cache_creation_input_tokens": 20,
+    }
+    usage = SimpleNamespace(**values) if sdk_object else values
+    assert usage_from_anthropic("claude", usage) == TokenUsage("claude", 112, 9, 80)
+    assert usage_from_anthropic("claude", None) is None
+
+
+def test_anthropic_usage_clamps_invalid_counts_before_adding():
+    assert usage_from_anthropic(
+        "claude",
+        {
+            "input_tokens": -4,
+            "output_tokens": True,
+            "cache_read_input_tokens": 10,
+            "cache_creation_input_tokens": "20",
+        },
+    ) == TokenUsage("claude", 10, 0, 10)
+
+
+@pytest.mark.parametrize(
+    "thinking, expected", [(7, 7), (30, 10), (-1, 0), ("7", 0), (True, 0)]
+)
+def test_anthropic_thinking_usage_is_subset_of_output(thinking, expected):
+    parsed = usage_from_anthropic(
+        "claude",
+        {
+            "input_tokens": 2,
+            "output_tokens": 10,
+            "output_tokens_details": {"thinking_tokens": thinking},
+        },
+    )
+    assert parsed == TokenUsage("claude", 2, 10, 0, expected)
 
 
 def _client(**kw) -> LLMClient:

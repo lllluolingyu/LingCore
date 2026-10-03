@@ -121,9 +121,18 @@ class WindowMemory:
         # Approximate but stable: encode content plus any tool-call argument
         # text. Exact accounting is the API's job; this only drives trimming.
         n = self._text_tokens(message.content or "")
-        if message.reasoning_content:
-            # Preserved reasoning is echoed on the wire, so it costs context.
-            n += self._text_tokens(message.reasoning_content)
+        # Signed Anthropic state can include long opaque signatures or redacted
+        # data even when no readable thinking is returned. Count that state,
+        # but don't count a duplicated reasoning_content summary twice.
+        reasoning_tokens = self._text_tokens(message.reasoning_content or "")
+        anthropic_tokens = 0
+        for block in message.anthropic_content or []:
+            if block.get("type") in {"thinking", "redacted_thinking"}:
+                for key in ("thinking", "signature", "data"):
+                    value = block.get(key)
+                    if isinstance(value, str):
+                        anthropic_tokens += self._text_tokens(value)
+        n += max(reasoning_tokens, anthropic_tokens)
         for attachment in message.attachments:
             # Floors reflect the wire cost a fallback can't capture: a native
             # image/PDF part (no fallback_text but real tokens), versus text

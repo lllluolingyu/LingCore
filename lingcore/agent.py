@@ -258,25 +258,33 @@ class Agent:
 
         import lingcore.tools.builtin  # noqa: F401  (registration side effect)
         from lingcore.composer import LayeredComposer
-        from lingcore.config import AgentProfile  # noqa: F401  (typing only)
+        from lingcore.config import LLMCfg
         from lingcore.llm import LLMClient
+        from lingcore.llm_anthropic import AnthropicLLMClient
         from lingcore.tools import REGISTRY, ToolContext
 
         # One meter per agent: the main client doubles as the compaction and
         # memory summarizer, so every request it makes is accounted here.
         usage_meter = UsageMeter()
-        client: _LLMLike = llm or LLMClient(
-            model=profile.llm.model,
-            api_key=profile.llm.resolve_api_key(getattr(profile, "_profile_env", {})),
-            base_url=profile.llm.base_url,
-            sampling=profile.llm.sampling.as_kwargs(),
-            max_retries=profile.llm.max_retries,
-            timeout=profile.llm.timeout,
-            modalities=profile.llm.modalities,
-            stream_usage=profile.llm.stream_usage,
-            usage_sink=usage_meter.record,
-            preserve_reasoning=profile.llm.preserve_reasoning,
-        )
+
+        def make_client(cfg: LLMCfg) -> _LLMLike:
+            kwargs: dict[str, Any] = {
+                "model": cfg.model,
+                "api_key": cfg.resolve_api_key(getattr(profile, "_profile_env", {})),
+                "base_url": cfg.base_url,
+                "sampling": cfg.sampling.as_kwargs(),
+                "max_retries": cfg.max_retries,
+                "timeout": cfg.timeout,
+                "modalities": cfg.modalities,
+                "stream_usage": cfg.stream_usage,
+                "usage_sink": usage_meter.record,
+                "preserve_reasoning": cfg.preserve_reasoning,
+            }
+            if cfg.backend == "anthropic":
+                return AnthropicLLMClient(**kwargs, prompt_caching=cfg.prompt_caching)
+            return LLMClient(**kwargs)
+
+        client = llm if llm is not None else make_client(profile.llm)
 
         # --- Modality fallbacks (only when the model lacks a native kind) ----
         media_adapter: "MediaAdapter | None" = None
@@ -290,18 +298,7 @@ class Agent:
                 # The describe request always renders natively (no modalities
                 # narrowing): config validation guarantees the vision model
                 # accepts images.
-                vision = LLMClient(
-                    model=fb.image.model,
-                    api_key=fb.image.resolve_api_key(
-                        getattr(profile, "_profile_env", {})
-                    ),
-                    base_url=fb.image.base_url,
-                    sampling=fb.image.sampling.as_kwargs(),
-                    max_retries=fb.image.max_retries,
-                    timeout=fb.image.timeout,
-                    stream_usage=fb.image.stream_usage,
-                    usage_sink=usage_meter.record,
-                )
+                vision = make_client(fb.image)
             media_adapter = MediaAdapter(
                 native,
                 pdf_mode=fb.pdf,
@@ -925,6 +922,7 @@ class Agent:
                 content_parts: list[str] = []
                 reasoning_parts: list[str] = []
                 tool_calls: list[ToolCall] = []
+                anthropic_content: list[dict[str, Any]] | None = None
                 try:
                     async for chunk in self.llm.stream(messages, tools=schemas):
                         if chunk.reasoning_delta:
@@ -934,6 +932,10 @@ class Agent:
                             yield TextDelta(chunk.text_delta)
                         if chunk.tool_calls:
                             tool_calls = chunk.tool_calls
+                        if (
+                            snapshot := getattr(chunk, "anthropic_content", None)
+                        ) is not None:
+                            anthropic_content = snapshot
                     break
                 except LLMStreamError as e:
                     attempt += 1
@@ -968,6 +970,7 @@ class Agent:
                 content="".join(content_parts),
                 tool_calls=tool_calls,
                 reasoning_content="".join(reasoning_parts) or None,
+                anthropic_content=anthropic_content,
             )
             self.memory.add(assistant)
 

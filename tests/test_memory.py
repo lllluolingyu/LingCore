@@ -23,6 +23,22 @@ def test_render_prepends_system():
     assert rendered[1].content == "hi"
 
 
+def test_anthropic_thinking_counts_opaque_state_without_duplicate_summary():
+    memory = WindowMemory(model="local/offline")
+    snapshot = [
+        {"type": "thinking", "thinking": "a" * 40, "signature": "s" * 80},
+        {"type": "redacted_thinking", "data": "r" * 160},
+        {"type": "text", "text": "ok"},
+    ]
+    message = Message.assistant("ok", anthropic_content=snapshot)
+    with_summary = Message.assistant(
+        "ok", reasoning_content="a" * 40, anthropic_content=snapshot
+    )
+    assert memory._tokens(message) > 70
+    assert memory._tokens(with_summary) == memory._tokens(message)
+    assert memory._tokens(Message.assistant("ok")) < memory._tokens(message)
+
+
 def test_encoding_is_lazy_and_offline_failure_uses_estimate(monkeypatch):
     calls: list[str] = []
 

@@ -111,8 +111,19 @@ class LLMCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model: str
-    base_url: str = "https://api.openai.com/v1"
     api_key_env: str | None = None
+    # SDK backend type: "openai" (default) uses OpenAI chat completions via
+    # AsyncOpenAI, "anthropic" uses native Anthropic Messages API via
+    # AsyncAnthropic. Set to "anthropic" for models that don't work through
+    # OpenAI-compatible gateways.
+    backend: Literal["openai", "anthropic"] = "openai"
+    base_url: str = Field(
+        default_factory=lambda data: (
+            "https://api.anthropic.com"
+            if data.get("backend") == "anthropic"
+            else "https://api.openai.com/v1"
+        )
+    )
     sampling: SamplingCfg = Field(default_factory=SamplingCfg)
     # Transient-failure retries when opening the stream (429 / 5xx / connection
     # errors). Delegated to the OpenAI SDK, which honors Retry-After and the
@@ -147,6 +158,13 @@ class LLMCfg(BaseModel):
     # Off by default: a strict OpenAI-compatible server (Ollama/vLLM/proxy) may
     # reject the unknown body field. Flip it on for an endpoint that honors it.
     send_prompt_cache_key: bool = False
+    # Native Anthropic only: add explicit five-minute cache breakpoints to
+    # reusable tools, system instructions, and recent conversation prefixes.
+    # Set false for an endpoint that rejects cache_control. Native cache
+    # settings in sampling take precedence over this default policy.
+    # OpenAI-compatible providers manage caching themselves; this flag has
+    # no effect on their requests.
+    prompt_caching: bool = True
     # Request the provider's usage block on every streamed response
     # (``stream_options.include_usage``) and emit it as ``UsageReported``
     # events. On by default so frontends can account for spend; turn it off
@@ -157,6 +175,9 @@ class LLMCfg(BaseModel):
     # providers such as DeepSeek, which reject (400) a tool-bearing request
     # whose earlier assistant messages omit it. Off by default: other
     # OpenAI-compatible servers may reject the unknown message field.
+    # For Anthropic this also retains readable thinking as reasoning_content;
+    # signed content blocks are always kept for valid tool/session replay.
+    # Enable thinking separately through sampling.thinking.
     preserve_reasoning: bool = False
 
     @field_validator("modalities")

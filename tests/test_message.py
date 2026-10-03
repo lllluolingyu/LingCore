@@ -26,6 +26,65 @@ def test_user_and_system_to_openai():
     assert Message.system("sys").to_openai() == {"role": "system", "content": "sys"}
 
 
+def test_anthropic_native_attachments_and_text_fallback():
+    image_data = _b64(b"\x89PNG\r\n\x1a\nrest")
+    pdf_data = _b64(b"%PDF-1.4\n")
+    image = Attachment(kind="image", media_type="image/png", data=image_data)
+    pdf = Attachment(kind="file", media_type="application/pdf", data=pdf_data)
+    text = Attachment(
+        kind="text",
+        media_type="text/plain",
+        data=_b64(b"notes"),
+        name="notes.txt",
+        fallback_text="notes",
+    )
+    wire = Message.user("inspect", attachments=[image, pdf, text]).to_anthropic()
+    parts = wire["content"]
+    assert wire["role"] == "user"
+    assert parts[0]["type"] == "text"
+    assert all(value in parts[0]["text"] for value in ["inspect", "notes.txt", "notes"])
+    assert parts[1:] == [
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": image_data},
+        },
+        {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": pdf_data,
+            },
+        },
+    ]
+
+
+def test_anthropic_narrowed_modalities_keep_fallback_without_payload():
+    image = Attachment(
+        kind="image",
+        media_type="image/png",
+        data=_b64(b"\x89PNG\r\n\x1a\nrest"),
+        name="chart.png",
+        fallback_text="a bar chart",
+    )
+    wire = Message.user("inspect", attachments=[image]).to_anthropic(
+        attachment_modalities=frozenset()
+    )
+    assert all(part["type"] == "text" for part in wire["content"])
+    assert "a bar chart" in wire["content"][0]["text"]
+    assert image.data not in str(wire)
+
+
+def test_anthropic_attachment_only_message_has_no_empty_text_block():
+    image = Attachment(
+        kind="image", media_type="image/png", data=_b64(b"\x89PNG\r\n\x1a\nrest")
+    )
+    assert [
+        part["type"]
+        for part in Message.user("", attachments=[image]).to_anthropic()["content"]
+    ] == ["image"]
+
+
 def test_assistant_with_tool_calls_to_openai():
     call = ToolCall(id="c1", name="read_file", arguments={"path": "a.txt"})
     msg = Message.assistant(content="", tool_calls=[call])
@@ -304,3 +363,45 @@ def test_reasoning_content_round_trips_and_renders_only_on_request() -> None:
     assert "reasoning_content" not in Message.user("q").to_openai(
         include_reasoning=True
     )
+
+
+def test_anthropic_content_roundtrips_without_leaking_to_openai():
+    content = [
+        {"type": "thinking", "thinking": "summary", "signature": "opaque-signature"},
+        {"type": "text", "text": "Checking"},
+        {"type": "redacted_thinking", "data": "opaque-data"},
+        {"type": "tool_use", "id": "c", "name": "read_file", "input": {}},
+    ]
+    message = Message.assistant(
+        "Checking",
+        tool_calls=[ToolCall(id="c", name="read_file", arguments={})],
+        anthropic_content=content,
+    )
+    restored = Message.model_validate_json(message.model_dump_json())
+    assert restored.to_anthropic() == {"role": "assistant", "content": content}
+    openai_wire = restored.to_openai()
+    assert openai_wire["content"] == "Checking"
+    assert openai_wire["tool_calls"][0]["id"] == "c"
+    assert "opaque" not in str(openai_wire)
+    assert "anthropic_content" not in openai_wire
+
+    wire = restored.to_anthropic()
+    wire["content"][0]["signature"] = "changed"
+    assert restored.anthropic_content == content
+    assert (
+        Message.model_validate_json(
+            '{"role":"assistant","content":"legacy"}'
+        ).anthropic_content
+        is None
+    )
+
+
+def test_anthropic_content_is_only_replayed_for_assistants():
+    message = Message(
+        role="user",
+        content="hi",
+        anthropic_content=[
+            {"type": "thinking", "thinking": "summary", "signature": "sig"}
+        ],
+    )
+    assert message.to_anthropic() == {"role": "user", "content": "hi"}

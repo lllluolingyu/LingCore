@@ -74,6 +74,28 @@ def usage_from_openai(model: str, usage: Any) -> TokenUsage | None:
     )
 
 
+def usage_from_anthropic(model: str, usage: Any) -> TokenUsage | None:
+    """Parse Anthropic usage (SDK model or dict) into inclusive token counts.
+
+    Anthropic's input_tokens excludes both cache reads and cache creation;
+    TokenUsage includes them. Returns ``None`` when no usage was reported.
+    """
+    if usage is None:
+        return None
+    uncached = _count(_field(usage, "input_tokens"))
+    cached = _count(_field(usage, "cache_read_input_tokens"))
+    created = _count(_field(usage, "cache_creation_input_tokens"))
+    output_tokens = _count(_field(usage, "output_tokens"))
+    thinking = _field(_field(usage, "output_tokens_details"), "thinking_tokens")
+    return TokenUsage(
+        model=model,
+        input_tokens=uncached + cached + created,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached,
+        reasoning_tokens=min(_count(thinking), output_tokens),
+    )
+
+
 class UsageMeter:
     """Collects usage reported by an agent's clients until the loop drains it."""
 

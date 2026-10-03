@@ -87,12 +87,15 @@ class LLMChunk:
     the client preserves reasoning; it is state to replay, not reply text.
     ``tool_calls`` is populated only on the final chunk of a turn, once all
     tool-call fragments have been assembled and their arguments parsed.
+    ``anthropic_content`` carries a complete signed-thinking response on the
+    terminal chunk so the loop can persist and replay its ordered blocks.
     """
 
     text_delta: str = ""
     reasoning_delta: str = ""
     tool_calls: list[ToolCall] | None = None
     finish_reason: str | None = None
+    anthropic_content: list[dict[str, Any]] | None = None
 
 
 @dataclass
