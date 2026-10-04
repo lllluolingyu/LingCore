@@ -182,6 +182,7 @@ def test_every_shipped_profile_that_needs_env_has_complete_safe_example(
         "LINGCORE_MODEL",
         "LINGCORE_WORKSPACE",
         "LLY_API_KEY",
+        "DEEPSEEK_API_KEY",
         "CANVAS_URL",
         "CANVAS_TOKEN",
     ):
@@ -190,7 +191,7 @@ def test_every_shipped_profile_that_needs_env_has_complete_safe_example(
     expected = {
         "coding": {"LLY_API_KEY"},
         "coding_ollama": set(),
-        "daily": {"LLY_API_KEY"},
+        "daily": {"DEEPSEEK_API_KEY"},
         "teaching": {"LLY_API_KEY", "CANVAS_URL", "CANVAS_TOKEN"},
     }
     found = {path.name for path in (REPO_ROOT / "profiles").iterdir() if path.is_dir()}
