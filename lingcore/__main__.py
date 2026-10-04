@@ -19,7 +19,7 @@ from lingcore.agent import Agent
 from lingcore.config import AgentProfile
 from lingcore.errors import ConfigError, LingCoreError, SessionError
 from lingcore.io.base import run_session
-from lingcore.io.cli import CLIFrontend, rel_time
+from lingcore.io.cli import CLIFrontend, session_table
 from lingcore.profiles import (
     PROFILE_TEMPLATE_FILES,
     default_profile_path,
@@ -188,8 +188,6 @@ def _profile_command(argv: list[str]) -> int:
 def _print_sessions(store: SessionStore | None, notice: str | None) -> int:
     """``--list-sessions``: print a table and exit (never builds an Agent)."""
     from rich.console import Console
-    from rich.markup import escape
-    from rich.table import Table
 
     console = Console()
     if store is None:
@@ -199,21 +197,7 @@ def _print_sessions(store: SessionStore | None, notice: str | None) -> int:
     if not sessions:
         console.print("[dim]no stored sessions[/]")
         return 0
-    table = Table(box=None, pad_edge=False)
-    table.add_column("id", style="cyan")
-    table.add_column("title")
-    table.add_column("msgs", justify="right")
-    table.add_column("updated", style="dim")
-    table.add_column("created", style="dim")
-    for s in sessions:
-        table.add_row(
-            s.id[:8],
-            escape(s.title or "(untitled)"),
-            str(s.message_count),
-            rel_time(s.updated_at),
-            rel_time(s.created_at),
-        )
-    console.print(table)
+    console.print(session_table(sessions))
     return 0
 
 
@@ -227,8 +211,8 @@ def _print_saved_session(
         raise RuntimeError("session-backed memory did not expose its id")
     if store.get(sid) is not None:  # row exists only if something was said
         frontend.console.print(
-            f"[dim]session [/][cyan]{sid[:8]}[/][dim] saved — resume with: "
-            f"lingcore --resume {sid[:8]}[/]"
+            f"\n[dim]session [/][cyan]{sid[:8]}[/][dim] saved · resume with[/] "
+            f"[bold]lingcore --resume {sid[:8]}[/]"
         )
 
 
@@ -314,7 +298,9 @@ async def _main_async(args: argparse.Namespace) -> int:
                     )
                     return 2
 
-        frontend = CLIFrontend(agent_name=profile.name, store=store)
+        frontend = CLIFrontend(
+            agent_name=profile.name, store=store, model=profile.llm.model
+        )
         session_id = resume_meta.id if resume_meta else None
         first = True
         while True:
@@ -336,26 +322,21 @@ async def _main_async(args: argparse.Namespace) -> int:
             except LingCoreError as e:
                 print(f"failed to build agent: {e}", file=sys.stderr)
                 return 2
+            if store is not None:
+                frontend.set_session(getattr(agent.memory, "session_id", None))
 
             if first:
-                frontend.console.print(
-                    f"[bold]LingCore[/] · agent [cyan]{profile.name}[/] · "
-                    f"model [cyan]{profile.llm.model}[/] · workspace "
-                    f"[cyan]{agent.tool_ctx.workspace}[/]"
+                frontend.show_banner(
+                    model=profile.llm.model,
+                    workspace=agent.tool_ctx.workspace,
+                    notice=notice,
                 )
-                if notice:
-                    frontend.console.print(f"[dim]{notice}[/]")
             if session_id is not None and store is not None:
                 meta = store.get(session_id)
                 if meta is not None:
                     frontend.show_resume(meta, agent.memory.messages)
             elif not first:
-                frontend.console.print("[dim]started a new session[/]")
-            if first:
-                frontend.console.print(
-                    "[dim]Type your message. /help for commands, Ctrl-C stops a "
-                    "turn, /exit to quit.[/]"
-                )
+                frontend.console.rule("[dim]new session[/]", style="dim")
             first = False
 
             try:
