@@ -137,6 +137,13 @@ tool_options:
       read_only_mounts: []
   fetch_url:
     offload_over_chars: 8000
+    # Behind a TUN-mode fake-IP proxy (Clash/mihomo, Surge, ...) every host
+    # resolves into the benchmarking ranges below, so every fetch asks for
+    # approval as non-public.
+    # Exempting them lets the proxy route the request, but the proxy then picks
+    # the real address, so a hostname pointing at a private host is no longer
+    # caught (IP literals and localhost still are).
+    allowed_networks: [198.18.0.0/15, "2001:2::/48"]
   read_file:
     # Read large files in slices; the model can page with offset/limit.
     max_lines: 2000

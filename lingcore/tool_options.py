@@ -7,6 +7,7 @@ built-in tool package.
 
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -211,3 +212,32 @@ def parse_todo_max_items(raw: object) -> int:
         maximum=100,
         option_path=TODO_OPTION_PATH,
     )
+
+
+FETCH_OPTION_PATH = "tool_options.fetch_url"
+
+IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
+
+
+def parse_fetch_allowed_networks(raw: object) -> tuple[IPNetwork, ...]:
+    """Validate ``tool_options.fetch_url.allowed_networks`` as CIDR ranges.
+
+    Only this key is checked; the other fetch options keep their call-time
+    parsing. Strict parsing rejects host bits (``198.18.0.1/15``) so a typo
+    can't silently widen or shift the exempted range.
+    """
+    if not isinstance(raw, Mapping):
+        raise ConfigError(f"{FETCH_OPTION_PATH} must be a mapping")
+    entries = str_tuple_option(
+        raw, "allowed_networks", (), option_path=FETCH_OPTION_PATH
+    )
+    networks: list[IPNetwork] = []
+    for entry in entries:
+        try:
+            networks.append(ipaddress.ip_network(entry))
+        except ValueError as exc:
+            raise ConfigError(
+                f"{FETCH_OPTION_PATH}.allowed_networks: invalid network "
+                f"{entry!r} ({exc})"
+            ) from None
+    return tuple(networks)

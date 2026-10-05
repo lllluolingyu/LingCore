@@ -28,7 +28,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from lingcore.errors import ConfigError
 from lingcore.media_types import FALLBACK_TEXT_MAX_CHARS, NativeModality
 from lingcore.modality import DEFAULT_PDF_MAX_CHARS
-from lingcore.tool_options import parse_search_options, parse_todo_max_items
+from lingcore.tool_options import (
+    parse_fetch_allowed_networks,
+    parse_search_options,
+    parse_todo_max_items,
+)
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
@@ -429,6 +433,8 @@ class AgentProfile(BaseModel):
             parse_search_options(self.tool_options["search"])
         if "todo_write" in self.tool_options:
             parse_todo_max_items(self.tool_options["todo_write"])
+        if "fetch_url" in self.tool_options:
+            parse_fetch_allowed_networks(self.tool_options["fetch_url"])
         return self
 
     def initial_tool_set(self) -> frozenset[str]:

@@ -59,8 +59,16 @@ initial_tools:
 
 tool_options:
   fetch_url:
-    # Public-web research only; private/loopback targets stay blocked.
+    # Public-web research. A private/loopback target asks for approval first
+    # (confirm_private_hosts: false refuses it outright).
     max_bytes: 1048576
+    # Behind a TUN-mode fake-IP proxy (Clash/mihomo, Surge, ...) every host
+    # resolves into the benchmarking ranges below, so every fetch asks for
+    # approval as non-public.
+    # Exempting them lets the proxy route the request, but the proxy then picks
+    # the real address, so a hostname pointing at a private host is no longer
+    # caught (IP literals and localhost still are).
+    allowed_networks: [198.18.0.0/15, "2001:2::/48"]
   memory:
     # Persistent notes/preferences, profile-scoped (resolves against this dir).
     path: memory.md

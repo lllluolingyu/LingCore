@@ -30,6 +30,8 @@ def fake_dns(monkeypatch):
     names = {
         "example.com": ["93.184.216.34"],
         "private.example": ["10.0.0.5"],
+        # What a TUN-mode fake-IP proxy (Clash/mihomo, Surge) hands out.
+        "proxied.example": ["198.18.0.41", "2001:2::29"],
     }
 
     async def _fake(host: str, port: int) -> list[str]:
@@ -236,6 +238,208 @@ async def test_fetch_allows_private_with_opt_in(tmp_path):
     assert "ok" in out
     # Opt-in skips pinning, so the request keeps the original host untouched.
     assert client.requests[0].url.host == "localhost"
+
+
+async def test_fetch_names_fake_ip_proxy_when_blocked(ctx):
+    with pytest.raises(ToolError, match="fake-IP range") as exc:
+        await fetch_url(FetchArgs(url="https://proxied.example/"), ctx)
+    assert "198.18.0.0/15, 2001:2::/48 to" in str(exc.value)
+    assert "tool_options.fetch_url.allowed_networks" in str(exc.value)
+
+
+async def test_fetch_allowed_networks_must_cover_every_answer(tmp_path):
+    # Exempting only the IPv4 range still refuses the host: every resolved
+    # address is vetted, and the IPv6 fake IP is not covered.
+    ctx = _fake_ip_ctx(tmp_path, ["198.18.0.0/15"])
+    with pytest.raises(ToolError, match="2001:2::29"):
+        await fetch_url(FetchArgs(url="https://proxied.example/"), ctx)
+
+
+def _fake_ip_ctx(tmp_path, networks):
+    return ToolContext(
+        workspace=tmp_path,
+        options={"fetch_url": {"allowed_networks": networks}},
+    )
+
+
+async def test_fetch_allowed_networks_exempts_fake_ip_and_still_pins(tmp_path):
+    ctx = _fake_ip_ctx(tmp_path, ["198.18.0.0/15", "2001:2::/48"])
+    p, client = _patch_client([_FakeResponse("sunny")])
+    with p:
+        out = await fetch_url(FetchArgs(url="https://proxied.example/w"), ctx)
+    assert "sunny" in out
+    req = client.requests[0]
+    # The proxy maps the fake IP back to the hostname; Host/SNI carry it.
+    assert req.url.host == "198.18.0.41"
+    assert req.headers["Host"] == "proxied.example"
+    assert req.extensions["sni_hostname"] == "proxied.example"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1/",
+        "http://localhost/",
+        "http://private.example/",
+        "http://[::ffff:127.0.0.1]/",
+    ],
+)
+async def test_fetch_allowed_networks_exempts_only_listed_ranges(tmp_path, url):
+    ctx = _fake_ip_ctx(tmp_path, ["198.18.0.0/15"])
+    with pytest.raises(ToolError, match="private/local"):
+        await fetch_url(FetchArgs(url=url), ctx)
+
+
+async def test_fetch_allowed_networks_rechecks_redirects(tmp_path):
+    ctx = _fake_ip_ctx(tmp_path, ["198.18.0.0/15", "2001:2::/48"])
+    redirect = _FakeResponse(
+        "", status_code=302, headers={"location": "http://private.example/x"}
+    )
+    p, client = _patch_client([redirect])
+    with p:
+        with pytest.raises(ToolError, match="private/local"):
+            await fetch_url(FetchArgs(url="https://proxied.example/"), ctx)
+    assert len(client.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "networks", ["198.18.0.0/15", ["198.18.0.1/15"], ["not-a-net"], [""]]
+)
+async def test_fetch_rejects_invalid_allowed_networks(tmp_path, networks):
+    with pytest.raises(ToolError, match="allowed_networks"):
+        await fetch_url(
+            FetchArgs(url="https://example.com/"), _fake_ip_ctx(tmp_path, networks)
+        )
+
+
+def test_profile_load_rejects_invalid_allowed_networks(tmp_path, monkeypatch):
+    from lingcore.config import AgentProfile
+    from lingcore.errors import ConfigError
+
+    monkeypatch.setenv("TEST_KEY", "sk-test")
+    path = tmp_path / "profile.yaml"
+    path.write_text(
+        "name: t\n"
+        "llm: {model: m, base_url: http://localhost:1/v1, api_key_env: TEST_KEY}\n"
+        "persona: {system_prompt: hi}\n"
+        "tools: [fetch_url]\n"
+        "tool_options: {fetch_url: {allowed_networks: [198.18.0.1/15]}}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="allowed_networks"):
+        AgentProfile.load(path)
+
+
+class _Confirm:
+    """Records confirmation prompts and answers each with ``answer``."""
+
+    def __init__(self, answer: bool):
+        self.answer = answer
+        self.prompts: list[str] = []
+
+    async def __call__(self, prompt: str) -> bool:
+        self.prompts.append(prompt)
+        return self.answer
+
+
+def _confirm_ctx(tmp_path, answer, **fetch_options):
+    confirm = _Confirm(answer)
+    ctx = ToolContext(
+        workspace=tmp_path, confirm=confirm, options={"fetch_url": fetch_options}
+    )
+    return ctx, confirm
+
+
+async def test_fetch_asks_before_non_public_address_and_pins_it(tmp_path):
+    ctx, confirm = _confirm_ctx(tmp_path, True)
+    p, client = _patch_client([_FakeResponse("sunny")])
+    with p:
+        out = await fetch_url(FetchArgs(url="https://proxied.example/w"), ctx)
+    assert "sunny" in out
+    (prompt,) = confirm.prompts
+    assert "https://proxied.example/w" in prompt
+    assert "resolves to non-public address 198.18.0.41" in prompt
+    assert "to stop asking" in prompt  # names the allowed_networks fix
+    # Approval doesn't drop pinning: the request goes to the vetted address.
+    req = client.requests[0]
+    assert req.url.host == "198.18.0.41"
+    assert req.extensions["sni_hostname"] == "proxied.example"
+
+
+async def test_fetch_declined_non_public_address_is_refused(tmp_path):
+    ctx, confirm = _confirm_ctx(tmp_path, False)
+    p, client = _patch_client([_FakeResponse("secret")])
+    with p:
+        with pytest.raises(ToolError, match="user declined: private/local"):
+            await fetch_url(FetchArgs(url="http://private.example/"), ctx)
+    assert len(confirm.prompts) == 1
+    assert client.requests == []
+
+
+async def test_fetch_asks_for_localhost_and_pins_loopback(tmp_path):
+    ctx, confirm = _confirm_ctx(tmp_path, True)
+    p, client = _patch_client([_FakeResponse("ok")])
+    with p:
+        await fetch_url(FetchArgs(url="http://localhost:11434/api/tags"), ctx)
+    assert "localhost is a local host" in confirm.prompts[0]
+    req = client.requests[0]
+    assert req.url.host in {"127.0.0.1", "::1"}
+    assert req.headers["Host"] == "localhost:11434"
+
+
+async def test_fetch_confirm_private_hosts_off_refuses_without_asking(tmp_path):
+    ctx, confirm = _confirm_ctx(tmp_path, True, confirm_private_hosts=False)
+    with pytest.raises(ToolError, match="private/local"):
+        await fetch_url(FetchArgs(url="http://private.example/"), ctx)
+    assert confirm.prompts == []
+
+
+async def test_fetch_public_host_never_asks(tmp_path):
+    ctx, confirm = _confirm_ctx(tmp_path, False)
+    p, _ = _patch_client([_FakeResponse("ok")])
+    with p:
+        await fetch_url(FetchArgs(url="https://example.com/"), ctx)
+    assert confirm.prompts == []
+
+
+async def test_fetch_asks_again_for_each_new_non_public_redirect_hop(tmp_path):
+    ctx, confirm = _confirm_ctx(tmp_path, True)
+    hops = [
+        _FakeResponse("", status_code=302, headers={"location": "/again"}),
+        _FakeResponse(
+            "", status_code=302, headers={"location": "http://private.example/"}
+        ),
+        _FakeResponse("done"),
+    ]
+    p, client = _patch_client(hops)
+    with p:
+        out = await fetch_url(FetchArgs(url="https://proxied.example/"), ctx)
+    assert "done" in out
+    # The same approved host is not re-asked; the new private host is.
+    assert len(confirm.prompts) == 2
+    assert "private.example" in confirm.prompts[1]
+    assert len(client.requests) == 3
+
+
+async def test_fetch_declined_redirect_hop_is_never_requested(tmp_path):
+    confirm = _ConfirmSequence([True, False])
+    ctx = ToolContext(workspace=tmp_path, confirm=confirm)
+    redirect = _FakeResponse(
+        "", status_code=302, headers={"location": "http://127.0.0.1/secret"}
+    )
+    p, client = _patch_client([redirect])
+    with p:
+        with pytest.raises(ToolError, match="user declined"):
+            await fetch_url(FetchArgs(url="https://proxied.example/"), ctx)
+    assert len(client.requests) == 1
+
+
+class _ConfirmSequence:
+    def __init__(self, answers: list[bool]):
+        self._answers = list(answers)
+
+    async def __call__(self, prompt: str) -> bool:
+        return self._answers.pop(0)
 
 
 async def test_fetch_rejects_redirect_to_private_host(ctx):

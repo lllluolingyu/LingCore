@@ -755,13 +755,28 @@ in the workspace. Repository-changing and networked Git commands still go
 through confirmation-gated `run_shell`.
 
 `fetch_url` reduces SSRF risk by resolving each host (and every redirect hop)
-and refusing any that maps to a loopback, link-local, or private address —
-alternate IP encodings (decimal/hex/octal) and credentialed URLs are rejected
-too. It then pins the connection to the vetted IP (the Host header and TLS
+and flagging any that maps to a loopback, link-local, or private address —
+alternate IP encodings (decimal/hex/octal) count too, and credentialed URLs are
+rejected. It then pins the connection to the vetted IP (the Host header and TLS
 verification stay on the hostname), so DNS rebinding can't redirect the request
-after the check. DNS resolution and downloaded body size are bounded. Profiles
-can opt into private hosts with `tool_options.fetch_url.allow_private_hosts:
-true` for trusted local workflows (e.g. a local Ollama or an internal API).
+after the check. DNS resolution and downloaded body size are bounded.
+
+A flagged target is put to the user rather than refused outright: on a frontend
+with a confirmation handler (CLI, LingChat, Telegram) `fetch_url` asks for
+approval, naming the URL and the address it resolved to, and still pins the
+approved address. A denial, a frontend without a handler, or
+`tool_options.fetch_url.confirm_private_hosts: false` refuses it. Profiles can
+skip the check entirely with `allow_private_hosts: true` for trusted local
+workflows (e.g. a local Ollama or an internal API).
+
+Narrower exemptions go in `tool_options.fetch_url.allowed_networks`, a list of
+CIDR ranges whose addresses are accepted without asking while every other check
+(and the pinning) stays on. Its main use is a TUN-mode fake-IP proxy
+(Clash/mihomo, Surge, ...), which answers every DNS query from the
+`198.18.0.0/15` and `2001:2::/48` benchmarking ranges, so without an exemption
+every fetch asks for approval (the prompt says why). Exempting them hands the
+final address choice to the proxy: a hostname whose real record is private is
+then no longer flagged, though IP literals and `localhost` still are.
 
 Telegram refuses to start a profile that enables `run_shell` unless
 `require_confirmation` is true and `allow_patterns` is empty. Every shell call
