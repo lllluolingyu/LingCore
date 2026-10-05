@@ -225,6 +225,17 @@ def test_cli_escapes_model_controlled_markup():
     assert "[link=x]y" in out
 
 
+def _announce_shell(cli: CLIFrontend, *commands: str) -> None:
+    """Render the run_shell calls whose confirmations a test then answers.
+
+    The agent always emits ``ToolCallStarted`` before dispatching a batch, and
+    the CLI shows the shell prompt only for this turn's run_shell commands.
+    """
+    for i, command in enumerate(commands):
+        call = ToolCall(id=f"s{i}", name="run_shell", arguments={"command": command})
+        cli.render(ToolCallStarted(call))
+
+
 async def test_cli_confirm_allow_once(monkeypatch):
     cli = CLIFrontend()
     cli.console.quiet = True
@@ -299,6 +310,7 @@ async def test_cli_confirm_allow_always_persists(monkeypatch):
     cli = CLIFrontend(tool_options=opts)
     cli.console.quiet = True
     monkeypatch.setattr(cli.console, "input", lambda *a, **k: "A")
+    _announce_shell(cli, "pytest -q")
     assert await cli.confirm("pytest -q") is True
     # The exact command token prefix is appended to the shared options dict, so
     # approval does not expand to every command sharing the first executable.
@@ -314,6 +326,7 @@ async def test_cli_confirm_allow_always_skips_shell_control(monkeypatch):
     cli = CLIFrontend(tool_options=opts)
     cli.console.quiet = True
     monkeypatch.setattr(cli.console, "input", lambda *a, **k: "A")
+    _announce_shell(cli, "ls; echo unsafe", "printf approved & printf chained")
     for command in ("ls; echo unsafe", "printf approved & printf chained"):
         assert await cli.confirm(command) is True
     assert opts["run_shell"]["allow_patterns"] == []
@@ -542,10 +555,48 @@ async def test_cli_confirm_shows_session_pattern(monkeypatch):
         return "d"
 
     monkeypatch.setattr(cli.console, "input", fake_input)
+    _announce_shell(cli, "uv run pytest -q", "ls | wc -l")
     await cli.confirm("uv run pytest -q")
     await cli.confirm("ls | wc -l")
     assert "uv run pytest -q" in prompts[0] and "this session" in prompts[0]
     assert "not available" in prompts[1]
+
+
+async def test_cli_confirm_non_shell_request_is_a_plain_approval(monkeypatch):
+    # A confirmation that is not one of this turn's run_shell commands (a
+    # non-public fetch, a skill activation) gets a plain allow/deny prompt —
+    # no shell framing and no "always allow" that would edit the shell list.
+    from rich.console import Console
+
+    opts: dict = {}
+    cli = CLIFrontend(tool_options=opts)
+    cli.console = Console(record=True, width=200)
+    prompts: list[str] = []
+
+    def fake_input(prompt, *a, **k):
+        prompts.append(prompt)
+        return "A"
+
+    monkeypatch.setattr(cli.console, "input", fake_input)
+    request = "Allow fetch_url to reach a non-public address? http://x/"
+    # "A" is only an allow-once here: it never writes a shell pattern.
+    assert await cli.confirm(request) is True
+    out = cli.console.export_text()
+    assert "approve?" in out and request in out
+    assert "run shell command" not in out and "$ Allow" not in out
+    assert "always allow" not in prompts[0]
+    assert "run_shell" not in opts
+    monkeypatch.setattr(cli.console, "input", lambda *a, **k: "n")
+    assert await cli.confirm(request) is False
+
+
+async def test_cli_shell_commands_are_scoped_to_the_turn(monkeypatch):
+    cli = CLIFrontend()
+    cli.console.quiet = True
+    _announce_shell(cli, "make")
+    assert "make" in cli._shell_commands
+    cli._start_turn()
+    assert cli._shell_commands == set()
 
 
 async def test_cli_stale_prompt_is_consumed_before_next_input(monkeypatch):

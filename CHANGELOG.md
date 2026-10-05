@@ -33,9 +33,29 @@ Notable user-facing changes to LingCore are documented here. The project uses
 - CLI: `/new`, `/sessions`, `/resume <id>`, `/usage` and `/help`; diff previews
   for `edit_file`/`patch_file`; a per-turn token-usage footer; and the shell
   confirmation prompt now shows the exact pattern `[A]` would allow.
+- `tool_options.fetch_url.allowed_networks`: CIDR ranges that are accepted
+  without asking even though they are not public, checked before every other
+  rule and validated at profile load (host bits are rejected, so a typo cannot
+  widen the range). Meant for TUN-mode fake-IP proxies (Clash/mihomo, Surge,
+  ...), which answer every DNS query from the `198.18.0.0/15` and
+  `2001:2::/48` benchmarking ranges; both bundled keyed profiles enable those
+  two. Addresses inside an exempted range are still pinned to the vetted
+  address, but the exemption hands the final address choice to the proxy, so a
+  hostname whose real record is private is no longer caught (IP literals and
+  `localhost` still are).
 
 ### Changed
 
+- `fetch_url` now asks instead of refusing when a target is local or resolves
+  to a non-public address, naming the URL and the resolved address; the
+  approved address stays pinned, and a denial, a frontend without a
+  confirmation handler, or the new
+  `tool_options.fetch_url.confirm_private_hosts: false` refuses it
+  (`allow_private_hosts: true` still skips the check entirely). A frontend can
+  tell this prompt apart from a shell one: the CLI shows the "run shell
+  command?" framing with "always allow" only for the turn's `run_shell`
+  commands, and other confirmations (this fetch, skill activation, an external
+  agent's write mode) get a plain approval.
 - The coding profiles are sized for real repositories: a 120k-token working set
   (32k for `coding_ollama`, which now also compacts), 100 tool iterations per
   turn (60 local), a 120 s default shell timeout with a 30 min ceiling, and

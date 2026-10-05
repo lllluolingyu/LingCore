@@ -646,6 +646,10 @@ class CLIFrontend:
         # confirm() at once — without this their console.input threads would race
         # on stdin and interleave prompts.
         self._confirm_lock = asyncio.Lock()
+        # This turn's run_shell commands. A confirmation whose text is one of
+        # them is a shell prompt (with "always allow"); any other is a generic
+        # approval (skill activation, a non-public fetch, ...).
+        self._shell_commands: set[str] = set()
         # Shared with the agent's ToolContext so "allow always" writes land live.
         self._tool_options: dict = tool_options if tool_options is not None else {}
         # Session store for /sessions and /resume (None = persistence off).
@@ -986,6 +990,7 @@ class CLIFrontend:
         self._turn_started = time.monotonic()
         self._working.started = self._turn_started
         self._last_kind = None
+        self._shell_commands.clear()
         self._show_working("thinking")
 
     # --- streamed reply -------------------------------------------------
@@ -1062,6 +1067,10 @@ class CLIFrontend:
                 # terminal styling/spoofing or crash the render on a "[".
                 self._feed(text)
             case ToolCallStarted(call):
+                if call.name == "run_shell":
+                    command = call.arguments.get("command")
+                    if isinstance(command, str):
+                        self._shell_commands.add(command)
                 self._flush()
                 self._render_call(call)
                 self._show_working(f"running {call.name}")
@@ -1269,64 +1278,93 @@ class CLIFrontend:
         # One prompt at a time: parallel tool calls must not race on stdin.
         async with self._confirm_lock:
             self._flush()
-            pattern = allowlist_pattern_for(command)
-            self.console.print(
-                Panel(
-                    Text(f"$ {command}", style="bold"),
-                    title="[yellow]run shell command?[/]",
-                    title_align="left",
-                    border_style="yellow",
-                    expand=False,
-                )
-            )
-            session_choice = (
-                f"[yellow]A[/] always allow [bold]{escape(pattern)}[/] this session"
-                if pattern
-                else "[dim]A always-allow not available (shell control syntax)[/]"
-            )
-            prompt = (
-                f"  [yellow]y[/] allow once [dim](Enter)[/] · {session_choice} · "
-                "[yellow]n[/] deny\n[yellow]❯[/] "
-            )
-            if self._rich_prompt:
-                self._stop_live()
-                _, confirm_prompt = self._sessions()
-                try:
-                    answer = await confirm_prompt.prompt_async(
-                        self._ansi(prompt), handle_sigint=False
-                    )
-                except (EOFError, KeyboardInterrupt):
-                    # Raw-mode Ctrl-C is a key, not SIGINT: deny, stop the turn.
-                    self.console.print("[red]  denied[/]")
-                    if self._request_stop is not None:
-                        self._request_stop()
-                    return False
+            if command in self._shell_commands:
+                allowed = await self._confirm_shell(command)
+                label = "run_shell" if allowed else "tools"
             else:
-                answer = await self._input(prompt)
-            answer = answer.strip()
-            if answer == "A":
-                # Persist approval for this exact token prefix for the rest of the session.
-                run_shell_opts = self._tool_options.setdefault("run_shell", {})
-                patterns: list[str] = run_shell_opts.setdefault("allow_patterns", [])
-                if not pattern:
-                    self.console.print(
-                        "[dim]  allowed once — command was not added to the "
-                        "session allowlist[/]"
-                    )
-                    allowed = True
-                else:
-                    if pattern not in patterns:
-                        patterns.append(pattern)
-                    self.console.print(
-                        f"[dim]  allowed · {escape(repr(pattern))} added to "
-                        "session allowlist[/]"
-                    )
-                    allowed = True
-            else:
-                # Empty / Enter, "a", "y", "yes" all mean allow once.
-                allowed = answer.lower() in {"", "a", "y", "yes"}
-                self.console.print(
-                    "[dim]  allowed once[/]" if allowed else "[red]  denied[/]"
-                )
-            self._show_working(f"running {'run_shell' if allowed else 'tools'}")
+                allowed = await self._confirm_action(command)
+                label = "tools"
+            self._show_working(f"running {label}")
             return allowed
+
+    async def _ask(self, prompt: str) -> str | None:
+        """Read one confirmation answer; ``None`` when Ctrl-C/Ctrl-D denied it."""
+        if not self._rich_prompt:
+            return (await self._input(prompt)).strip()
+        self._stop_live()
+        _, confirm_prompt = self._sessions()
+        try:
+            answer = await confirm_prompt.prompt_async(
+                self._ansi(prompt), handle_sigint=False
+            )
+        except (EOFError, KeyboardInterrupt):
+            # Raw-mode Ctrl-C is a key, not SIGINT: deny, stop the turn.
+            self.console.print("[red]  denied[/]")
+            if self._request_stop is not None:
+                self._request_stop()
+            return None
+        return answer.strip()
+
+    async def _confirm_action(self, request: str) -> bool:
+        self.console.print(
+            Panel(
+                Text(request),
+                title="[yellow]approve?[/]",
+                title_align="left",
+                border_style="yellow",
+                expand=False,
+            )
+        )
+        answer = await self._ask(
+            "  [yellow]y[/] allow once [dim](Enter)[/] · [yellow]n[/] deny\n"
+            "[yellow]❯[/] "
+        )
+        if answer is None:
+            return False
+        allowed = answer.lower() in {"", "a", "y", "yes"}
+        self.console.print("[dim]  allowed once[/]" if allowed else "[red]  denied[/]")
+        return allowed
+
+    async def _confirm_shell(self, command: str) -> bool:
+        pattern = allowlist_pattern_for(command)
+        self.console.print(
+            Panel(
+                Text(f"$ {command}", style="bold"),
+                title="[yellow]run shell command?[/]",
+                title_align="left",
+                border_style="yellow",
+                expand=False,
+            )
+        )
+        session_choice = (
+            f"[yellow]A[/] always allow [bold]{escape(pattern)}[/] this session"
+            if pattern
+            else "[dim]A always-allow not available (shell control syntax)[/]"
+        )
+        answer = await self._ask(
+            f"  [yellow]y[/] allow once [dim](Enter)[/] · {session_choice} · "
+            "[yellow]n[/] deny\n[yellow]❯[/] "
+        )
+        if answer is None:
+            return False
+        if answer == "A":
+            # Persist approval for this exact token prefix for the rest of the session.
+            run_shell_opts = self._tool_options.setdefault("run_shell", {})
+            patterns: list[str] = run_shell_opts.setdefault("allow_patterns", [])
+            if not pattern:
+                self.console.print(
+                    "[dim]  allowed once — command was not added to the "
+                    "session allowlist[/]"
+                )
+            else:
+                if pattern not in patterns:
+                    patterns.append(pattern)
+                self.console.print(
+                    f"[dim]  allowed · {escape(repr(pattern))} added to "
+                    "session allowlist[/]"
+                )
+            return True
+        # Empty / Enter, "a", "y", "yes" all mean allow once.
+        allowed = answer.lower() in {"", "a", "y", "yes"}
+        self.console.print("[dim]  allowed once[/]" if allowed else "[red]  denied[/]")
+        return allowed
