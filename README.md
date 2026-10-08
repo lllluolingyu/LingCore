@@ -479,6 +479,10 @@ Queries never return changed or deleted indexed content: they show a stale-index
 notice until it is rebuilt. UTF-8 text is chunked with line ranges; PDFs are
 extracted page by page when the optional PDF dependency is installed. Retrieval
 output is capped by `max_hits`, `max_excerpt_chars`, and `max_context_chars`.
+Offline grep uses timed `regex` matching in a worker thread with a wall-clock
+scan budget (`time_budget_ms`, default 2000) and a 250 ms per-match ceiling; a
+timed-out query returns partial matches plus a coverage note instead of
+blocking the turn.
 The provider adapters follow SiliconFlow's
 [embedding](https://api-docs.siliconflow.cn/docs/api/embeddings-post) and
 [reranking](https://api-docs.siliconflow.cn/docs/api/rerank-post) contracts;

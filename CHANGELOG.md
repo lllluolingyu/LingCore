@@ -5,6 +5,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-08
+
 ### Added
 
 - `todo_write`, a task-checklist tool for multi-step work. Each call replaces
@@ -64,6 +66,43 @@ Notable user-facing changes to LingCore are documented here. The project uses
   rules.
 - CLI session allowlists are deep-copied per session, so an `[A]` approval no
   longer mutates the loaded profile's `tool_options` or survives `/new`.
+
+### Fixed
+
+- `write_file`/`edit_file` now hold a validated parent directory descriptor
+  through the actual write, so swapping an intermediate directory for a
+  symlink cannot redirect a write outside the workspace. `edit_file` matches
+  LF-written `old` text against a CRLF/CR file (as `read_file` displays it)
+  and keeps the file's own line endings.
+- Sandbox cleanup now signals the original process group even after its leader
+  has exited, so orphaned descendants that still hold stdout are killed on
+  timeout or cancellation.
+- Concurrent `memory` updates are serialized for the whole
+  read/modify/compact/write sequence; an auto-compaction await can no longer
+  let one successful update overwrite another.
+- Reindexing a touched-but-unchanged knowledge source refreshes its stored
+  metadata, so a successful reindex no longer leaves the source reported stale.
+- `read_file` pages files larger than 256 KiB with a streaming, no-follow
+  descriptor instead of rejecting the whole file, so staged tool output can be
+  read with `offset`/`limit` as instructed. The streamed window splits lines
+  exactly like small files (CR, CRLF, and the other `str.splitlines()`
+  boundaries), detects a remainder by peeking rather than reading the next
+  (possibly huge) line, and runs in a worker thread.
+- `LLMClient.stream` finalizes the provider stream and reports any received
+  usage even when a consumer closes the generator early, such as Stop during
+  rendering. Usage is reported before the close is awaited, the SDK close is
+  shielded so a cancellation cannot leave transport cleanup half done, and a
+  failing usage sink never replaces an in-flight `CancelledError`.
+- The `knowledge` grep backend uses timed `regex` matching in a worker thread,
+  so catastrophic backtracking cannot block the event loop or exceed its scan
+  budget. The budget also covers literal-fallback queries and skipped
+  binary files, and queries keep stdlib `re` semantics: a non-repeat `{…}`
+  (e.g. `(?:cat){e<=1}`) or a `[` inside a character class stays literal
+  instead of becoming `regex` fuzzy matching or a POSIX class.
+- `sessions.allow_absolute_path` paths are now checked against the installed
+  package tree too, gracefully disabling persistence instead of creating a
+  database inside package code.
+- `fetch_url` preserves the brackets in an IPv6 literal's pinned `Host` header.
 
 ## [0.3.0] - 2026-09-29
 
@@ -235,7 +274,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 - Initial tagged preview of the config-driven async agent runtime.
 
-[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/lllluolingyu/LingCore/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/lllluolingyu/LingCore/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/lllluolingyu/LingCore/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/lllluolingyu/LingCore/releases/tag/v0.1.0
