@@ -14,9 +14,11 @@ Security constraints enforced here:
 
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 from typing import Any, Literal
+from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel, Field
 
@@ -34,6 +36,28 @@ _HEADING = re.compile(r"^## (.+)$", re.MULTILINE)
 # ctx.options key under which from_profile injects the duck-typed summarizer used
 # for auto-compaction (mirrors skill.py's SKILL_STATE_KEY). Absent ⇒ disabled.
 MEMORY_SUMMARIZER_KEY = "_memory_summarizer"
+
+# One lock per resolved memory file per running event loop. The read/modify/
+# summarize/write sequence can await a provider call, so parallel tool calls
+# must not both base their update on the same pre-await snapshot.
+_MEMORY_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
+    WeakKeyDictionary()
+)
+
+
+def _memory_lock(path: Path) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    locks = _MEMORY_LOCKS.get(loop)
+    if locks is None:
+        locks = {}
+        _MEMORY_LOCKS[loop] = locks
+    key = str(path)
+    lock = locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[key] = lock
+    return lock
+
 
 _MEMORY_COMPACT_SYSTEM = (
     "You condense an AI agent's long-term memory file. Merge duplicate or "
@@ -166,6 +190,14 @@ class MemoryArgs(BaseModel):
 )
 async def memory(args: MemoryArgs, ctx: ToolContext) -> str:
     path = _resolve_memory_path(ctx)
+    # Serialize the complete read/modify/compact/write operation for this
+    # resolved file. The await on _compact_memory() would otherwise let a
+    # parallel call read the same stale snapshot and overwrite it.
+    async with _memory_lock(path):
+        return await _memory_locked(args, ctx, path)
+
+
+async def _memory_locked(args: MemoryArgs, ctx: ToolContext, path: Path) -> str:
     opts = ctx.options.get("memory", {})
     max_bytes: int = int(opts.get("max_bytes", _DEFAULT_MAX_BYTES))
 

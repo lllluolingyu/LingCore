@@ -245,6 +245,10 @@ def _build_request(
             authority = f"{authority}:{parsed.port}"
         target = parsed._replace(netloc=authority).geturl()
         host_header = parsed.hostname or ""
+        # ``urlparse().hostname`` strips the brackets from an IPv6 literal, but
+        # an HTTP Host header must carry the bracketed authority.
+        if ":" in host_header:
+            host_header = f"[{host_header}]"
         if parsed.port:
             host_header = f"{host_header}:{parsed.port}"
         headers["Host"] = host_header

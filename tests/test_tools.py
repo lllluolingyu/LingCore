@@ -252,6 +252,38 @@ async def test_write_rejects_escape(ctx):
         await write_file(WriteArgs(path="../evil.txt", content="x"), ctx)
 
 
+async def test_write_anchors_parent_against_swap(ctx, tmp_path, monkeypatch):
+    import shutil
+
+    parent = ctx.workspace / "nested"
+    moved = tmp_path.parent / f"{tmp_path.name}-nested-held"
+    real_open = ConfinedDirectory.open_regular
+    swapped = False
+
+    def swap_then_open(self, name, mode="rb", *, permissions=0o644):
+        nonlocal swapped
+        if mode == "wb" and not swapped:
+            swapped = True
+            parent.rename(moved)
+            parent.symlink_to(moved, target_is_directory=True)
+        return real_open(self, name, mode, permissions=permissions)
+
+    monkeypatch.setattr(ConfinedDirectory, "open_regular", swap_then_open)
+    try:
+        with pytest.raises(ToolError):
+            await write_file(WriteArgs(path="nested/evil.txt", content="x"), ctx)
+        assert not (moved / "evil.txt").exists()
+    finally:
+        shutil.rmtree(moved, ignore_errors=True)
+
+
+async def test_edit_lf_text_matches_crlf_file_and_keeps_endings(ctx):
+    path = ctx.workspace / "crlf.txt"
+    path.write_bytes(b"first\r\nsecond\r\nthird\r\n")
+    await edit_file(EditArgs(path="crlf.txt", old="first\nsecond", new="one\ntwo"), ctx)
+    assert path.read_bytes() == b"one\r\ntwo\r\nthird\r\n"
+
+
 async def test_edit_unique(ctx):
     await edit_file(EditArgs(path="a.txt", old="world", new="there"), ctx)
     assert (ctx.workspace / "a.txt").read_text() == "hello there"
@@ -645,6 +677,75 @@ async def test_offload_writes_file_readable_via_read_file(ctx):
     rel = out.split("→")[1].split(";")[0].strip()
     content = await read_file(ReadArgs(path=rel, limit=3), ctx)
     assert "1\trow1" in content
+
+
+async def test_read_file_pages_large_offloaded_output(ctx):
+    # A >256 KiB staged log must still be pageable; the whole-file guard used
+    # to reject even a three-line read.
+    big = "\n".join(f"line {i}" for i in range(1, 30_001))
+    assert len(big.encode()) > 256 * 1024
+    out = offload_text(ctx, source="shell", text=big, threshold=100)
+    rel = out.split("→")[1].split(";")[0].strip()
+
+    window = await read_file(ReadArgs(path=rel, offset=1, limit=3), ctx)
+    assert window.splitlines()[:3] == ["1\tline 1", "2\tline 2", "3\tline 3"]
+    assert "more lines" in window
+
+    tail = await read_file(ReadArgs(path=rel, offset=29_998, limit=3), ctx)
+    assert tail.splitlines()[0].startswith("29998\tline 29998")
+
+
+def test_read_window_does_not_consume_unrequested_tail():
+    # Detecting "more lines" must peek, not read a huge newline-free line.
+    import io
+
+    from lingcore.tools.builtin import fs
+
+    class _CountingStream(io.BytesIO):
+        consumed = 0
+
+        def read(self, size=-1):
+            chunk = super().read(size)
+            self.consumed += len(chunk)
+            return chunk
+
+    stream = _CountingStream(b"first\n" + b"x" * (16 * 1024 * 1024))
+    window = fs._format_stream_lines(
+        stream, offset=1, limit=1, max_lines=2_000, max_line_chars=2_000
+    )
+    assert window.splitlines()[0] == "1\tfirst"
+    assert "more lines" in window
+    assert stream.consumed <= 2 * fs._READ_CHUNK_BYTES
+
+
+async def test_read_file_large_file_splits_lines_like_small_files(ctx):
+    # CR and CRLF terminators number lines exactly like str.splitlines(), and
+    # a CRLF's "\r" never counts toward a clipped line's length.
+    filler = "z" * (300 * 1024)
+    for sep in ("\r", "\r\n"):
+        path = ctx.workspace / "big.txt"
+        path.write_bytes(sep.join(["alpha", "beta", filler, "omega"]).encode())
+        out = await read_file(ReadArgs(path="big.txt", limit=4), ctx)
+        rows = out.splitlines()
+        assert rows[0] == "1\talpha" and rows[1] == "2\tbeta"
+        assert rows[2].endswith(f"(+{len(filler) - 2_000} chars)")
+        assert rows[3] == "4\tomega"
+        assert "more lines" not in out
+
+
+def test_stream_lines_matches_splitlines_across_chunk_boundaries():
+    import io
+
+    from lingcore.tools.builtin import fs
+
+    text = "a\r\nb\rc\n\nd\x0be\u2028f\r"
+    for pad in range(0, 4):
+        body = "p" * (fs._READ_CHUNK_BYTES - 1 - pad) + text
+        lines = fs._StreamLines(io.BytesIO(body.encode()), max_line_chars=10**9)
+        got = []
+        while (line := lines.next_line()) is not None:
+            got.append(line)
+        assert got == body.splitlines()
 
 
 def test_offload_filename_is_content_stable(ctx):

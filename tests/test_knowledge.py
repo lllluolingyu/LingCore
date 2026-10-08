@@ -98,6 +98,46 @@ async def test_query_regex(tmp_path):
     assert "404" in result
 
 
+async def test_grep_regex_is_time_bounded(tmp_path):
+    # Catastrophic backtracking must not block the event loop (the grep pass
+    # runs in a worker thread) and must stop within the configured budget.
+    (tmp_path / "catastrophic.txt").write_text("a" * 64 + "!\n", encoding="utf-8")
+    ctx = _ctx(tmp_path, {"time_budget_ms": 50})
+    result = await knowledge(
+        knowledge.args_model(action="query", query=r"(a|aa)+$"), ctx
+    )
+    assert "timed out after 50 ms" in result
+
+
+async def test_grep_keeps_stdlib_re_semantics(tmp_path):
+    # ``regex`` would read these as fuzzy matching / POSIX classes; ``re``
+    # treats them as literal text, which stays the grep contract.
+    (tmp_path / "a.txt").write_text("cat\ncot\n:]\nx\n", encoding="utf-8")
+    ctx = _ctx(tmp_path)
+    fuzzy = await knowledge(
+        knowledge.args_model(action="query", query="(?:cat){e<=1}"), ctx
+    )
+    assert fuzzy == "(no matches)"
+    posix = await knowledge(
+        knowledge.args_model(action="query", query="[[:alpha:]]"), ctx
+    )
+    assert posix == "a.txt:3: :]"
+
+
+@pytest.mark.parametrize("query", ["[", "zzz"])
+async def test_grep_budget_covers_literal_and_binary_scans(tmp_path, query):
+    # An invalid regex (literal fallback) and undecodable files must still
+    # observe the scan budget and report the partial result.
+    for i in range(50):
+        (tmp_path / f"t{i}.txt").write_text("plain text\n" * 50, encoding="utf-8")
+        (tmp_path / f"b{i}.bin").write_bytes(b"\xff\xfe" * 1000)
+    result = await knowledge(
+        knowledge.args_model(action="query", query=query),
+        _ctx(tmp_path, {"time_budget_ms": 1}),
+    )
+    assert "timed out after 1 ms" in result
+
+
 async def test_query_no_matches(tmp_path):
     (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
     ctx = _ctx(tmp_path)
@@ -229,6 +269,25 @@ async def test_content_hash_detects_stale_file_with_preserved_size_and_mtime(tmp
     os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
     status = await knowledge(knowledge.args_model(action="status"), ctx)
     assert "stale files=1" in status
+
+
+async def test_reindex_refreshes_touched_unchanged_source(tmp_path):
+    path = tmp_path / "facts.txt"
+    path.write_text("feline", encoding="utf-8")
+    stat = path.stat()
+    embedder = FakeEmbedder()
+    ctx = _ctx(tmp_path, _indexed_opts(), embedder=embedder)
+    await knowledge(knowledge.args_model(action="index"), ctx)
+
+    # Same bytes, new mtime: the reuse branch must refresh stored metadata so
+    # the source is not reported stale after a successful reindex.
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    report = await knowledge(knowledge.args_model(action="index"), ctx)
+    assert "unchanged=1" in report
+    status = await knowledge(knowledge.args_model(action="status"), ctx)
+    assert "stale files=0" in status
+    result = await knowledge(knowledge.args_model(action="query", query="cat"), ctx)
+    assert "facts.txt:1" in result and "feline" in result
 
 
 async def test_renamed_unchanged_content_reuses_its_vector(tmp_path):

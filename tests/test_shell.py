@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -169,6 +170,22 @@ async def test_timeout_kills_command(tmp_path):
     ctx = _ctx(tmp_path, require_confirmation=False, timeout=0.5)
     with pytest.raises(ToolError, match="timed out"):
         await run_shell(ShellArgs(command="sleep 5"), ctx)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+async def test_timeout_kills_children_after_leader_exits(tmp_path):
+    import shlex
+
+    marker = tmp_path / "orphan-marker"
+    # The leader exits immediately; the background subshell inherits stdout,
+    # so the reader waits on the pipe and times out while the leader is
+    # already reaped. Cleanup must still signal the original process group.
+    command = f"(sleep 0.5; : > {shlex.quote(str(marker))}) &"
+    ctx = _ctx(tmp_path, require_confirmation=False, timeout=0.1)
+    with pytest.raises(ToolError, match="timed out"):
+        await run_shell(ShellArgs(command=command), ctx)
+    await asyncio.sleep(0.7)
+    assert not marker.exists()
 
 
 def _execution_with_failing_abort() -> tuple[ShellExecution, list[bool]]:

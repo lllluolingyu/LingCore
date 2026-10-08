@@ -23,11 +23,14 @@ import re
 import secrets
 import sqlite3
 import struct
+import threading
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Literal, Mapping, Sequence, cast
 
+import regex
 from pydantic import BaseModel, Field
 
 from lingcore.errors import ConfigError, ToolError
@@ -55,6 +58,11 @@ _MAX_READ_BYTES = 256 * 1024
 _MAX_INDEX_SOURCE_BYTES = 4 * 1024 * 1024
 _MAX_HITS = 50
 _GREP_LINE_CHARS = 200
+# Catastrophic regex backtracking is bounded per match and across the scan;
+# the tool runs this synchronous pass in a worker thread so the event loop (and
+# Stop handling) stays responsive while the regex engine is busy.
+_DEFAULT_GREP_TIME_BUDGET_MS = 2_000
+_GREP_MATCH_TIMEOUT_MS = 250
 _DEFAULT_SOURCES = ["**/*"]
 _DEFAULT_CHUNK_CHARS = 1_600
 _DEFAULT_CHUNK_OVERLAP_LINES = 2
@@ -227,6 +235,90 @@ def _read_source_bytes(
         return directory.read_regular_with_stat(rel.name, max_bytes=max_bytes)
 
 
+# A brace ``re`` accepts as a repeat count; any other ``{`` is a literal to
+# ``re`` (and ``{}`` always is) but may be a fuzzy constraint to ``regex``.
+_RE_REPEAT = re.compile(r"\{[0-9]*(?:,[0-9]*)?\}")
+
+
+def _escape_regex_divergences(query: str) -> str:
+    """Escape what ``re`` reads as literal but ``regex`` would not.
+
+    Query semantics are defined by the stdlib ``re`` (the grep contract
+    predates the timed ``regex`` engine). Two constructs ``re`` accepts as
+    literal text are syntax to ``regex``: a non-repeat ``{…}`` (fuzzy
+    matching, e.g. ``(?:cat){e<=1}``) and ``[`` inside a character class
+    (POSIX classes such as ``[[:alpha:]]``). Escaping both keeps the literal
+    meaning in either engine.
+    """
+    out: list[str] = []
+    i, n = 0, len(query)
+    in_set = False
+    set_body = 0  # index of a character class's first member
+    while i < n:
+        c = query[i]
+        if c == "\\":
+            out.append(query[i : i + 2])
+            i += 2
+            continue
+        if in_set:
+            if c == "[":
+                out.append("\\[")
+            else:
+                # A "]" leading the class (``[]a]``/``[^]a]``) is a member.
+                if c == "]" and i > set_body:
+                    in_set = False
+                out.append(c)
+            i += 1
+            continue
+        if c == "[":
+            j = i + 1
+            if j < n and query[j] == "^":
+                j += 1
+            out.append(query[i:j])
+            in_set, set_body, i = True, j, j
+            continue
+        if c == "{":
+            repeat = _RE_REPEAT.match(query, i)
+            if repeat is not None and repeat.group() != "{}":
+                out.append(repeat.group())
+                i = repeat.end()
+            else:
+                out.append("\\{")
+                i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _compile_grep_pattern(query: str) -> regex.Pattern[str] | None:
+    """Compile ``query`` for timed matching with stdlib ``re`` semantics.
+
+    Returns ``None`` (substring matching only) when ``re`` rejects the query,
+    or when the divergence escaping cannot be shown to leave ``re``'s parse
+    unchanged (e.g. a verbose-mode comment confusing the scan).
+    """
+    try:
+        re.compile(query)
+    except re.error:
+        return None
+    escaped = _escape_regex_divergences(query)
+    if escaped != query:
+        try:
+            from re import _parser  # type: ignore[attr-defined]
+
+            if repr(_parser.parse(escaped)) != repr(_parser.parse(query)):
+                return None
+        except ImportError:
+            pass
+        except re.error:
+            return None
+    try:
+        return regex.compile(escaped, regex.VERSION0)
+    except regex.error:
+        return None
+
+
 def _grep(
     base: Path,
     sources: Sequence[str],
@@ -234,14 +326,25 @@ def _grep(
     *,
     max_hits: int = _MAX_HITS,
     max_line_chars: int = _GREP_LINE_CHARS,
+    time_budget_ms: int = _DEFAULT_GREP_TIME_BUDGET_MS,
+    cancel_event: threading.Event | None = None,
 ) -> list[str]:
     hits: list[str] = []
-    try:
-        rx = re.compile(query)
-    except re.error:
-        rx = None  # fall back to substring matching
+    budget_ms = max(1, time_budget_ms)
+    deadline = time.monotonic() + budget_ms / 1_000
+    budget_note = f"... (grep timed out after {budget_ms} ms; partial results)"
+    timeout_note: str | None = None
+    pattern = _compile_grep_pattern(query)
 
+    # The deadline is checked before every file and line whichever matcher
+    # runs, so substring fallbacks and skipped (binary/oversized) files are
+    # bounded by the same budget as regex matching.
     for full in _iter_source_files(base, sources):
+        if cancel_event is not None and cancel_event.is_set():
+            return hits
+        if time.monotonic() >= deadline:
+            timeout_note = budget_note
+            break
         try:
             payload, _ = _read_source_bytes(base, full, max_bytes=_MAX_READ_BYTES)
             text = payload.decode("utf-8")
@@ -249,12 +352,41 @@ def _grep(
             continue
         rel = full.relative_to(base)
         for lineno, line in enumerate(text.splitlines(), start=1):
-            matched = (rx.search(line) if rx else False) or (query in line)
+            if cancel_event is not None and cancel_event.is_set():
+                return hits
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timeout_note = budget_note
+                break
+            matched = query in line
+            if pattern is not None and not matched:
+                match_timeout = min(remaining, _GREP_MATCH_TIMEOUT_MS / 1_000)
+                try:
+                    # ``concurrent=True`` releases the GIL while matching, so
+                    # the worker thread cannot block Stop/other sessions.
+                    matched = (
+                        pattern.search(line, timeout=match_timeout, concurrent=True)
+                        is not None
+                    )
+                except TimeoutError:
+                    # Do not let a single pathological line consume the whole
+                    # budget; report it as a bounded partial scan.
+                    timeout_note = (
+                        budget_note
+                        if remaining <= _GREP_MATCH_TIMEOUT_MS / 1_000
+                        else f"... (grep stopped after a single regex match "
+                        f"exceeded {_GREP_MATCH_TIMEOUT_MS} ms; partial results)"
+                    )
+                    break
             if matched:
                 hits.append(f"{rel}:{lineno}: {line.strip()[:max_line_chars]}")
                 if len(hits) >= max_hits:
                     hits.append(f"... (truncated at {max_hits} hits)")
                     return hits
+        if timeout_note is not None:
+            break
+    if timeout_note is not None:
+        hits.append(timeout_note)
     return hits
 
 
@@ -754,6 +886,7 @@ async def _update_index_sources(
         updated_count = 0
         unchanged_count = 0
         reused_vectors = 0
+        unchanged_snapshots: list[_SourceSnapshot] = []
         targets: list[tuple[str, str | int, str, str]] = []
         # target tuple: ("draft"/"existing", chunk key/id, text hash, text)
         changed_snapshots: list[
@@ -802,6 +935,11 @@ async def _update_index_sources(
                         )
             else:
                 unchanged_count += 1
+                # Same content/chunk config, but the source may have been
+                # touched (or restored with a preserved hash). Refresh the
+                # stored metadata below so query-time staleness checks pass
+                # after a successful reindex.
+                unchanged_snapshots.append(snapshot)
                 for row in connection.execute(
                     """
                     SELECT id, text_hash, text FROM chunks
@@ -854,6 +992,22 @@ async def _update_index_sources(
             for remove_path in sorted(remove_paths):
                 connection.execute(
                     "DELETE FROM documents WHERE path = ?", (remove_path,)
+                )
+
+            for snapshot in unchanged_snapshots:
+                connection.execute(
+                    """
+                    UPDATE documents
+                    SET content_hash = ?, size = ?, mtime_ns = ?, chunk_config = ?
+                    WHERE path = ?
+                    """,
+                    (
+                        snapshot.content_hash,
+                        snapshot.size,
+                        snapshot.mtime_ns,
+                        config_fingerprint,
+                        snapshot.path,
+                    ),
                 )
 
             for snapshot, reusable in changed_snapshots:
@@ -1429,21 +1583,38 @@ async def knowledge(args: KnowledgeArgs, ctx: ToolContext) -> str:
             raise ToolError("query action requires a query string")
         query = args.query.strip()
         if backend == "grep":
-            hits = _grep(
-                base,
-                sources,
-                query,
-                max_hits=_int_option(
-                    options, "max_hits", _MAX_HITS, minimum=1, maximum=100
-                ),
-                max_line_chars=_int_option(
-                    options,
-                    "max_line_chars",
-                    _GREP_LINE_CHARS,
-                    minimum=20,
-                    maximum=10_000,
-                ),
-            )
+            cancel_event = threading.Event()
+            try:
+                hits = await asyncio.to_thread(
+                    _grep,
+                    base,
+                    sources,
+                    query,
+                    max_hits=_int_option(
+                        options, "max_hits", _MAX_HITS, minimum=1, maximum=100
+                    ),
+                    max_line_chars=_int_option(
+                        options,
+                        "max_line_chars",
+                        _GREP_LINE_CHARS,
+                        minimum=20,
+                        maximum=10_000,
+                    ),
+                    time_budget_ms=_int_option(
+                        options,
+                        "time_budget_ms",
+                        _DEFAULT_GREP_TIME_BUDGET_MS,
+                        minimum=1,
+                        maximum=120_000,
+                    ),
+                    cancel_event=cancel_event,
+                )
+            except BaseException:
+                # The worker checks this between lines/matches; cancellation
+                # cannot interrupt a single regex call, but the per-match
+                # timeout above is always bounded by the remaining budget.
+                cancel_event.set()
+                raise
             return "\n".join(hits) if hits else "(no matches)"
         return await _query_index(ctx, options, sources, query, backend)
 

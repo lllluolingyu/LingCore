@@ -1040,11 +1040,14 @@ def _control_message(output: bytes) -> str:
 
 
 def _kill_tree(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is not None:
-        return
+    # ``start_new_session=True`` makes the leader's PID the process-group id,
+    # and that id remains allocated while any group member is alive. Signal it
+    # directly (not through ``os.getpgid(leader)``) even when the leader has
+    # already been reaped: its descendants can outlive it and still hold the
+    # stdout pipe or keep mutating the workspace.
     if os.name != "nt":
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            os.killpg(process.pid, signal.SIGKILL)
             return
         except (ProcessLookupError, PermissionError):
             pass

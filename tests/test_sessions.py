@@ -1547,6 +1547,20 @@ def test_open_store_refuses_package_tree(tmp_path: Path, monkeypatch):
     assert "inside the installed" in notice
 
 
+def test_open_store_absolute_path_refuses_package_tree(tmp_path: Path, monkeypatch):
+    import lingcore.sessions as sessions_mod
+
+    monkeypatch.setattr(sessions_mod, "_PACKAGE_DIR", tmp_path.resolve())
+    target = tmp_path / "inside-package.db"
+    yaml_text = PROFILE_YAML + (
+        f"sessions:\n  path: {target}\n  allow_absolute_path: true\n"
+    )
+    store, notice = open_store(_profile(tmp_path, yaml_text))
+    assert store is None
+    assert "inside the installed" in notice
+    assert not target.exists()
+
+
 def test_bundled_profiles_live_outside_package_and_persist(tmp_path: Path):
     import lingcore.sessions as sessions_mod
 

@@ -40,7 +40,9 @@ SDK-free :class:`~lingcore.usage.TokenUsage`.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
 from collections.abc import AsyncIterator, Collection
 from dataclasses import dataclass, field
 from typing import Any
@@ -76,6 +78,12 @@ async def _close_quietly(stream: Any) -> None:
         await closer()
     except Exception:
         pass
+
+
+# Strong references to in-flight stream closes: a close shielded from a
+# cancelled consumer keeps running in the background and must not be
+# garbage-collected before the transport is released.
+_PENDING_CLOSES: set[asyncio.Future[None]] = set()
 
 
 @dataclass(slots=True)
@@ -237,6 +245,27 @@ class LLMClient:
         usage: Any = None
         served_model: str | None = None
 
+        usage_reported = False
+        close_task: asyncio.Future[None] | None = None
+
+        def report_usage() -> None:
+            nonlocal usage_reported
+            if usage_reported:
+                return
+            usage_reported = True
+            self._report_usage(served_model, usage)
+
+        async def close_stream() -> None:
+            # The SDK's close is shielded: cancelling this await (Stop during
+            # cleanup) leaves transport cleanup running to completion, and a
+            # later call rejoins the same task instead of skipping it.
+            nonlocal close_task
+            if close_task is None:
+                close_task = asyncio.ensure_future(_close_quietly(stream))
+                _PENDING_CLOSES.add(close_task)
+                close_task.add_done_callback(_PENDING_CLOSES.discard)
+            await asyncio.shield(close_task)
+
         try:
             async for event in stream:
                 # The usage block normally rides a trailing chunk with no
@@ -271,15 +300,27 @@ class LLMClient:
                 if choice.finish_reason:
                     finish_reason = choice.finish_reason
         except Exception as e:
-            await _close_quietly(stream)
-            self._report_usage(served_model, usage)
             raise LLMStreamError(
                 f"stream interrupted: {_describe(e)}", retryable=True
             ) from e
+        finally:
+            # Runs on normal completion, an in-loop exception, a consumer
+            # aclose()/GeneratorExit, or task cancellation. Report any billed
+            # usage already observed first — synchronously, so a cancellation
+            # landing in the close await below cannot skip it — then close the
+            # SDK stream before reuse/retry. A failing usage sink never
+            # replaces an exception that is already propagating (notably
+            # CancelledError, which Stop finalization depends on).
+            propagating = sys.exc_info()[1] is not None
+            sink_error: Exception | None = None
+            try:
+                report_usage()
+            except Exception as exc:
+                sink_error = exc
+            await close_stream()
+            if sink_error is not None and not propagating:
+                raise sink_error
 
-        # Reported before the terminal chunk: a consumer may stop iterating as
-        # soon as it has the tool calls, and billed tokens must not be lost.
-        self._report_usage(served_model, usage)
         if finish_reason is None:
             # The server closed the stream without ever sending a finish
             # reason: a truncated response. Surfacing it beats silently

@@ -157,6 +157,103 @@ async def test_truncated_stream_still_reports_billed_usage(monkeypatch) -> None:
     assert seen == [TokenUsage("alias", 100, 20)]
 
 
+async def test_closing_consumer_closes_stream_and_reports_usage(monkeypatch) -> None:
+    seen: list[TokenUsage] = []
+    client = _client(usage_sink=seen.append)
+    closed = {"n": 0}
+
+    class _Stream:
+        async def _gen(self):
+            yield _Event([_Choice(_Delta(content="hi"))], usage=_usage())
+            raise AssertionError("consumer should not pull past the first chunk")
+
+        def __aiter__(self):
+            return self._gen()
+
+        async def close(self) -> None:
+            closed["n"] += 1
+
+    async def fake_open(messages, tools):
+        return _Stream()
+
+    monkeypatch.setattr(client, "_open_stream", fake_open)
+    stream = client.stream([])
+    first = await anext(stream)
+    assert first.text_delta == "hi"
+    await stream.aclose()
+    assert closed["n"] == 1
+    assert seen == [TokenUsage("alias", 100, 20)]
+
+
+def _blocking_stream(close_started: asyncio.Event, release: asyncio.Event, done: dict):
+    class _Stream:
+        async def _gen(self):
+            yield _Event([_Choice(_Delta(content="hi"))], usage=_usage())
+            await asyncio.Event().wait()  # never finishes on its own
+
+        def __aiter__(self):
+            return self._gen()
+
+        async def close(self) -> None:
+            close_started.set()
+            await release.wait()
+            done["closed"] = True
+
+    return _Stream()
+
+
+async def test_cancel_during_stream_close_still_reports_usage_and_closes(
+    monkeypatch,
+) -> None:
+    seen: list[TokenUsage] = []
+    client = _client(usage_sink=seen.append)
+    close_started, release, done = asyncio.Event(), asyncio.Event(), {}
+
+    async def fake_open(messages, tools):
+        return _blocking_stream(close_started, release, done)
+
+    monkeypatch.setattr(client, "_open_stream", fake_open)
+    stream = client.stream([])
+    assert (await anext(stream)).text_delta == "hi"
+    closer = asyncio.create_task(stream.aclose())
+    await close_started.wait()
+    closer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closer
+    # Usage was reported before the cancellable close await.
+    assert seen == [TokenUsage("alias", 100, 20)]
+    # The shielded SDK close keeps running and completes transport cleanup.
+    release.set()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert done == {"closed": True}
+
+
+async def test_failing_usage_sink_does_not_replace_cancellation(monkeypatch) -> None:
+    def sink(_usage: TokenUsage) -> None:
+        raise RuntimeError("sink broke")
+
+    client = _client(usage_sink=sink)
+    close_started, release, done = asyncio.Event(), asyncio.Event(), {}
+    release.set()
+
+    async def fake_open(messages, tools):
+        return _blocking_stream(close_started, release, done)
+
+    monkeypatch.setattr(client, "_open_stream", fake_open)
+
+    async def consume() -> None:
+        async for _ in client.stream([]):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert done == {"closed": True}
+
+
 class _MeteredLLM:
     """Scripted client that reports usage into the agent's meter."""
 

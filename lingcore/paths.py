@@ -173,6 +173,49 @@ class ConfinedDirectory:
         return os.fdopen(fd, "wb")
 
     @contextmanager
+    def open_regular(
+        self,
+        name: str,
+        mode: str = "rb",
+        *,
+        permissions: int = 0o644,
+    ) -> Iterator[IO[bytes]]:
+        """Open one regular-file entry relative to this anchored descriptor.
+
+        Supported modes are ``rb``, ``r+b``, and ``wb``. The final component is
+        opened with ``O_NOFOLLOW`` and must be a regular file. Replacing an
+        ancestor after this directory was validated is refused by
+        :meth:`ensure_anchored` before the open; the validated parent
+        descriptor then stays open through the read/write, so a later path
+        swap cannot redirect the operation.
+        """
+        flags = {
+            "rb": os.O_RDONLY,
+            "r+b": os.O_RDWR,
+            "wb": os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        }.get(mode)
+        if flags is None:
+            raise ValueError(f"unsupported confined file mode: {mode!r}")
+        leaf = _leaf_name(name)
+        self.ensure_anchored()
+        fd = os.open(
+            leaf,
+            flags | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            permissions,
+            dir_fd=self._fd,
+        )
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise PathEscapeError(f"confined entry is not a regular file: {leaf!r}")
+            with os.fdopen(fd, mode) as handle:
+                fd = -1
+                yield handle
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+    @contextmanager
     def open_lock_file(self, name: str) -> Iterator[ConfinedLockFile]:
         """Open a persistent, no-follow advisory lock beside confined state.
 

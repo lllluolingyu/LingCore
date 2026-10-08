@@ -172,6 +172,16 @@ async def test_fetch_pins_connection_to_vetted_ip(ctx):
     assert req.extensions["sni_hostname"] == "example.com"
 
 
+async def test_fetch_preserves_ipv6_brackets_in_host_header(ctx):
+    # urlparse.hostname drops IPv6 brackets; the Host header must not.
+    p, client = _patch_client([_FakeResponse("ok")])
+    with p:
+        await fetch_url(FetchArgs(url="http://[2606:4700:4700::1111]:8080/"), ctx)
+    req = client.requests[0]
+    assert req.url.host == "2606:4700:4700::1111"
+    assert req.headers["Host"] == "[2606:4700:4700::1111]:8080"
+
+
 async def test_fetch_disables_keepalive(ctx):
     # Keep-alive must be off so a redirect to another host sharing the same IP
     # can't reuse the first hop's TLS connection (and skip the new hop's SNI).

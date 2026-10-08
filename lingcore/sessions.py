@@ -1568,7 +1568,7 @@ def open_store(profile: "AgentProfile") -> tuple[SessionStore | None, str | None
                 "sessions.path is absolute; set sessions.allow_absolute_path: true "
                 "to permit this"
             )
-        db_path = raw
+        db_path = raw.resolve()
     else:
         source_dir = getattr(profile, "_source_dir", None)
         if source_dir is None:
@@ -1576,16 +1576,20 @@ def open_store(profile: "AgentProfile") -> tuple[SessionStore | None, str | None
         resolved = (source_dir / raw).resolve()
         if not resolved.is_relative_to(source_dir.resolve()):
             raise ConfigError(f"sessions.path escapes profile directory: {cfg.path}")
-        try:
-            resolved.relative_to(_PACKAGE_DIR)
-            return None, (
-                "session persistence disabled: the profile directory is inside "
-                "the installed lingcore package — copy it elsewhere, or set "
-                "an absolute sessions.path with allow_absolute_path: true"
-            )
-        except ValueError:
-            pass
         db_path = resolved
+
+    # Both relative and absolute paths resolve before this shared package
+    # guard, so allow_absolute_path can never create a sessions.db inside
+    # installed package code.
+    try:
+        db_path.relative_to(_PACKAGE_DIR)
+        return None, (
+            "session persistence disabled: the profile directory is inside "
+            "the installed lingcore package — copy it elsewhere, or set "
+            "an absolute sessions.path with allow_absolute_path: true"
+        )
+    except ValueError:
+        pass
 
     try:
         db_path.parent.mkdir(parents=True, exist_ok=True)

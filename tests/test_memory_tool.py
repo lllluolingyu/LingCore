@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -201,6 +203,38 @@ async def test_compact_memory_rejects_oversized():
 async def test_compact_memory_survives_summarizer_failure():
     summ = FakeLLMClient([StreamFailure(text="", reason="boom")])
     assert await _compact_memory(summ, "## a\nx", max_bytes=10_000) is None
+
+
+class _SlowSummarizer:
+    """Returns the input memory after a delay, forcing an await mid-update."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def stream(self, messages, tools=None):
+        self.calls += 1
+        await asyncio.sleep(0.02)
+        prompt = messages[-1].content
+        _, _, content = prompt.partition("format:\n\n")
+        yield SimpleNamespace(text_delta=content)
+
+
+async def test_parallel_remembers_are_serialized(tmp_path):
+    summarizer = _SlowSummarizer()
+    ctx = _ctx_summ(
+        tmp_path,
+        summarizer,
+        {"max_bytes": 10_000, "compact_at_ratio": 0.0, "auto_compact": True},
+    )
+    # Both calls start from the same empty file; without the per-file lock the
+    # second write is based on a stale snapshot and forgets the first key.
+    await asyncio.gather(
+        memory(memory.args_model(action="remember", key="a", content="A"), ctx),
+        memory(memory.args_model(action="remember", key="b", content="B"), ctx),
+    )
+    result = await memory(memory.args_model(action="read"), ctx)
+    assert "## a" in result and "## b" in result
+    assert summarizer.calls == 2  # every write observed the prior one
 
 
 async def test_auto_compact_shrinks_oversized_write(tmp_path):
