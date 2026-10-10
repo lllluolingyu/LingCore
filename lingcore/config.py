@@ -29,7 +29,7 @@ from lingcore.errors import ConfigError
 from lingcore.media_types import FALLBACK_TEXT_MAX_CHARS, NativeModality
 from lingcore.modality import DEFAULT_PDF_MAX_CHARS
 from lingcore.tool_options import (
-    parse_fetch_allowed_networks,
+    parse_network_policy,
     parse_search_options,
     parse_todo_max_items,
 )
@@ -384,12 +384,23 @@ class AgentProfile(BaseModel):
     # from the model-invoked ``activate_skill`` tool (dynamic). A profile may use
     # either, both, or neither.
     skills: list[str] = Field(default_factory=list)
+    plugins: list[str] = Field(default_factory=list)
     tool_options: dict[str, Any] = Field(default_factory=dict)
     memory: MemoryCfg = Field(default_factory=MemoryCfg)
     loop: LoopCfg = Field(default_factory=LoopCfg)
     guardrail: GuardrailCfg = Field(default_factory=GuardrailCfg)
     sessions: SessionsCfg = Field(default_factory=SessionsCfg)
     media_fallback: MediaFallbackCfg = Field(default_factory=MediaFallbackCfg)
+
+    @field_validator("plugins")
+    @classmethod
+    def _plugin_names(cls, names: list[str]) -> list[str]:
+        if len(names) != len(set(names)):
+            raise ValueError("plugins cannot contain duplicates")
+        for name in names:
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", name):
+                raise ValueError("invalid plugin name")
+        return names
 
     @field_validator("workspace")
     @classmethod
@@ -434,7 +445,7 @@ class AgentProfile(BaseModel):
         if "todo_write" in self.tool_options:
             parse_todo_max_items(self.tool_options["todo_write"])
         if "fetch_url" in self.tool_options:
-            parse_fetch_allowed_networks(self.tool_options["fetch_url"])
+            parse_network_policy(self.tool_options["fetch_url"])
         return self
 
     def initial_tool_set(self) -> frozenset[str]:

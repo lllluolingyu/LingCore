@@ -58,6 +58,7 @@ from lingcore.events import (
     Compacted,
     Error,
     Final,
+    PluginNotice,
     SkillActivated,
     StreamRetry,
     TextDelta,
@@ -74,6 +75,7 @@ from lingcore.media_types import (
     decoded_payload_size,
 )
 from lingcore.message import Attachment, ToolCall, ToolResult, UserInput
+from lingcore.plugins.commands import CommandCatalog
 from lingcore.todos import TodoItem
 from lingcore.tools.builtin.shell import allowlist_pattern_for
 from lingcore.usage import TokenUsage
@@ -512,10 +514,15 @@ class _Working:
         return self._spinner
 
 
-def _completions(text: str, at_line_start: bool) -> list[str]:
+def _completions(
+    text: str, at_line_start: bool, commands: CommandCatalog | None = None
+) -> list[str]:
     """Readline candidates: slash commands at line start, ``@`` file paths."""
     if text.startswith("/") and at_line_start:
-        return [command for command in _COMMANDS if command.startswith(text)]
+        names = list(_COMMANDS) + (
+            [c.qualified_name for c in commands.commands] if commands else []
+        )
+        return [command for command in names if command.startswith(text)]
     if text.startswith("@"):
         prefix = text[1:]
         expanded = os.path.expanduser(prefix)
@@ -531,6 +538,14 @@ def _completions(text: str, at_line_start: bool) -> list[str]:
 class _InputCompleter(Completer):
     """Complete slash commands at line start and ``@`` attachment paths."""
 
+    def __init__(self, commands: CommandCatalog | None = None) -> None:
+        self.commands = commands
+        self._metadata = (
+            {c.qualified_name: c.description for c in commands.commands}
+            if commands
+            else {}
+        )
+
     def get_completions(
         self, document: Document, complete_event: CompleteEvent
     ) -> Iterator[Completion]:
@@ -538,11 +553,12 @@ class _InputCompleter(Completer):
         if not word.startswith(("/", "@")):
             return
         at_line_start = document.text_before_cursor == word
-        for candidate in _completions(word, at_line_start):
+        for candidate in _completions(word, at_line_start, self.commands):
             yield Completion(
                 candidate,
                 start_position=-len(word),
-                display_meta=_COMMAND_META.get(candidate, ""),
+                display_meta=_COMMAND_META.get(candidate, "")
+                or (self._metadata.get(candidate, "")),
             )
 
 
@@ -622,10 +638,12 @@ class CLIFrontend:
         tool_options: "dict | None" = None,
         store: "SessionStore | None" = None,
         model: str | None = None,
+        commands: CommandCatalog | None = None,
     ) -> None:
         self.console = Console(theme=_THEME)
         self.agent_name = agent_name
         self._model = model
+        self._commands = commands or CommandCatalog()
         # Status-bar state: which session this is and how full the context was
         # after the last model request (its input + output tokens).
         self._session_label = "not saved" if store is None else None
@@ -668,7 +686,14 @@ class CLIFrontend:
         self._main_prompt: PromptSession[str] | None = None
         self._confirm_prompt: PromptSession[str] | None = None
 
-    def attach(self, tool_options: dict) -> None:
+    def set_commands(self, commands: CommandCatalog) -> None:
+        """Rebind command help/completion for the active Agent."""
+        self._commands = commands
+        self._main_prompt = None
+
+    def attach(
+        self, tool_options: dict, commands: CommandCatalog | None = None
+    ) -> None:
         """Rebind to a new agent's options after a session switch.
 
         Session allowlists, usage counters, and input recall (↑/↓ history)
@@ -676,6 +701,8 @@ class CLIFrontend:
         carry over.
         """
         self._tool_options = tool_options
+        if commands is not None:
+            self.set_commands(commands)
         self._turn_usage = _UsageTotals()
         self._session_usage = _UsageTotals()
         self._context_tokens = 0
@@ -707,7 +734,7 @@ class CLIFrontend:
                 multiline=True,
                 key_bindings=_input_key_bindings(),
                 history=InMemoryHistory(),
-                completer=_InputCompleter(),
+                completer=_InputCompleter(self._commands),
                 complete_while_typing=True,
                 reserve_space_for_menu=4,
                 bottom_toolbar=self._status_bar,
@@ -881,6 +908,8 @@ class CLIFrontend:
                 return True
             self._session_switch = SessionSwitch(meta.id)
             return None
+        if self._commands.resolve(line, reserved=_COMMANDS + ("/q",)) is not None:
+            return False
         if "/" not in name[1:]:
             # "/foo" with no further slash is a mistyped command, not a path.
             self.console.print(
@@ -897,6 +926,11 @@ class CLIFrontend:
         grid.add_row(Text("commands", style="bold"), "")
         for key, description in _HELP_COMMANDS:
             grid.add_row(Text("  " + key), description)
+        for command in self._commands.commands:
+            label = command.qualified_name + (
+                " " + command.argument_hint if command.argument_hint else ""
+            )
+            grid.add_row(Text("  " + label), command.description)
         grid.add_row("", "")
         grid.add_row(Text("keys", style="bold"), "")
         for key, description in _HELP_KEYS:
@@ -949,8 +983,13 @@ class CLIFrontend:
                 f"[dim]📎 {escape(attachment.name or attachment.media_type)}"
                 f" ({escape(attachment.media_type)})[/]"
             )
+        expanded = self._commands.resolve(incoming.text, reserved=_COMMANDS + ("/q",))
+        if expanded is not None:
+            expanded.attachments = incoming.attachments
+            expanded.display_text = line
+            incoming = expanded
         self._start_turn()
-        return incoming if incoming.attachments else line
+        return incoming if incoming.attachments or expanded is not None else line
 
     # --- live region ----------------------------------------------------
 
@@ -1078,6 +1117,14 @@ class CLIFrontend:
                 self._flush()
                 self._render_result(result)
                 self._show_working("thinking")
+            case PluginNotice(plugin, hook, action, message):
+                self._flush()
+                self.console.print(
+                    Text(
+                        f"plugin {plugin} · {hook} · {action}: {message}",
+                        style="yellow",
+                    )
+                )
             case SkillActivated(name, active):
                 verb = "activated" if active else "deactivated"
                 self._note(f"[dim]◆ skill {verb}: {escape(name)}[/]")

@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Awaitable,
     Callable,
@@ -29,6 +30,9 @@ from pydantic import BaseModel
 
 from lingcore.errors import ConfigError, ToolError
 from lingcore.message import Attachment
+
+if TYPE_CHECKING:
+    from lingcore.plugins import PluginHooks
 
 
 @runtime_checkable
@@ -52,6 +56,7 @@ class ToolContext:
     # The owning LingCore conversation. Tools that keep auxiliary durable state
     # use this to avoid leaking context between otherwise independent chats.
     session_id: str | None = None
+    plugins: Mapping[str, PluginHooks] = field(default_factory=dict, repr=False)
 
     def getenv(self, name: str, default: str | None = None) -> str | None:
         """Resolve this profile's ``.env``, then the process environment.

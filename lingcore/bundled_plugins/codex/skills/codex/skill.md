@@ -1,11 +1,9 @@
 ---
 name: codex
-description: "Communicate with an external Codex CLI agent when the user asks to consult, cross-check with, or delegate coding work to Codex."
+description: Communicate with an external Codex CLI agent when the user asks to consult,
+  cross-check with, or delegate coding work to Codex.
 requested_tools:
-  - codex_agent
-provides:
-  - codex_agent
-module: codex_tools.py
+- codex_agent
 ---
 
 Use `codex_agent` to start or continue a conversation with an external Codex

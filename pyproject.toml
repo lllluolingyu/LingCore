@@ -18,7 +18,7 @@ classifiers = [
 ]
 dependencies = [
     "openai==2.41.0",
-    "anthropic>=1.11.0",
+    "anthropic==1.11.0",
     "pydantic==2.13.4",
     "pyyaml==6.0.3",
     "tiktoken==0.13.0",
@@ -34,6 +34,8 @@ dependencies = [
 # purpose. Only the pdf2md tool / PDF modality fallback need it.
 pdf = ["pymupdf==1.27.2.3"]
 telegram = ["python-telegram-bot[rate-limiter,webhooks]==22.8"]
+# The bundled browser plugin; also run `playwright install chromium` once.
+browser = ["playwright==1.63.0"]
 
 [project.scripts]
 lingcore = "lingcore.__main__:main"
@@ -51,6 +53,7 @@ dev = [
     "pymupdf==1.27.2.3",  # keep in sync with optional-dependencies.pdf
     # Keep in sync with optional-dependencies.telegram.
     "python-telegram-bot[rate-limiter,webhooks]==22.8",
+    "playwright==1.63.0",  # keep in sync with optional-dependencies.browser
     "ruff==0.16.1",
 ]
 

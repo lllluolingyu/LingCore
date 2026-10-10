@@ -61,7 +61,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("doctor", "telegram", "profile"),
+        choices=("doctor", "telegram", "profile", "plugin"),
         help="Run diagnostics, Telegram, or manage installed profile templates.",
     )
     parser.add_argument(
@@ -107,6 +107,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.command == "profile":
         parser.error("use profile management as `lingcore profile init|list`")
+    if args.command == "plugin":
+        parser.error("use plugin management as `lingcore plugin list|info|new`")
     if args.command == "telegram":
         conflicts = []
         if args.continue_:
@@ -199,6 +201,147 @@ def _print_sessions(store: SessionStore | None, notice: str | None) -> int:
         return 0
     console.print(session_table(sessions))
     return 0
+
+
+def _plugin_command(argv: list[str]) -> int:
+    """Inspect plugin data or create a local skeleton without executing code."""
+    import re
+
+    from lingcore.plugins.discovery import (
+        discover_plugins,
+        engaged_plugins,
+        plugin_skills,
+    )
+    from lingcore.plugins.manifest import EnvironmentName, component_path
+    from lingcore.plugins.scaffold import scaffold_plugin
+
+    parser = argparse.ArgumentParser(
+        prog="lingcore plugin",
+        description="Discover, inspect, or scaffold profile plugins.",
+    )
+    subcommands = parser.add_subparsers(dest="plugin_command", required=True)
+    for action in ("list", "info", "new"):
+        command = subcommands.add_parser(action)
+        command.add_argument("--profile", "-p", default=str(_DEFAULT_PROFILE))
+        if action != "list":
+            command.add_argument("name")
+        if action == "new":
+            command.add_argument("--no-hooks", action="store_true")
+            command.add_argument("--no-commands", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        profile = AgentProfile.load(Path(args.profile))
+        profile_dir = getattr(profile, "_source_dir", None)
+        if args.plugin_command == "new":
+            if profile_dir is None:
+                raise ConfigError("plugin scaffolding requires a profile directory")
+            destination = scaffold_plugin(
+                profile_dir,
+                args.name,
+                hooks=not args.no_hooks,
+                commands=not args.no_commands,
+            )
+            prefix = args.name.replace("-", "_")
+            print(
+                f"Created plugin at {destination}\nAdd to your profile (merge with existing lists):"
+            )
+            print(f"  plugins: [{args.name}]\n  tools: [{prefix}_echo]")
+            return 0
+        problems: dict[str, str] = {}
+        discovered = discover_plugins(profile_dir, problems=problems)
+        engagement = engaged_plugins(profile, discovered)
+
+        def components(name: str) -> str:
+            plugin = discovered[name]
+            manifest = plugin.manifest
+            items = ["tools"] if manifest.provides else []
+            for label, path in (
+                ("skills", manifest.skills),
+                ("commands", manifest.commands),
+                ("prompt", manifest.prompt),
+            ):
+                if path is not None and component_path(plugin.root, path).exists():
+                    items.append(label)
+            if manifest.hooks:
+                items.append("hooks")
+            return ", ".join(items) or "none"
+
+        if args.plugin_command == "list":
+            print("NAME  VERSION  SOURCE  ENGAGEMENT  COMPONENTS")
+            for name, plugin in sorted(discovered.items()):
+                reason = engagement.get(name, "not engaged")
+                print(
+                    f"{name}  {plugin.manifest.version}  {plugin.source}  {reason}  {components(name)}"
+                )
+                for shadowed in plugin.shadowed:
+                    print(f"  shadows {shadowed.source}: {shadowed.root}")
+            for name, problem in sorted(problems.items()):
+                print(f"{name}  -  skipped  {problem}")
+            return 0
+        if args.name in problems:
+            raise ConfigError(problems[args.name])
+        if args.name not in discovered:
+            raise ConfigError(f"unknown plugin {args.name!r}")
+        plugin = discovered[args.name]
+        manifest = plugin.manifest
+        print(f"{manifest.name} {manifest.version}\n{manifest.description}")
+        print(f"Source: {plugin.source}\nRoot: {plugin.root}\nAPI: {manifest.api}")
+        if manifest.min_lingcore:
+            print(f"Minimum LingCore: {manifest.min_lingcore}")
+        print(
+            f"Engagement: {engagement.get(args.name, 'not engaged')}\nComponents: {components(args.name)}"
+        )
+        print(
+            f"Options key: {manifest.options_key}\nHook errors: {manifest.on_hook_error}\nHook timeout: {manifest.hook_timeout:g}s"
+        )
+        for label, value in (
+            ("Module", manifest.module),
+            ("Hooks class", manifest.hooks),
+            ("Skills", manifest.skills),
+            ("Commands", manifest.commands),
+            ("Prompt", manifest.prompt),
+        ):
+            if value is not None:
+                print(f"{label}: {value}")
+        options = profile.tool_options.get(manifest.options_key or manifest.prefix, {})
+        print("Environment names:")
+        for declaration in manifest.environment:
+            env_name = (
+                declaration.name
+                if isinstance(declaration, EnvironmentName)
+                else options.get(declaration.option, declaration.default)
+            )
+            display = (
+                env_name
+                if isinstance(env_name, str)
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env_name)
+                else "<unset or invalid variable name>"
+            )
+            print(f"  {display} ({'required' if declaration.required else 'optional'})")
+        names = set(manifest.provides)
+        for skill in plugin_skills(plugin).values():
+            names.update(skill.provides)
+        print("Tools:")
+        for name in sorted(names):
+            print(
+                f"  {name}: {'authorized' if name in profile.tools else 'unauthorized'}"
+            )
+        for requirement in manifest.requires.executables:
+            print(
+                f"Executable: {requirement.name}"
+                + (f" (option {requirement.option})" if requirement.option else "")
+            )
+        for option_requirement in manifest.requires.options:
+            print(
+                f"Required option: {option_requirement.key}"
+                + (f" — {option_requirement.hint}" if option_requirement.hint else "")
+            )
+        for shadowed in plugin.shadowed:
+            print(f"Shadows {shadowed.source}: {shadowed.root}")
+        return 0
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
 
 
 def _print_saved_session(
@@ -322,6 +465,7 @@ async def _main_async(args: argparse.Namespace) -> int:
             except LingCoreError as e:
                 print(f"failed to build agent: {e}", file=sys.stderr)
                 return 2
+            frontend.set_commands(agent.commands)
             if store is not None:
                 frontend.set_session(getattr(agent.memory, "session_id", None))
 
@@ -348,6 +492,8 @@ async def _main_async(args: argparse.Namespace) -> int:
                 # the cancellation to KeyboardInterrupt (exit status 130).
                 if agent.turn_pending_finalization:
                     try:
+                        for plugin_notice in agent.drain_plugin_notices():
+                            frontend.render(plugin_notice)
                         frontend.render(
                             agent.finalize_cancelled_turn(reason="interrupted")
                         )
@@ -360,6 +506,8 @@ async def _main_async(args: argparse.Namespace) -> int:
                 raise
             except KeyboardInterrupt:
                 frontend.console.print("\n[dim]interrupted[/]")
+            finally:
+                await agent.aclose()
 
             _print_saved_session(frontend, store, agent)
             switch = frontend.take_session_switch()
@@ -376,6 +524,8 @@ def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv and raw_argv[0] == "profile":
         return _profile_command(raw_argv[1:])
+    if raw_argv and raw_argv[0] == "plugin":
+        return _plugin_command(raw_argv[1:])
     args = _parse_args(raw_argv)
     if args.command == "telegram":
         try:

@@ -14,7 +14,7 @@ from contextlib import AbstractContextManager, aclosing, nullcontext
 from typing import Protocol
 
 from lingcore.agent import Agent
-from lingcore.events import AgentEvent
+from lingcore.events import AgentEvent, PluginNotice
 from lingcore.message import UserInput
 
 
@@ -91,8 +91,13 @@ async def run_session(agent: Agent, frontend: Frontend) -> None:
             # The user stopped the turn: repair it, keep the submitted message,
             # and report requests billed before the cancellation landed.
             if agent.turn_pending_finalization:
+                notices: list[PluginNotice] = getattr(
+                    agent, "drain_plugin_notices", lambda: []
+                )()
                 terminal = agent.finalize_cancelled_turn()
                 # Usage precedes the terminal event, as it does on a live turn.
                 for usage_event in agent.drain_usage():
                     frontend.render(usage_event)
+                for notice in notices:
+                    frontend.render(notice)
                 frontend.render(terminal)

@@ -1,11 +1,9 @@
 ---
 name: claude-code
-description: "Communicate with an external Claude Code CLI agent when the user asks to consult, cross-check with, or delegate coding work to Claude Code."
+description: Communicate with an external Claude Code CLI agent when the user asks
+  to consult, cross-check with, or delegate coding work to Claude Code.
 requested_tools:
-  - claude_code_agent
-provides:
-  - claude_code_agent
-module: claude_code_tools.py
+- claude_code_agent
 ---
 
 Use `claude_code_agent` to start or continue a conversation with an external

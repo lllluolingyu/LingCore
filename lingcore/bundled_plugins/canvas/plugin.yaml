@@ -1,0 +1,22 @@
+name: canvas
+version: 1.0.0
+api: 1
+description: Access Canvas LMS — list courses, assignments & due dates, announcements,
+  and sync course files into the workspace.
+module: canvas_tools.py
+provides:
+- canvas_courses
+- canvas_assignments
+- canvas_announcements
+- canvas_sync
+environment:
+- name: CANVAS_URL
+  required: false
+- option: token_env
+  default: CANVAS_TOKEN
+  required: true
+requires:
+  options:
+  - key: base_url
+    hint: Canvas base_url is empty; set CANVAS_URL in the profile .env or configure
+      tool_options.canvas.base_url

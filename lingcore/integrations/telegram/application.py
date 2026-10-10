@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 import httpx
 
 # All PTB imports intentionally live below lingcore.integrations.telegram.
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.error import InvalidToken
 from telegram.ext import (
     AIORateLimiter,
@@ -325,6 +325,25 @@ def create_telegram_application(
         if bridge is not None:
             await bridge.shutdown()
 
+    async def register_commands(app: Application) -> None:
+        bridge = holder[_BRIDGE_KEY]
+        reserved = {"start", "help", "new", "sessions", "resume", "stop"}
+        entries = [
+            BotCommand(name, description)
+            for name, description in (
+                ("help", "Show help"),
+                ("new", "Start a session"),
+                ("sessions", "List sessions"),
+                ("resume", "Resume a session"),
+                ("stop", "Stop the active turn"),
+            )
+        ]
+        entries.extend(
+            BotCommand(c.telegram_name, (c.description or c.name)[:256])
+            for c in bridge.commands.telegram_commands(reserved=reserved)
+        )
+        await app.bot.set_my_commands(entries[:100])
+
     # Keep update handlers serialized: bridge Stop/session transitions rely on
     # PTB's one-update-at-a-time dispatch contract.
     builder = Application.builder().concurrent_updates(False)
@@ -336,7 +355,11 @@ def create_telegram_application(
         builder = builder.bot(bot)  # type: ignore[arg-type]
     # post_stop runs before the Bot is shut down (so confirmation buttons can
     # still be removed); post_shutdown covers manual lifecycle usage too.
-    builder = builder.post_stop(close_bridge).post_shutdown(close_bridge)
+    builder = (
+        builder.post_init(register_commands)
+        .post_stop(close_bridge)
+        .post_shutdown(close_bridge)
+    )
     try:
         application = builder.build()
     except InvalidToken:

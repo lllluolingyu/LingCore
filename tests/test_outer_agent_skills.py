@@ -16,7 +16,7 @@ from lingcore.agent import Agent
 from lingcore.config import AgentProfile
 from lingcore.doctor import diagnose_profile
 from lingcore.errors import ConfigError, ToolError
-from lingcore.skills import DEFAULT_HIGH_RISK_TOOLS, load_skill_tools, load_skills
+from lingcore.skills import DEFAULT_HIGH_RISK_TOOLS
 from lingcore.tools import REGISTRY, ToolContext
 from tests.fakes import FakeLLMClient
 
@@ -24,9 +24,19 @@ REPO_ROOT = Path(__file__).parent.parent
 
 
 def _load_outer_skills() -> dict[str, Any]:
-    skills = load_skills([REPO_ROOT / "lingcore" / "skills"])
-    selected = {name: skills[name] for name in ("codex", "claude-code")}
-    load_skill_tools(selected)
+    from lingcore.plugins.discovery import discover_plugins, plugin_skills
+    from lingcore.skills import _load_tool_module
+
+    selected = {}
+    for name in ("codex", "claude-code"):
+        plugin = discover_plugins(None)[name]
+        selected.update(plugin_skills(plugin))
+        _load_tool_module(
+            name,
+            plugin.root / plugin.manifest.module,
+            plugin.manifest.provides,
+            prefix=plugin.manifest.prefix,
+        )
     return selected
 
 
@@ -110,9 +120,9 @@ def test_bundled_outer_skills_declare_their_tools() -> None:
     skills = _load_outer_skills()
 
     assert skills["codex"].requested_tools == ("codex_agent",)
-    assert skills["codex"].provides == ("codex_agent",)
+    assert skills["codex"].provides == ()
     assert skills["claude-code"].requested_tools == ("claude_code_agent",)
-    assert skills["claude-code"].provides == ("claude_code_agent",)
+    assert skills["claude-code"].provides == ()
     # Risk is declared on the tool itself; the core baseline stays builtin-only.
     assert REGISTRY.get("codex_agent").high_risk is True
     assert REGISTRY.get("claude_code_agent").high_risk is True

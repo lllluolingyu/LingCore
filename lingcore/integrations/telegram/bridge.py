@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from lingcore.agent import Agent
 from lingcore.errors import ConfigError, LingCoreError, SessionError, ToolError
-from lingcore.events import AgentEvent, Error, Final, TurnCancelled
+from lingcore.events import AgentEvent, Error, Final, PluginNotice, TurnCancelled
 from lingcore.integrations.telegram.config import TelegramConfig
 from lingcore.integrations.telegram.confirmations import ConfirmationManager, Sleep
 from lingcore.integrations.telegram.protocol import (
@@ -32,6 +32,7 @@ from lingcore.integrations.telegram.rendering import (
 from lingcore.integrations.telegram.state import TelegramStateStore
 from lingcore.media import FILE_MAX_BYTES, IMAGE_MAX_BYTES, attachment_from_bytes
 from lingcore.message import UserInput
+from lingcore.plugins.commands import discover_commands
 from lingcore.sessions import SessionStore, new_session_id
 
 if TYPE_CHECKING:
@@ -53,6 +54,8 @@ Send text, one photo, or one document.
 /resume <id-prefix> — switch to a stored session
 /stop — cancel your active turn
 /help — show this help"""
+
+_RESERVED_COMMANDS = {"start", "help", "new", "sessions", "resume", "stop"}
 
 _SUPPORTED_INPUT = (
     "Supported input is text (or a caption) with at most one photo or document."
@@ -106,6 +109,7 @@ class TelegramBridge:
         confirmation_sleep: Sleep = asyncio.sleep,
     ) -> None:
         self.profile = profile
+        self.commands = discover_commands(profile)
         self.config = config
         self.llm_factory = llm_factory
         self._clock = clock
@@ -156,10 +160,16 @@ class TelegramBridge:
             return
 
         command, argument = self._command(message.text)
-        if command is not None:
+        if command in _RESERVED_COMMANDS:
             await self._handle_command(
                 command, argument, user_id, message.chat_id, sender
             )
+            return
+        if (
+            command is not None
+            and self.commands.resolve(message.text, reserved=_RESERVED_COMMANDS) is None
+        ):
+            await sender.send_message(message.chat_id, "Unknown command. Use /help.")
             return
 
         if message.unsupported_media is not None:
@@ -297,16 +307,23 @@ class TelegramBridge:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         for runtime in self._runtimes.values():
+            notices: list[PluginNotice] = getattr(
+                runtime.agent, "drain_plugin_notices", lambda: []
+            )()
+            terminal = None
             if runtime.agent.turn_pending_finalization:
                 try:
-                    runtime.agent.finalize_cancelled_turn(
+                    terminal = runtime.agent.finalize_cancelled_turn(
                         reason="Telegram bridge shutting down"
                     )
                 except Exception:
                     _LOG.exception("failed to finalize a Telegram turn at shutdown")
-            runtime.renderer = None
+            await self._deliver_cancelled_events(runtime, terminal, notices)
         await self.confirmations.deny_all()
         for runtime in self._runtimes.values():
+            close = getattr(runtime.agent, "aclose", None)
+            if close is not None:
+                await close()
             runtime.store.close()
         self._state.close()
         self._closed = True
@@ -385,7 +402,11 @@ class TelegramBridge:
                 )
                 return
 
-        incoming = UserInput(text=text, attachments=attachments)
+        catalog = getattr(runtime.agent, "commands", self.commands)
+        incoming = catalog.resolve(text, reserved=_RESERVED_COMMANDS) or UserInput(
+            text=text
+        )
+        incoming.attachments = attachments
         renderer = TelegramTurnRenderer(
             sender,
             chat_id,
@@ -495,7 +516,13 @@ class TelegramBridge:
         sender: TelegramSender,
     ) -> None:
         if command in {"start", "help"}:
-            await sender.send_message(chat_id, _HELP)
+            extra = "\n".join(
+                f"/{c.telegram_name} {c.argument_hint} — {c.description}"
+                for c in self.commands.telegram_commands(reserved=_RESERVED_COMMANDS)
+            )
+            await sender.send_message(
+                chat_id, _HELP + ("\n\n" + extra if extra else "")
+            )
             return
         if command == "stop":
             await self._stop(user_id, chat_id, sender)
@@ -583,8 +610,12 @@ class TelegramBridge:
                     f"Could not switch sessions: {self._safe_runtime_error(exc)}",
                 )
                 return
+            previous = runtime.agent
             runtime.profile = scoped
             runtime.agent = replacement
+            close = getattr(previous, "aclose", None)
+            if close is not None:
+                await close()
         verb = "Resumed" if resumed else "Started"
         await sender.send_message(chat_id, f"{verb} session {session_id[:8]}.")
 
@@ -622,6 +653,9 @@ class TelegramBridge:
         if not agent_cancelled and not task_cancelled:
             await sender.send_message(chat_id, "No active turn to stop.")
             return
+        notices: list[PluginNotice] = getattr(
+            runtime.agent, "drain_plugin_notices", lambda: []
+        )()
         if runtime.agent.turn_pending_finalization:
             try:
                 event = runtime.agent.finalize_cancelled_turn()
@@ -631,14 +665,48 @@ class TelegramBridge:
             # Cancellation landed while the attachment was downloading or
             # before the Agent acquired its first checkpoint.
             event = TurnCancelled("stopped before the agent turn began")
+        await self._deliver_cancelled_events(runtime, event, notices)
+
+    async def _deliver_cancelled_events(
+        self,
+        runtime: TelegramUserRuntime,
+        terminal: AgentEvent | None,
+        notices: list[PluginNotice],
+    ) -> None:
+        """Deliver captured policy decisions before a cancellation terminal."""
         renderer = runtime.renderer
         runtime.renderer = None
-        if renderer is not None:
-            await renderer.handle(event)
-        elif isinstance(event, Error):
-            await sender.send_message(chat_id, f"❌ {event.message}")
-        else:
-            await sender.send_message(chat_id, f"⏹️ {event.reason}")
+        sender = self._senders.get(runtime.user_id)
+        chat_id = self._chat_ids.get(runtime.user_id)
+        pending = [*getattr(runtime.agent, "drain_usage", lambda: [])(), *notices]
+        if terminal is not None:
+            pending.append(terminal)
+        for event in pending:
+            if renderer is not None:
+                try:
+                    await renderer.handle(event)
+                    continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    _LOG.warning(
+                        "Telegram cancellation delivery failed with %s",
+                        type(exc).__name__,
+                    )
+            if sender is None or chat_id is None:
+                continue
+            if isinstance(event, PluginNotice):
+                text = f"Plugin {event.plugin} · {event.hook} · {event.action}: {event.message}"
+            elif isinstance(event, Error):
+                text = f"❌ {event.message}"
+            elif isinstance(event, TurnCancelled):
+                text = f"⏹️ {event.reason}"
+            elif isinstance(event, Final) and event.content:
+                # Stop landed after the reply was committed; it still stands.
+                text = event.content
+            else:
+                continue
+            await self._best_effort_plain(sender, chat_id, text)
 
     def _build_agent(
         self,

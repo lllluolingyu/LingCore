@@ -105,6 +105,7 @@ class UserInput(BaseModel):
     """One user turn before it is committed as a ``Message``."""
 
     text: str = ""
+    display_text: str | None = None
     attachments: list[Attachment] = Field(default_factory=list)
 
     @field_validator("attachments")

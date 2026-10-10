@@ -216,3 +216,32 @@ async def test_local_bot_api_download_is_bounded_when_metadata_is_understated(
 
     with pytest.raises(ToolError, match="download exceeded limit 4"):
         await PTBSender(FakeBot()).download_file("file", max_bytes=4)
+
+
+async def test_menu_discovers_profile_commands_without_building_agent(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    profile, config = _loaded(tmp_path)
+    root = getattr(profile, "_source_dir")
+    (root / "commands").mkdir()
+    (root / "commands" / "review.md").write_text(
+        "---\ndescription: Review code\n---\nReview $ARGUMENTS"
+    )
+    application = create_telegram_application(
+        profile, config, bot=Bot("123456:TESTTOKEN")
+    )
+    assert application.bot_data[_BRIDGE_KEY]._runtimes == {}
+    registered = []
+
+    async def set_commands(commands):
+        registered.extend(commands)
+
+    await application.post_init(
+        SimpleNamespace(bot=SimpleNamespace(set_my_commands=set_commands))
+    )
+    assert any(
+        c.command == "review" and c.description == "Review code" for c in registered
+    )
+    await application.bot_data[_BRIDGE_KEY].shutdown()

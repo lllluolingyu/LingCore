@@ -1,17 +1,12 @@
 ---
 name: canvas
-description: "Access Canvas LMS — list courses, assignments & due dates, announcements, and sync course files into the workspace."
+description: Access Canvas LMS — list courses, assignments & due dates, announcements,
+  and sync course files into the workspace.
 requested_tools:
-  - canvas_courses
-  - canvas_assignments
-  - canvas_announcements
-  - canvas_sync
-provides:
-  - canvas_courses
-  - canvas_assignments
-  - canvas_announcements
-  - canvas_sync
-module: canvas_tools.py
+- canvas_courses
+- canvas_assignments
+- canvas_announcements
+- canvas_sync
 ---
 
 You can reach the student's Canvas LMS through four tools. Canvas is the source

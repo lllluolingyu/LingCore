@@ -25,6 +25,7 @@ from lingcore.events import (
     AgentEvent,
     Error,
     Final,
+    PluginNotice,
     SkillActivated,
     StreamRetry,
     TextDelta,
@@ -44,6 +45,14 @@ from lingcore.media_types import (
 )
 from lingcore.memory import ShortTermMemory, WindowMemory
 from lingcore.message import Attachment, Message, ToolCall, ToolResult, UserInput
+from lingcore.plugins import (
+    AttachmentView,
+    ToolCallEvent,
+    TurnEndEvent,
+    UserMessageEvent,
+)
+from lingcore.plugins.commands import CommandCatalog
+from lingcore.plugins.hooks import HookRunner
 from lingcore.todos import TodoItem, TodoState
 from lingcore.tools import Tool, ToolContext, ToolOutput, ToolRegistry
 from lingcore.usage import UsageMeter
@@ -54,7 +63,7 @@ if TYPE_CHECKING:
     from lingcore.config import AgentProfile
     from lingcore.modality import MediaAdapter
     from lingcore.sessions import SessionStore
-    from lingcore.skills import Skill, SkillState
+    from lingcore.skills import SkillState
     from lingcore.tools import ConfirmFn
 
 
@@ -127,6 +136,8 @@ class Agent:
         system_prompt: str | None = None,
         usage_meter: UsageMeter | None = None,
         todo_state: TodoState | None = None,
+        hooks: HookRunner | None = None,
+        commands: CommandCatalog | None = None,
     ) -> None:
         # v0.1 accepted a static prompt as the fourth positional argument or
         # as ``system_prompt=``. Keep both forms while routing new code through
@@ -150,6 +161,9 @@ class Agent:
             else frozenset(tools.names())
         )
         self.tool_ctx = tool_ctx
+        self._hooks = hooks or HookRunner([], tool_ctx)
+        self.commands = commands if commands is not None else CommandCatalog()
+        self._closed = False
         self.composer = composer
         self.memory: ShortTermMemory = memory or WindowMemory()
         self.guardrail = guardrail or NoopGuardrail()
@@ -194,6 +208,9 @@ class Agent:
         self._turn_todos_checkpoint: tuple[TodoItem, ...] | None = None
         self._turn_message_seq: int | None = None
         self._turn_cancel_requested = False
+        # Set when Stop lands during observe-only turn_end hooks: the outcome is
+        # already committed, so finalization returns it instead of rolling back.
+        self._turn_committed: Final | Error | None = None
         # If durable rollback fails after the in-memory lease is released, no
         # later turn may append behind that uncommitted branch. Retried at the
         # start of every subsequent run until the store is reconciled.
@@ -311,41 +328,34 @@ class Agent:
         source_dir = getattr(profile, "_source_dir", None)
         sk_opts = dict(profile.tool_options).get("activate_skill", {})
 
-        # --- Load skills + their shipped tool code BEFORE the tool subset ----
-        # A skill may ship its own @tool code (skill.md ``module:``/``provides:``).
-        # That code must be registered before ``REGISTRY.subset(profile.tools)``
-        # so a profile can authorize a skill-shipped tool by listing it in
-        # ``tools:`` exactly like a builtin. Registration is NOT authorization —
-        # the subset/ceiling still governs reachability (invariant 13).
-        loaded_skills: dict[str, "Skill"] = {}
-        if profile.skills or "activate_skill" in profile.tools:
+        # Discovery reads only data; loading executes only engaged code. The
+        # plugin/skill catalog must exist before selecting the explicit ceiling.
+        from lingcore.plugins.loader import load_plugins
+
+        loaded_plugins = load_plugins(profile)
+        loaded_skills = loaded_plugins.skills
+        for name in profile.skills:
+            if name not in loaded_skills:
+                from lingcore.errors import ConfigError
+
+                raise ConfigError(
+                    f"profile declares unknown skill {name!r}; "
+                    f"available: {sorted(loaded_skills) or '(none)'}"
+                )
+
+        from lingcore.skills import registered_module_tools
+
+        # Process-global registration survives Agent shutdown. A later profile
+        # still needs its own engagement; cached code must not supply consent.
+        unengaged = (
+            set(profile.tools) & registered_module_tools()
+        ) - loaded_plugins.tool_names
+        if unengaged:
             from lingcore.errors import ConfigError
-            from lingcore.skills import load_skill_tools, load_skills
 
-            # Bundled skills first, profile-local second: load_skills is
-            # last-write-wins on a name collision, so a profile-local skill
-            # shadows a bundled one of the same name (invariant 13) rather than
-            # the reverse.
-            skill_dirs: list[Path] = [Path(__file__).parent / "skills"]
-            if source_dir is not None:
-                skill_dirs.append(source_dir / sk_opts.get("skills_dir", "skills"))
-            loaded_skills = load_skills(skill_dirs)
-            for name in profile.skills:
-                if name not in loaded_skills:
-                    raise ConfigError(
-                        f"profile declares unknown skill {name!r}; "
-                        f"available: {sorted(loaded_skills) or '(none)'}"
-                    )
-            # Import the shipped code only for skills this profile can engage:
-            # statically declared, or providing a tool the profile authorizes.
-            to_import = {
-                name: sk
-                for name, sk in loaded_skills.items()
-                if sk.module is not None
-                and (name in profile.skills or (set(sk.provides) & set(profile.tools)))
-            }
-            load_skill_tools(to_import)
-
+            raise ConfigError(
+                f"profile tools belong to modules not engaged by this profile: {sorted(unengaged)}"
+            )
         tools = REGISTRY.subset(profile.tools)
         # The initially-enabled subset (``initial_tools`` or the complement of
         # ``skill_gated_tools``; neither ⇒ all of the ceiling). Skills unlock the
@@ -544,7 +554,12 @@ class Agent:
         # system_prompt does NOT by itself trigger layering — a bare-prompt agent
         # stays a zero-overhead StaticComposer.
         needs_layering = (
-            bool(layers or includes or static_skill_layers)
+            bool(
+                layers
+                or includes
+                or static_skill_layers
+                or loaded_plugins.prompt_layers
+            )
             or memory_path is not None
             or skill_state is not None
             or bool(profile.persona.project_instructions)
@@ -558,7 +573,10 @@ class Agent:
             if not layers and profile.persona.system_prompt.strip():
                 base_layers = [profile.persona.system_prompt]
             composer = LayeredComposer(
-                layers=base_layers + includes + static_skill_layers,
+                layers=base_layers
+                + includes
+                + static_skill_layers
+                + loaded_plugins.prompt_layers,
                 memory_path=memory_path,
                 skill_instructions=skill_state.instruction_map() if skill_state else {},
                 workspace=workspace,
@@ -584,9 +602,26 @@ class Agent:
             session_store=session_store,
             usage_meter=usage_meter,
             todo_state=todo_state,
+            hooks=HookRunner(loaded_plugins.hook_factories, tool_ctx),
+            commands=loaded_plugins.commands,
         )
         agent._turn_index = restored_turn_index
         return agent
+
+    async def __aenter__(self) -> Agent:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Close this Agent's plugin instances once, in reverse enablement order.
+
+        Frontends stop and finalize an active turn before closing its Agent.
+        Closing never invokes turn_end; Stop remains a synchronous rollback.
+        """
+        self._closed = True
+        await self._hooks.aclose()
 
     def drain_usage(self) -> list[UsageReported]:
         """Return usage recorded but not yet emitted by ``run``.
@@ -597,6 +632,15 @@ class Agent:
         reached the stream.
         """
         return [UsageReported(usage) for usage in self.usage_meter.drain()]
+
+    def drain_plugin_notices(self) -> list[PluginNotice]:
+        """Take pending transient notices before finalizing a cancelled turn.
+
+        Frontends render these before TurnCancelled, alongside drained usage.
+        Rollback discards anything not drained so abandoned streams cannot leak
+        a prior turn's notices into a later conversation.
+        """
+        return self._hooks.drain_notices()
 
     def cancel_turn(self) -> bool:
         """Request cancellation of the task currently driving ``run``.
@@ -615,11 +659,14 @@ class Agent:
 
     def finalize_cancelled_turn(
         self, reason: str = "stopped by user"
-    ) -> TurnCancelled | Error:
+    ) -> TurnCancelled | Error | Final:
         """Restore the pre-turn state while retaining the submitted user input.
 
         A durable-store cleanup failure is returned as an :class:`Error` and
         retried before the next turn; it never leaves the in-process lease held.
+        When Stop landed only during observe-only ``turn_end`` hooks, the turn's
+        outcome was already committed: nothing is rolled back and the committed
+        :class:`Final` (or :class:`Error`) is returned for the frontend to render.
         """
         task = self._active_turn_task
         if task is not None and not task.done():
@@ -628,6 +675,11 @@ class Agent:
             )
         if self._turn_checkpoint is None or not self._turn_cancel_requested:
             raise RuntimeError("no cancelled turn is ready to finalize")
+        committed = self._turn_committed
+        if committed is not None:
+            self._hooks.drain_notices()
+            self._clear_turn_state()
+            return committed
         try:
             self._rollback_turn()
         except Exception as exc:
@@ -677,6 +729,7 @@ class Agent:
         finally:
             # A failed repair (for example, the same SQLite outage that ended
             # the turn) must not leave the in-process turn lease wedged.
+            self._hooks.drain_notices()
             self._clear_turn_state(lease)
 
     def _clear_turn_state(self, lease: object | None = None) -> None:
@@ -693,6 +746,7 @@ class Agent:
         self._turn_todos_checkpoint = None
         self._turn_message_seq = None
         self._turn_cancel_requested = False
+        self._turn_committed = None
 
     def _retry_pending_turn_cleanup(self) -> None:
         """Reconcile a durable tail whose earlier rollback failed."""
@@ -708,6 +762,9 @@ class Agent:
         self, user_input: str | UserInput
     ) -> AsyncGenerator[AgentEvent, None]:
         """Drive one user turn to completion, yielding events as they happen."""
+        if self._closed:
+            yield Error("agent is closed")
+            return
         # The checkpoint marks an active turn and the identity token owns it.
         # In particular, a cancelled driver task is already ``done`` but its
         # partial state is still live until ``finalize_cancelled_turn`` has
@@ -753,6 +810,7 @@ class Agent:
         self._turn_todos_checkpoint = turn_todos_checkpoint
         self._turn_message_seq = None
         self._turn_cancel_requested = False
+        self._turn_committed = None
 
         turn = self._run_turn(user_input, lease)
         try:
@@ -807,6 +865,7 @@ class Agent:
                     pass
             raise
         except Exception as exc:
+            notices = self._hooks.drain_notices()
             message = f"agent turn failed: {type(exc).__name__}: {exc}"
             try:
                 self._rollback_turn(lease)
@@ -816,6 +875,8 @@ class Agent:
                 )
             for usage in self.usage_meter.drain():
                 yield UsageReported(usage)
+            for notice in notices:
+                yield notice
             yield Error(message)
         except BaseException:
             # Do not turn process-level exits into ordinary agent events, but
@@ -827,12 +888,22 @@ class Agent:
         self, user_input: str | UserInput, lease: object
     ) -> AsyncGenerator[AgentEvent, None]:
         """Run the acquired turn; :meth:`run` owns failure containment."""
+        await self._hooks.start()
+        for notice in self._hooks.drain_notices():
+            yield notice
         if isinstance(user_input, str):
             incoming = UserInput(text=user_input)
         else:
             incoming = user_input
         text = await self.guardrail.pre_input(incoming.text)
-        input_text = text
+        # A slash-command expansion stores the command the user typed. That is
+        # user-authored input too, so it passes the same guardrail before it
+        # can reach SQLite, history or Edit.
+        input_text = (
+            text
+            if incoming.display_text is None
+            else await self.guardrail.pre_input(incoming.display_text)
+        )
         attachments = incoming.attachments
         if attachments:
             # Copy every attachment into <workspace>/attachments/ and announce
@@ -850,6 +921,26 @@ class Agent:
                 # Compute text fallbacks once, before the message is committed —
                 # stream retries re-render but never re-pay a conversion.
                 attachments = await self.media_adapter.prepare(attachments)
+        decision = await self._hooks.user_message(
+            UserMessageEvent(
+                text=text,
+                input_text=input_text,
+                attachments=tuple(
+                    AttachmentView.from_attachment(a) for a in attachments
+                ),
+            )
+        )
+        for notice in self._hooks.drain_notices():
+            yield notice
+        if decision is not None:
+            if decision.action == "block":
+                self._clear_turn_state(lease)
+                yield Error(
+                    f"input blocked by plugin {decision.plugin}: {decision.reason}"
+                )
+                return
+            if decision.context:
+                text = f"{text}\n{decision.context}" if text else decision.context
         user_message = Message.user(
             text, attachments=attachments, input_text=input_text
         )
@@ -948,8 +1039,18 @@ class Agent:
                         # This request produced no committed assistant message;
                         # keep the runtime counter aligned with durable replay.
                         self._turn_index -= 1
+                        message = f"model request failed{spent}: {e}"
+                        await self._turn_end(
+                            TurnEndEvent(
+                                "", error=message, turn_index=self._turn_index
+                            ),
+                            lease,
+                            Error(message),
+                        )
+                        for notice in self._hooks.drain_notices():
+                            yield notice
                         self._clear_turn_state(lease)
-                        yield Error(f"model request failed{spent}: {e}")
+                        yield Error(message)
                         return
                     yield StreamRetry(
                         attempt=attempt,
@@ -962,8 +1063,16 @@ class Agent:
                     # A duck-typed backend may raise anything; without a
                     # retryable classification, surface it and end the turn.
                     self._turn_index -= 1
+                    message = f"model request failed: {type(e).__name__}: {e}"
+                    await self._turn_end(
+                        TurnEndEvent("", error=message, turn_index=self._turn_index),
+                        lease,
+                        Error(message),
+                    )
+                    for notice in self._hooks.drain_notices():
+                        yield notice
                     self._clear_turn_state(lease)
-                    yield Error(f"model request failed: {type(e).__name__}: {e}")
+                    yield Error(message)
                     return
 
             assistant = Message.assistant(
@@ -976,6 +1085,13 @@ class Agent:
 
             if not assistant.tool_calls:
                 final = await self.guardrail.post_output(assistant.content)
+                await self._turn_end(
+                    TurnEndEvent(final, turn_index=self._turn_index),
+                    lease,
+                    Final(final),
+                )
+                for notice in self._hooks.drain_notices():
+                    yield notice
                 self._clear_turn_state(lease)
                 yield Final(final)
                 return
@@ -990,6 +1106,8 @@ class Agent:
             )
             before_todos = self.todo_state.items if self.todo_state else None
             results = await self._dispatch(assistant.tool_calls)
+            for notice in self._hooks.drain_notices():
+                yield notice
             for result in results:
                 self.memory.add(Message.from_tool_result(result))
                 yield ToolResultEvent(result)
@@ -1062,8 +1180,33 @@ class Agent:
                     )
                 yield TodoUpdated(todos=self.todo_state.items)
 
+        message = f"reached max iterations ({self.max_iters}) without a final reply"
+        await self._turn_end(
+            TurnEndEvent("", error=message, turn_index=self._turn_index),
+            lease,
+            Error(message),
+        )
+        for notice in self._hooks.drain_notices():
+            yield notice
         self._clear_turn_state(lease)
-        yield Error(f"reached max iterations ({self.max_iters}) without a final reply")
+        yield Error(message)
+
+    async def _turn_end(
+        self, event: TurnEndEvent, lease: object, terminal: Final | Error
+    ) -> None:
+        """Run observe-only turn_end hooks after the turn's outcome is committed.
+
+        Stop during a slow observer must not roll back a reply the user has
+        already seen streamed. The lease stays held for the usual
+        cancel -> await -> finalize handshake, but finalization then returns
+        ``terminal`` instead of restoring the checkpoint.
+        """
+        try:
+            await self._hooks.turn_end(event)
+        except asyncio.CancelledError:
+            if self._turn_lease is lease:
+                self._turn_committed = terminal
+            raise
 
     def _effective_tool_schemas(self) -> list[dict[str, Any]]:
         """Tool schemas for the current step: the initially-enabled tools plus
@@ -1114,19 +1257,11 @@ class Agent:
         authorized = self._authorized_tool_names()
 
         async def run_one(call: ToolCall) -> ToolResult:
+            # Validation and the batch's authorization snapshot precede every
+            # hook: plugins cannot make an invalid or forbidden call reachable.
             try:
                 tool = self._resolve_tool(call.name, authorized=authorized)
                 args = tool.validate_args(call.arguments)
-                out = await tool.run(args, self.tool_ctx)
-                if isinstance(out, ToolOutput):
-                    return ToolResult(
-                        call_id=call.id,
-                        name=call.name,
-                        content=out.text,
-                        attachments=out.attachments,
-                        ok=True,
-                    )
-                return ToolResult(call_id=call.id, name=call.name, content=out, ok=True)
             except Exception as e:
                 from lingcore.errors import ToolError
 
@@ -1134,9 +1269,50 @@ class Agent:
                 return ToolResult(
                     call_id=call.id, name=call.name, content=f"ERROR: {msg}", ok=False
                 )
+            event = ToolCallEvent(call.id, call.name, call.arguments)
+            decision = await self._hooks.before_tool(event)
+            if decision is not None and decision.action == "deny":
+                result = ToolResult(
+                    call_id=call.id,
+                    name=call.name,
+                    content=f"ERROR: blocked by plugin {decision.plugin}: {decision.reason}",
+                    ok=False,
+                )
+                return await self._hooks.after_tool(event, result)
+            try:
+                out = await tool.run(args, self.tool_ctx)
+                if isinstance(out, ToolOutput):
+                    result = ToolResult(
+                        call_id=call.id,
+                        name=call.name,
+                        content=out.text,
+                        attachments=out.attachments,
+                        ok=True,
+                    )
+                else:
+                    result = ToolResult(
+                        call_id=call.id, name=call.name, content=out, ok=True
+                    )
+            except Exception as e:
+                from lingcore.errors import ToolError
+
+                msg = str(e) if isinstance(e, ToolError) else f"internal error: {e!r}"
+                result = ToolResult(
+                    call_id=call.id, name=call.name, content=f"ERROR: {msg}", ok=False
+                )
+            return await self._hooks.after_tool(event, result)
 
         if self.parallel_tools and len(calls) > 1:
-            return list(await asyncio.gather(*(run_one(c) for c in calls)))
+            tasks = [asyncio.create_task(run_one(call)) for call in calls]
+            try:
+                return list(await asyncio.gather(*tasks))
+            except BaseException:
+                # A child's CancelledError makes gather return immediately;
+                # explicitly reap every sibling before the turn can finalize.
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
         return [await run_one(c) for c in calls]
 
     def _authorized_tool_names(self) -> frozenset[str]:

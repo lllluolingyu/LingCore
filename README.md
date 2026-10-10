@@ -137,6 +137,14 @@ pip install "lingcore[telegram]"
 The extra pins `python-telegram-bot[rate-limiter,webhooks]==22.8`; it supports
 the same Python 3.11–3.14 matrix and shares LingCore's `httpx==0.28.1`.
 
+The bundled `browser` plugin drives headless Chromium through Playwright, also
+an opt-in extra. Install it plus a Chromium build once:
+
+```bash
+pip install 'lingcore[browser]'
+playwright install chromium
+```
+
 ## Quick start
 
 ### Local Ollama (no API key)
@@ -489,6 +497,47 @@ The provider adapters follow SiliconFlow's
 alternate providers can implement the small `EmbeddingProvider` and
 `RerankingProvider` protocols in `lingcore/knowledge.py`.
 
+## Plugins
+
+Plugins are the v0.4.0 packaging unit for skills, prefixed tools, lifecycle
+hooks, slash commands and static prompt context. Install one with pip or place
+it under `<profile>/plugins/<name>/`, then explicitly enable it with `plugins:`.
+Every tool still needs its own entry in the profile's `tools:` ceiling.
+
+```bash
+uv run lingcore plugin new hello -p profiles/coding
+uv run lingcore plugin list -p profiles/coding
+uv run lingcore plugin info hello -p profiles/coding
+```
+
+Merge `plugins: [hello]` and `hello_echo` into the profile's lists. The skeleton
+includes a tool, skill, optional hooks and `/hello:hello` prompt template;
+`/hello world` also works when unambiguous. CLI completion/help, Telegram menus
+and LingChat autocomplete expose enabled commands. Guardrails and hooks see the
+expanded input while session history and Edit retain the command you typed.
+
+Discovery and doctor never execute plugin code. Hooks run per Agent in enablement
+order, with bounded calls, fail-closed defaults and visible notices. They can
+block input, deny or confirm tool calls, annotate results and observe turns;
+they cannot bypass authorization or the tool's own confirmation. Canvas, Codex
+and Claude Code now ship as bundled plugins; existing profiles keep working.
+See [the manifest, stable API and packaging guide](docs/plugins.md).
+
+The bundled `browser` plugin gives an agent a headless Chromium for pages that
+need JavaScript or interaction. Enable it explicitly and authorize the tools you
+want (each Agent gets its own ephemeral browser, closed with the Agent):
+
+```yaml
+plugins: [browser]
+tools: [browser_navigate, browser_snapshot, browser_click, browser_type,
+        browser_select, browser_press, browser_back, browser_screenshot,
+        browser_close]
+```
+
+It shares `fetch_url`'s public-web policy and its `tool_options.fetch_url`
+settings; see
+[the browser section](docs/plugins.md#bundled-browser-plugin).
+
 ## Skills
 
 A **skill** is a reusable bundle in its own directory: a `skill.md` (YAML
@@ -497,17 +546,18 @@ its own tools. A profile engages a skill either statically (a `skills:` list,
 always-on) or dynamically via the model-invoked `activate_skill` tool.
 
 ```
-lingcore/skills/canvas/
-  .env.example    # safe declaration of required variables; no real secrets
-  skill.md         # name, description, requested_tools, provides, module + guidance
-  canvas_tools.py  # @tool functions registered when the skill is engaged
+lingcore/bundled_plugins/canvas/
+  plugin.yaml      # version, module, prefixed tools and environment declarations
+  .env.example     # variable names only; values stay profile-owned
+  canvas_tools.py  # @tool functions registered when the plugin is engaged
+  skills/canvas/skill.md  # requested_tools + instructions
 ```
 
 A code-shipping skill declares the tools it registers via `provides:` and the
 module that defines them via `module:`. Crucially, **a skill cannot widen the
 profile's permissions**: a shipped tool is only reachable if the profile also
 lists its name under `tools:` — the `tools:` list is the single hard ceiling,
-whether a tool is a builtin or skill-shipped. The bundled `canvas` skill (used
+whether a tool is a builtin or skill-shipped. The bundled `canvas` plugin and skill (used
 by the `teaching` profile) is the worked example: an async Canvas LMS client
 exposing `canvas_courses`, `canvas_assignments`, `canvas_announcements`, and
 `canvas_sync`. Its access token is read from an env var named by
@@ -530,7 +580,7 @@ uv run lingcore doctor --profile profiles/teaching
 uv run lingcore --profile profiles/teaching   # "what's due this week?"
 ```
 
-Do not put the real token in `lingcore/skills/canvas/`: that directory is
+Do not put the real token in `lingcore/bundled_plugins/canvas/`: that directory is
 package code shared by every profile and may be committed or replaced during an
 upgrade. The Canvas template covers the skill's variables only; also set the LLM
 provider key named by the teaching profile if it is not already exported. A
@@ -542,7 +592,7 @@ profile exposes `activate_skill`, and its authorized `read_file`/`search` ceilin
 makes `code-review` dynamically offerable. To make it always-on in another
 profile, add `skills: [code-review]` and authorize the tools it should receive.
 
-Two bundled collaboration skills connect LingCore to independently installed
+Two bundled first-party plugins contribute collaboration skills connecting LingCore to independently installed
 coding-agent CLIs:
 
 - `codex` provides `codex_agent` for persistent Codex CLI consultation or an
@@ -677,32 +727,32 @@ commitments.
    - Ship retrieval evaluations for relevance, stale-index handling, citation
      validity, and the offline grep fallback.
 
-3. **v0.3 — Tracing and evaluations**
+3. **v0.4 — Plugins**
+   - Implemented: versioned manifests, import-free discovery, explicit enablement,
+     atomic prefixed tools and bundled Canvas/Codex/Claude Code plugins.
+   - Implemented: in-process hooks, prompt-template slash commands, per-Agent
+     lifecycle cleanup and `lingcore plugin list/info/new`.
+   - The explicit `tools:` ceiling and profile-owned environment remain binding.
+
+4. **v0.4.x — MCP as a plugin component**
+   - Add stdio and Streamable HTTP MCP transports behind the plugin manifest,
+     initially for tools and later for resources and prompts.
+   - Namespace tools and require explicit ceiling entries. Server descriptions
+     remain untrusted; consent, cancellation and progress use frontend contracts.
+
+5. **Next — Tracing and evaluations**
    - Trace model requests, tools, retrieval, retries, compaction, confirmation
-     decisions, token usage, and latency, with sensitive content excluded by
-     default. Start with local structured traces and offer an optional
-     OpenTelemetry exporter.
-   - Add a `lingcore eval` workflow for profile datasets, tool-trajectory
-     assertions, quality checks, latency/cost reporting, and regression
-     comparisons.
+     decisions, token usage and latency, excluding sensitive content by default.
+     Start with local structured traces and an optional OpenTelemetry exporter.
+   - Add `lingcore eval` for profile datasets, tool-trajectory assertions,
+     quality checks, latency/cost reporting and regression comparisons.
 
-4. **v0.4 — MCP interoperability**
-   - Add an MCP client with stdio and Streamable HTTP transports, initially for
-     tools and later for resources and prompts.
-   - Namespace discovered tools and keep every one beneath the profile's
-     existing `tools` permission ceiling. Server descriptions remain untrusted;
-     consent, cancellation, and progress must map through LingCore's frontend
-     contracts.
-
-5. **v0.5 — Durable workflows**
-   - Build a detached turn runner so an *in-flight* model/tool task can survive a
-     browser disconnect. Durable completed-state replay is now in place; task
-     ownership, leases, progress events, and reconnect attachment remain.
-   - Build on the implemented edit/fork flows with regenerate-without-edit and
-     explicit merge/export controls where real workflows need them.
-   - Add schema-validated structured results so agents can participate in
-     application workflows, plus an optional Responses API backend behind the
-     existing `LLMClient` seam without weakening OpenAI-compatible portability.
+6. **Later — Durable workflows**
+   - Build a detached turn runner so an in-flight task can survive a browser
+     disconnect, with ownership, leases, progress and reconnect attachment.
+   - Extend edit/fork flows with regenerate-without-edit and merge/export controls.
+   - Add schema-validated results and an optional Responses API backend behind
+     the existing LLM seam.
 
 Multi-agent handoffs, Discord/voice frontends, marketplaces, and additional
 persona profiles remain later possibilities. They should follow retrieval,
@@ -781,6 +831,11 @@ CIDR ranges whose addresses are accepted without asking while every other check
 every fetch asks for approval (the prompt says why). Exempting them hands the
 final address choice to the proxy: a hostname whose real record is private is
 then no longer flagged, though IP literals and `localhost` still are.
+
+These three keys are the network policy for the bundled browser plugin too, so
+one setting covers both tools. They are strict booleans/lists: a quoted
+`"${VAR:-false}"` expansion is a string and fails profile load instead of
+silently counting as true.
 
 Telegram refuses to start a profile that enables `run_shell` unless
 `require_confirmation` is true and `allow_patterns` is empty. Every shell call

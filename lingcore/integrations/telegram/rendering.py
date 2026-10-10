@@ -12,6 +12,7 @@ from lingcore.events import (
     Compacted,
     Error,
     Final,
+    PluginNotice,
     SkillActivated,
     StreamRetry,
     TextDelta,
@@ -125,6 +126,11 @@ class TelegramTurnRenderer:
                     await self.sender.send_document(
                         self.chat_id, payload, filename=filename
                     )
+        elif isinstance(event, PluginNotice):
+            await self.sender.send_message(
+                self.chat_id,
+                f"Plugin {event.plugin} · {event.hook} · {event.action}: {event.message}",
+            )
         elif isinstance(event, SkillActivated):
             action = "activated" if event.active else "deactivated"
             self._activity.append(f"skill {event.name}: {action}")

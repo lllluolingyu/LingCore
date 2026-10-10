@@ -1,0 +1,13 @@
+name: codex
+version: 1.0.0
+api: 1
+description: Communicate with an external Codex CLI agent when the user asks to consult,
+  cross-check with, or delegate coding work to Codex.
+module: codex_tools.py
+provides:
+- codex_agent
+options_key: codex_agent
+requires:
+  executables:
+  - name: codex
+    option: executable

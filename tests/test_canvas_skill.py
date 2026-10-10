@@ -1,4 +1,4 @@
-"""Tests for the Canvas skill's shipped tools (``lingcore/skills/canvas``).
+"""Tests for the Canvas skill's shipped tools (``lingcore/bundled_plugins/canvas``).
 
 The Canvas module is loaded the same way the framework loads it (importlib via
 ``load_skill_tools``), then exercised against a mocked Canvas API using
@@ -22,7 +22,11 @@ from lingcore.paths import ConfinedDirectory
 from lingcore.tools import ToolContext
 
 _CANVAS_PATH = (
-    Path(__file__).parent.parent / "lingcore" / "skills" / "canvas" / "canvas_tools.py"
+    Path(__file__).parent.parent
+    / "lingcore"
+    / "bundled_plugins"
+    / "canvas"
+    / "canvas_tools.py"
 )
 
 
@@ -32,11 +36,16 @@ def _load_canvas():
     name. A later ``from_profile`` that loads the teaching profile then
     re-imports the same path idempotently instead of colliding on the canvas
     tool names in the process-global REGISTRY (test isolation)."""
-    from lingcore.skills import load_skill_tools, load_skills
+    from lingcore.plugins.discovery import discover_plugins
+    from lingcore.skills import _load_tool_module
 
-    bundled = Path(__file__).parent.parent / "lingcore" / "skills"
-    skills = load_skills([bundled])
-    load_skill_tools({"canvas": skills["canvas"]})
+    plugin = discover_plugins(None)["canvas"]
+    _load_tool_module(
+        "canvas",
+        plugin.root / plugin.manifest.module,
+        plugin.manifest.provides,
+        prefix="canvas",
+    )
     name = next(n for n in sys.modules if n.startswith("lingcore_skill_tools.canvas."))
     return sys.modules[name]
 

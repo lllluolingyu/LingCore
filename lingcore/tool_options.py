@@ -219,12 +219,49 @@ FETCH_OPTION_PATH = "tool_options.fetch_url"
 IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 
+@dataclass(frozen=True, slots=True)
+class NetworkPolicy:
+    """The public-web policy for every LingCore network client.
+
+    It lives under ``tool_options.fetch_url`` and governs both ``fetch_url``
+    and the bundled browser plugin, so the two can never disagree.
+    """
+
+    allow_private_hosts: bool = False
+    confirm_private_hosts: bool = True
+    allowed_networks: tuple[IPNetwork, ...] = ()
+
+
+NETWORK_POLICY_KEYS = frozenset(
+    {"allow_private_hosts", "confirm_private_hosts", "allowed_networks"}
+)
+
+
+def parse_network_policy(raw: object) -> NetworkPolicy:
+    """Validate the network-policy keys of ``tool_options.fetch_url``.
+
+    The other fetch options keep their call-time parsing. Booleans are strict:
+    an environment expansion such as ``"${VAR:-false}"`` arrives as a string,
+    and treating it as truthy would silently open private hosts.
+    """
+    if not isinstance(raw, Mapping):
+        raise ConfigError(f"{FETCH_OPTION_PATH} must be a mapping")
+    return NetworkPolicy(
+        allow_private_hosts=bool_option(
+            raw, "allow_private_hosts", False, option_path=FETCH_OPTION_PATH
+        ),
+        confirm_private_hosts=bool_option(
+            raw, "confirm_private_hosts", True, option_path=FETCH_OPTION_PATH
+        ),
+        allowed_networks=parse_fetch_allowed_networks(raw),
+    )
+
+
 def parse_fetch_allowed_networks(raw: object) -> tuple[IPNetwork, ...]:
     """Validate ``tool_options.fetch_url.allowed_networks`` as CIDR ranges.
 
-    Only this key is checked; the other fetch options keep their call-time
-    parsing. Strict parsing rejects host bits (``198.18.0.1/15``) so a typo
-    can't silently widen or shift the exempted range.
+    Strict parsing rejects host bits (``198.18.0.1/15``) so a typo can't
+    silently widen or shift the exempted range.
     """
     if not isinstance(raw, Mapping):
         raise ConfigError(f"{FETCH_OPTION_PATH} must be a mapping")
@@ -237,7 +274,6 @@ def parse_fetch_allowed_networks(raw: object) -> tuple[IPNetwork, ...]:
             networks.append(ipaddress.ip_network(entry))
         except ValueError as exc:
             raise ConfigError(
-                f"{FETCH_OPTION_PATH}.allowed_networks: invalid network "
-                f"{entry!r} ({exc})"
+                f"{FETCH_OPTION_PATH}.allowed_networks: invalid network {entry!r} ({exc})"
             ) from None
     return tuple(networks)

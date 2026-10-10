@@ -340,6 +340,29 @@ def test_profile_load_rejects_invalid_allowed_networks(tmp_path, monkeypatch):
         AgentProfile.load(path)
 
 
+@pytest.mark.parametrize("key", ["allow_private_hosts", "confirm_private_hosts"])
+async def test_fetch_policy_booleans_are_strict(tmp_path, monkeypatch, key):
+    """An env expansion like ``"${VAR:-false}"`` is a string; never truthy."""
+    from lingcore.config import AgentProfile
+    from lingcore.errors import ConfigError
+
+    ctx = ToolContext(workspace=tmp_path, options={"fetch_url": {key: "false"}})
+    with pytest.raises(ToolError, match=f"fetch_url.{key} must be a boolean"):
+        await fetch_url(FetchArgs(url="http://localhost:11434/"), ctx)
+    monkeypatch.setenv("TEST_KEY", "sk-test")
+    path = tmp_path / "profile.yaml"
+    path.write_text(
+        "name: t\n"
+        "llm: {model: m, base_url: http://localhost:1/v1, api_key_env: TEST_KEY}\n"
+        "persona: {system_prompt: hi}\n"
+        "tools: [fetch_url]\n"
+        f'tool_options: {{fetch_url: {{{key}: "${{UNSET_FLAG:-false}}"}}}}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match=f"{key} must be a boolean"):
+        AgentProfile.load(path)
+
+
 class _Confirm:
     """Records confirmation prompts and answers each with ``answer``."""
 

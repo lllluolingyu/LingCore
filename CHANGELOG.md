@@ -5,6 +5,62 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-10
+
+### Added
+
+- Versioned plugins with strict API v1 manifests, import-free bundled/pip/local
+  discovery, explicit `plugins:` enablement, shadowing reports and prefixed tool
+  registration through the atomic skill loader. Every tool still requires an
+  explicit entry in the profile's `tools:` ceiling.
+- Per-Agent Python lifecycle hooks for startup, user input, tool policy and
+  result content, turn observation and reverse-order shutdown. Calls have
+  timeouts, fail-closed defaults, immutable scoped context and cancellation
+  propagation. All frontends render transient `PluginNotice` events. A hook's
+  `ask` waits on the frontend's confirmation timeout rather than the hook
+  timeout, and Stop during `turn_end` keeps the committed reply.
+- A broken installed or profile-local plugin is skipped and reported by doctor
+  and `plugin list`; it fails only profiles that enable or engage it.
+- Prompt-template slash commands with qualified names, unambiguous bare names,
+  Telegram aliases, CLI help/completion and LingChat autocomplete. The expanded
+  input passes through guardrails and hooks while history and Edit preserve the
+  typed command (itself guardrail-screened) through `UserInput.display_text` and
+  `Message.input_text`. Names resolve case-insensitively; CRLF frontmatter works.
+- `lingcore plugin list`, `info` and atomic `new` scaffolding, plus the stable
+  hook API and pip packaging guide in `docs/plugins.md`.
+- A bundled `browser` plugin (optional `lingcore[browser]` extra, Playwright
+  1.63.0) with navigate, snapshot, click, type, select, press, back, screenshot
+  and close tools. Each Agent gets its own lazily launched, ephemeral headless
+  Chromium, closed with the Agent. Pages are read as accessibility snapshots
+  with element refs, and every page request follows `fetch_url`'s public-web
+  policy: URLs are validated like `fetch_url`'s, and Chromium connects only
+  through a per-session vetting SOCKS5 proxy that resolves, checks and pins
+  every connection, redirect hops included. That policy
+  (`allow_private_hosts`, `confirm_private_hosts`, `allowed_networks`) is
+  configured once under `tool_options.fetch_url` for both tools, with user
+  approval for private hosts.
+- Plugin manifests can declare `requires.modules`, which doctor checks without
+  importing them; doctor also warns when a plugin with hooks is engaged without
+  `plugins:` consent.
+- Idempotent `Agent.aclose()` and async context management, wired into CLI
+  switches/exits, Telegram replacement/shutdown and LingChat rebuild/disconnect.
+
+### Changed
+
+- Canvas, Codex and Claude Code tools/skills move to first-party bundled plugins;
+  existing profiles retain their skill and tool behavior without configuration
+  edits, including profile-local skills that shadow a bundled skill with their
+  own tool module. Instruction-only code-review stays in the core skill catalog.
+- Doctor uses plugin environment, executable and required-option declarations
+  instead of a hard-coded Canvas branch; inspection stays value-free and does
+  not execute plugin code. LingChat now targets LingCore 0.4.x.
+- Pin Anthropic to `1.11.0`, matching the lockfile and exact dependency convention.
+- `tool_options.fetch_url.allow_private_hosts` and `confirm_private_hosts` are
+  validated as strict booleans at profile load. Previously a quoted environment
+  expansion such as `"${VAR:-false}"` arrived as the string `"false"`, which
+  counted as true and silently disabled the private-host check.
+- MCP is deferred to a v0.4.x plugin component; tracing and evaluations remain next.
+
 ## [0.3.1] - 2026-10-08
 
 ### Added

@@ -8,6 +8,7 @@ adapter later drive the exact same ``Agent.run`` without changes.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from lingcore.message import ToolCall, ToolResult
 from lingcore.todos import TodoItem
@@ -125,6 +126,16 @@ class TodoUpdated:
     todos: tuple[TodoItem, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class PluginNotice:
+    """A plugin policy decision or value-free hook failure."""
+
+    plugin: str
+    hook: str
+    action: Literal["denied", "blocked", "asked", "modified", "failed"]
+    message: str
+
+
 AgentEvent = (
     TextDelta
     | ToolCallStarted
@@ -137,4 +148,5 @@ AgentEvent = (
     | TurnCancelled
     | UsageReported
     | TodoUpdated
+    | PluginNotice
 )

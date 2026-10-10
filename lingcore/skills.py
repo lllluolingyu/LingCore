@@ -23,12 +23,41 @@ import hashlib
 import importlib.util
 import re
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
+from typing import TYPE_CHECKING
 
 import yaml
 
 from lingcore.errors import ConfigError
+
+if TYPE_CHECKING:
+    from lingcore.tools import Tool
+
+# Keep the registered objects alive: removing a plugin or its module cache must
+# not erase the provenance of a tool still present in the global catalog. Tool
+# objects are mutable/unhashable, so identity keys avoid equality or callable-
+# module heuristics (plugins can register functions imported from another package).
+_MODULE_TOOLS: dict[int, Tool] = {}
+
+
+def registered_module_tools() -> frozenset[str]:
+    """Names currently owned by successful skill/plugin module registrations.
+
+    Callers must intersect these names with the current profile's explicitly
+    loaded contribution set before authorizing a global-catalog subset. Manual
+    replacement objects and builtin tools have independent provenance.
+    """
+    from lingcore.tools import REGISTRY
+
+    return frozenset(
+        name
+        for name, registered in REGISTRY._tools.items()
+        if _MODULE_TOOLS.get(id(registered)) is registered
+    )
+
 
 # Builtin tools whose grant always needs confirmation. This baseline is
 # name-based because the builtins are core; a tool shipped by a skill (or any
@@ -107,29 +136,96 @@ def load_skills(dirs: list[Path]) -> dict[str, Skill]:
     return skills
 
 
-def load_skill_tools(skills: dict[str, Skill]) -> frozenset[str]:
-    """Import the tool module of every skill that ships one, registering its
-    ``@tool`` functions into the global ``REGISTRY``.
-
-    Returns the set of tool names newly contributed by these skills.  This is
-    code execution, so it fails loud: a broken module, a ``provides`` name the
-    module never registered, an undeclared tool, or a name that collides with an
-    existing tool all raise ``ConfigError`` (never a silent swallow — invariant
-    5 / 13).
-
-    Registration targets the process-global ``REGISTRY`` (the ``@tool``
-    decorator's default and the same catalog builtins use); isolation between
-    sessions is enforced one layer up by ``REGISTRY.subset(profile.tools)`` and
-    ``SkillState`` — a registered-but-unauthorized tool is unreachable.
-
-    Idempotent: a module already imported this process (tracked by its synthetic
-    name in ``sys.modules``) is not re-executed, so repeated ``from_profile``
-    calls in one process are safe.
-    """
+def _load_tool_module(
+    owner: str, mod_path: Path, provides: Iterable[str], *, prefix: str | None = None
+) -> ModuleType:
+    """Execute one path-identified module and atomically validate its catalog."""
     from lingcore.tools import REGISTRY
 
-    reg = REGISTRY
-    newly: set[str] = set()
+    declared = frozenset(provides)
+    if prefix is not None:
+        invalid = sorted(
+            name
+            for name in declared
+            if not (
+                re.fullmatch(r"[a-z0-9_]+", name)
+                and (name == prefix or name.startswith(prefix + "_"))
+            )
+        )
+        if invalid:
+            raise ConfigError(
+                f"{owner!r} tool names {invalid} violate plugin prefix {prefix!r}"
+            )
+    mod_path = mod_path.resolve()
+    if not mod_path.is_file():
+        raise ConfigError(f"skill {owner!r} module not found: {mod_path}")
+    path_tag = hashlib.sha1(str(mod_path).encode("utf-8")).hexdigest()[:8]
+    mod_name = f"lingcore_skill_tools.{owner}.{mod_path.stem}_{path_tag}"
+    cached = sys.modules.get(mod_name)
+    if cached is not None:
+        missing = sorted(declared - set(REGISTRY.names()))
+        if missing:
+            raise ConfigError(f"skill {owner!r} did not register: {missing}")
+        registered = getattr(cached, "__lingcore_provides__", declared)
+        if registered != declared:
+            raise ConfigError(f"{owner!r} module provides changed after import")
+        return cached
+    before_tools = dict(REGISTRY._tools)
+    before = set(before_tools)
+    collisions = sorted(declared & before)
+    if collisions:
+        raise ConfigError(
+            f"skill {owner!r} provides {collisions} which collide(s) with an already-registered tool"
+        )
+    spec = importlib.util.spec_from_file_location(mod_name, mod_path)
+    if spec is None or spec.loader is None:
+        raise ConfigError(f"cannot load skill module: {mod_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    try:
+        spec.loader.exec_module(module)
+        undeclared = sorted((set(REGISTRY.names()) - before) - declared)
+        if undeclared:
+            raise ConfigError(
+                f"skill {owner!r} module registered undeclared tools {undeclared}; add them to provides or remove them"
+            )
+        clobbered = sorted(
+            name
+            for name in before
+            if REGISTRY._tools.get(name) is not before_tools[name]
+        )
+        if clobbered:
+            raise ConfigError(
+                f"skill {owner!r} module overwrote existing tool(s) {clobbered}; a skill may only register names it declares in provides"
+            )
+        missing = sorted(declared - set(REGISTRY.names()))
+        if missing:
+            raise ConfigError(
+                f"skill {owner!r} declares provides={sorted(declared)} but did not register: {missing}"
+            )
+        module.__lingcore_provides__ = declared  # type: ignore[attr-defined]
+    except BaseException as exc:
+        REGISTRY._tools.clear()
+        REGISTRY._tools.update(before_tools)
+        sys.modules.pop(mod_name, None)
+        if isinstance(exc, ConfigError) or not isinstance(exc, Exception):
+            raise
+        raise ConfigError(
+            f"failed to import skill module for {owner!r} ({mod_path}): {exc!r}"
+        ) from exc
+    # Publish provenance only after every registration contract check succeeds.
+    # Rollback paths leave both the catalog and provenance unchanged.
+    for name in declared:
+        registered = REGISTRY._tools[name]
+        _MODULE_TOOLS[id(registered)] = registered
+    return module
+
+
+def load_skill_tools(skills: dict[str, Skill]) -> frozenset[str]:
+    """Import code-shipping skill modules, preserving atomic registration."""
+    from lingcore.paths import PathEscapeError, resolve_confined
+
+    contributed: set[str] = set()
     for skill in skills.values():
         if skill.module is None:
             continue
@@ -137,94 +233,17 @@ def load_skill_tools(skills: dict[str, Skill]) -> frozenset[str]:
             raise ConfigError(
                 f"skill {skill.name!r} declares a module but has no source_dir"
             )
-        mod_path = (skill.source_dir / skill.module).resolve()
-        if not mod_path.is_file():
-            raise ConfigError(f"skill {skill.name!r} module not found: {mod_path}")
-        # Synthetic module name keyed by the *resolved path* (not just
-        # name+stem) so a profile-local skill that shadows a bundled one — same
-        # skill name, same filename, different file — gets its own sys.modules
-        # entry and is actually executed, instead of silently aliasing the
-        # first-loaded module. Same path twice still hashes equal → idempotent.
-        path_tag = hashlib.sha1(str(mod_path).encode("utf-8")).hexdigest()[:8]
-        mod_name = f"lingcore_skill_tools.{skill.name}.{mod_path.stem}_{path_tag}"
-        if mod_name not in sys.modules:
-            # Snapshot the global catalog so a module that fails its contract
-            # (below) can be rolled back atomically — registration is a side
-            # effect of import and must not leak a half-loaded skill.
-            before_tools = dict(reg._tools)
-            before = set(before_tools)
-            # Refuse a declared name that already exists *before* executing —
-            # shadowing a builtin or a previously-loaded skill is never allowed,
-            # and checking up front means a colliding @tool never overwrites the
-            # incumbent (register() is last-wins).
-            collisions = sorted(set(skill.provides) & before)
-            if collisions:
-                raise ConfigError(
-                    f"skill {skill.name!r} provides {collisions} which "
-                    f"collide(s) with an already-registered tool"
-                )
-            spec = importlib.util.spec_from_file_location(mod_name, mod_path)
-            if spec is None or spec.loader is None:
-                raise ConfigError(f"cannot load skill module: {mod_path}")
-            module = importlib.util.module_from_spec(spec)
-            # Register in sys.modules *before* exec so the @tool decorator's
-            # get_type_hints resolves the module's own arg models, and so
-            # tracebacks/repr are sane.
-            sys.modules[mod_name] = module
-            try:
-                spec.loader.exec_module(module)
-                # The module must register exactly what it declared: no surprise
-                # tools outside `provides` …
-                undeclared = sorted((set(reg.names()) - before) - set(skill.provides))
-                if undeclared:
-                    raise ConfigError(
-                        f"skill {skill.name!r} module registered undeclared tools "
-                        f"{undeclared}; add them to provides or remove them"
-                    )
-                # … and no overwriting an incumbent. A name *in* provides that
-                # already exists is caught pre-exec above; a name *not* in
-                # provides that clobbers a builtin would slip past the
-                # name-set diff, so compare object identity to catch it.
-                clobbered = sorted(
-                    n for n in before if reg._tools.get(n) is not before_tools[n]
-                )
-                if clobbered:
-                    raise ConfigError(
-                        f"skill {skill.name!r} module overwrote existing tool(s) "
-                        f"{clobbered}; a skill may only register names it declares "
-                        f"in provides"
-                    )
-                missing = [t for t in skill.provides if t not in reg.names()]
-                if missing:
-                    raise ConfigError(
-                        f"skill {skill.name!r} declares provides={list(skill.provides)} "
-                        f"but did not register: {missing}"
-                    )
-            except BaseException as e:
-                # Restore the catalog and sys.modules to exactly their prior
-                # state — a failed load leaves no trace, so a fixed retry runs
-                # cleanly. (REGISTRY has no transaction API; restore in place to
-                # preserve the singleton's identity.)
-                reg._tools.clear()
-                reg._tools.update(before_tools)
-                sys.modules.pop(mod_name, None)
-                if isinstance(e, ConfigError) or not isinstance(e, Exception):
-                    raise
-                raise ConfigError(
-                    f"failed to import skill module for {skill.name!r} "
-                    f"({mod_path}): {e!r}"
-                ) from e
-        else:
-            # Cache hits still validate the contract, without undoing a prior
-            # successful import when the declaration has changed.
-            missing = [t for t in skill.provides if t not in reg.names()]
-            if missing:
-                raise ConfigError(
-                    f"skill {skill.name!r} declares provides={list(skill.provides)} "
-                    f"but did not register: {missing}"
-                )
-        newly |= set(skill.provides)
-    return frozenset(newly)
+        try:
+            if Path(skill.module).is_absolute():
+                raise PathEscapeError("absolute module path")
+            mod_path = resolve_confined(skill.source_dir, skill.module)
+        except PathEscapeError:
+            raise ConfigError(
+                f"skill {skill.name!r} module path escapes skill directory"
+            ) from None
+        _load_tool_module(skill.name, mod_path, skill.provides)
+        contributed.update(skill.provides)
+    return frozenset(contributed)
 
 
 @dataclass

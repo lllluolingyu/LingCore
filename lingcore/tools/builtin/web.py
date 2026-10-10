@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 from lingcore import __version__ as _lingcore_version
 from lingcore.errors import ConfigError, ToolError
-from lingcore.tool_options import IPNetwork, parse_fetch_allowed_networks
+from lingcore.tool_options import IPNetwork, parse_network_policy
 from lingcore.tools import ToolContext, tool
 from lingcore.tools.builtin._offload import DEFAULT_OFFLOAD_OVER_CHARS, offload_text
 
@@ -127,14 +127,14 @@ class _NonPublic:
             f"{self.addr}{self._fake_ip_hint('to fetch through one')}"
         )
 
-    def prompt(self, url: str) -> str:
+    def prompt(self, url: str, tool: str = "fetch_url") -> str:
         target = (
             f"{self.hostname} is a local host"
             if self.addr is None
             else f"{self.hostname} resolves to non-public address {self.addr}"
         )
         hint = self._fake_ip_hint("to stop asking")
-        return f"Allow fetch_url to reach a non-public address? {url} — {target}{hint}"
+        return f"Allow {tool} to reach a non-public address? {url} — {target}{hint}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,13 +279,12 @@ def _is_redirect(status_code: int) -> bool:
 )
 async def fetch_url(args: FetchArgs, ctx: ToolContext) -> str:
     opts = ctx.options.get("fetch_url", {}) if ctx.options else {}
-    allow_private_hosts = bool(opts.get("allow_private_hosts", False))
-    # Ask the user before a local/non-public target instead of refusing it.
-    ask = bool(opts.get("confirm_private_hosts", True))
     try:
-        allowed_networks = parse_fetch_allowed_networks(opts)
+        policy = parse_network_policy(opts)
     except ConfigError as exc:
         raise ToolError(str(exc)) from None
+    # Ask the user before a local/non-public target instead of refusing it.
+    ask = policy.confirm_private_hosts
     # Cap on bytes pulled from the socket. Honors the profile's
     # tool_options.fetch_url.max_bytes (falling back to the module default),
     # so a profile can tighten the fetch size without a code change.
@@ -296,8 +295,8 @@ async def fetch_url(args: FetchArgs, ctx: ToolContext) -> str:
     async def vet(url: str) -> str | None:
         target = await _vet_url(
             url,
-            allow_private_hosts=allow_private_hosts,
-            allowed_networks=allowed_networks,
+            allow_private_hosts=policy.allow_private_hosts,
+            allowed_networks=policy.allowed_networks,
         )
         return await _authorize(ctx, url, target, ask=ask, approved=approved)
 

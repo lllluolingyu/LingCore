@@ -214,7 +214,7 @@ def test_every_shipped_profile_that_needs_env_has_complete_safe_example(
 
 
 def test_canvas_skill_example_remains_secret_free_and_complete():
-    path = REPO_ROOT / "lingcore" / "skills" / "canvas" / ".env.example"
+    path = REPO_ROOT / "lingcore" / "bundled_plugins" / "canvas" / ".env.example"
     parsed = dotenv_values(path, interpolate=False)
     assert {"CANVAS_URL", "CANVAS_TOKEN"} <= set(parsed)
     assert parsed["CANVAS_TOKEN"] == ""

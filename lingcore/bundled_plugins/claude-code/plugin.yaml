@@ -1,0 +1,13 @@
+name: claude-code
+version: 1.0.0
+api: 1
+description: Communicate with an external Claude Code CLI agent when the user asks
+  to consult, cross-check with, or delegate coding work to Claude Code.
+module: claude_code_tools.py
+provides:
+- claude_code_agent
+options_key: claude_code_agent
+requires:
+  executables:
+  - name: claude
+    option: executable

@@ -69,4 +69,4 @@ def test_profile_cli_lists_and_initializes(tmp_path, capsys):
 def test_main_help_advertises_profile_management(capsys):
     with pytest.raises(SystemExit, match="0"):
         main(["--help"])
-    assert "{doctor,telegram,profile}" in capsys.readouterr().out
+    assert "{doctor,telegram,profile,plugin}" in capsys.readouterr().out
