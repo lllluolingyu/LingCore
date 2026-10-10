@@ -38,7 +38,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
   every connection, redirect hops included. That policy
   (`allow_private_hosts`, `confirm_private_hosts`, `allowed_networks`) is
   configured once under `tool_options.fetch_url` for both tools, with user
-  approval for private hosts.
+  approval for private hosts. Because of that proxy the browser ignores
+  `HTTP(S)_PROXY` and system proxy settings, which `fetch_url` honours.
 - Plugin manifests can declare `requires.modules`, which doctor checks without
   importing them; doctor also warns when a plugin with hooks is engaged without
   `plugins:` consent.
@@ -330,7 +331,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 - Initial tagged preview of the config-driven async agent runtime.
 
-[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/lllluolingyu/LingCore/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/lllluolingyu/LingCore/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/lllluolingyu/LingCore/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/lllluolingyu/LingCore/compare/v0.1.0...v0.2.0

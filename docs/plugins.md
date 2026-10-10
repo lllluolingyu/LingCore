@@ -254,6 +254,15 @@ hostname for the rest of the browser session (`browser_close` forgets it).
 Blocked requests are listed in the next result. Non-http(s) schemes, downloads
 and service workers are refused, and JavaScript dialogs are dismissed and
 reported.
+
+Because every connection must pass that proxy, the browser does not use an
+upstream proxy: it ignores `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` and the
+system or PAC proxy settings, whereas `fetch_url` honours the standard proxy
+environment variables. Where outbound traffic is only allowed through an HTTP
+proxy, the browser therefore cannot reach the web even though `fetch_url` can.
+A TUN-mode proxy (Clash/mihomo, Surge) still works, because it captures
+connections at the network layer; add its fake-IP ranges to
+`tool_options.fetch_url.allowed_networks` as for `fetch_url`.
 Chromium's own sandbox is off by default as in Playwright
 (`chromium_sandbox: true` enables it where the host supports it), and
 `executable_path` selects another Chromium build.
