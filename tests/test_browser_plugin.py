@@ -8,8 +8,12 @@ or its Chromium build is not installed.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import importlib.util
+import socket
 import sys
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -114,6 +118,53 @@ def test_options_are_strict():
         browser.parse_browser_options({"headles": True})
     with pytest.raises(ConfigError, match="must be a boolean"):
         browser.parse_browser_options({"headless": "false"})
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:9222",
+        "ws://localhost:9222/devtools/browser/abc",
+        "http://[::1]:9222/",
+        "https://127.0.0.2:9222",
+    ],
+)
+def test_cdp_url_accepts_loopback_endpoints(url):
+    assert browser.parse_browser_options({"cdp_url": url}).cdp_url == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "",
+        42,
+        "file:///tmp/devtools",
+        "http://10.0.0.5:9222",
+        "http://example.com:9222",
+        "http://user:secret@localhost:9222",
+        "http://localhost:99999",
+        "ws://169.254.169.254/devtools/browser/secret-id",
+    ],
+)
+def test_cdp_url_must_be_a_credential_free_loopback_endpoint(url):
+    with pytest.raises(ConfigError, match="cdp_url must be") as error:
+        browser.parse_browser_options({"cdp_url": url})
+    if isinstance(url, str) and url:
+        assert url not in str(error.value)  # a ws path is the session id
+
+
+@pytest.mark.parametrize(
+    "key", ["headless", "executable_path", "viewport_width", "chromium_sandbox"]
+)
+def test_launch_options_cannot_be_combined_with_cdp_url(key):
+    value = {"executable_path": "/bin/chromium", "viewport_width": 800}.get(key, True)
+    with pytest.raises(ConfigError, match=f"{key} cannot be combined with"):
+        browser.parse_browser_options({"cdp_url": "http://127.0.0.1:9", key: value})
+    # Options that shape the session rather than the launch still apply.
+    attached = browser.parse_browser_options(
+        {"cdp_url": "http://127.0.0.1:9", "timeout": 4, "max_chars": 2_000}
+    )
+    assert attached.timeout_ms == 4000 and attached.max_chars == 2_000
 
 
 @pytest.mark.parametrize(
@@ -297,6 +348,25 @@ async def test_whole_url_is_validated_before_any_approval(resolve):
     ]
 
 
+async def test_attached_routing_applies_the_host_policy_without_a_proxy(resolve):
+    attached = browser.BrowserOptions(cdp_url="http://127.0.0.1:9222")
+    session = browser.BrowserSession(attached)
+    assert session.attached
+    assert not await session.request_blocked("https://public.test/app.js")
+    assert await session.request_blocked("http://localhost:8080/")
+    assert await session.request_blocked("http://intranet.test/")
+    assert await session.request_blocked("http://nowhere.test/")
+    session.approved_hosts.add("intranet.test")
+    assert not await session.request_blocked("http://intranet.test/")
+    # A launched session leaves hosts to its proxy and checks only the URL.
+    launched = browser.BrowserSession(browser.BrowserOptions())
+    assert not await launched.request_blocked("http://localhost:8080/")
+    assert await launched.request_blocked("http://u:p@public.test/")
+    open_ = browser.BrowserSession(attached, NetworkPolicy(allow_private_hosts=True))
+    assert not await open_.request_blocked("http://localhost:8080/")
+    assert await open_.request_blocked("chrome://settings")
+
+
 async def test_proxy_vets_and_pins_every_connection(resolve):
     resolve.update({"10.0.0.5": "10.0.0.5", "::1": "::1"})  # literals parse
     session = browser.BrowserSession(browser.BrowserOptions())
@@ -432,7 +502,7 @@ class _FakePage:
     async def title(self):
         return "Fake"
 
-    async def aria_snapshot(self, mode):
+    async def aria_snapshot(self, mode, **kwargs):
         return "- heading"
 
 
@@ -495,7 +565,7 @@ async def test_calls_queued_behind_close_get_a_fresh_owned_session(
     # Calls arriving after aclose refuse instead of launching an orphan.
     ctx = ToolContext(workspace=tmp_path, plugins={"browser": hooks})
     with pytest.raises(ToolError, match="closed"):
-        await browser.browser_snapshot.run(browser.NoArgs(), ctx)
+        await browser.browser_snapshot.run(browser.SnapshotArgs(), ctx)
     assert len(fake_playwright) == 2
 
 
@@ -535,6 +605,41 @@ async def test_cancelled_close_keeps_its_handles_and_resumes(tmp_path, fake_play
     await direct.close()
     assert log == ["context", "context", "browser", "playwright"]
     assert direct._context is direct._browser is direct._playwright is None
+
+
+async def test_attached_close_disconnects_and_closes_only_opened_tabs():
+    log = []
+
+    class Tab(_FakeHandle):
+        def on(self, event, handler):
+            if event == "close":
+                self.on_close = handler
+
+        async def close(self):
+            await super().close()
+            self.on_close(self)
+
+    class Context(_FakeHandle):
+        pages = []
+
+        async def unroute_all(self, behavior):
+            log.append(f"unroute:{behavior}")
+
+    session = browser.BrowserSession(
+        browser.BrowserOptions(cdp_url="http://127.0.0.1:9222")
+    )
+    owner_tab, opened = Tab("owner-tab", log), Tab("opened-tab", log)
+    session._context = Context("context", log)
+    session._browser = _FakeHandle("browser", log)
+    session._playwright = _FakeHandle("playwright", log)
+    session._track(owner_tab, announce=False)
+    session._track(opened)
+    session._opened.append(opened)
+    assert session.drain_notes() == ["A new tab opened and is now active."]
+    await session.close()
+    # The owner's context and tab survive; disconnecting is browser.close().
+    assert log == ["opened-tab", "unroute:ignoreErrors", "browser", "playwright"]
+    assert not owner_tab.closed and not session._context
 
 
 def test_element_refs_are_validated():
@@ -592,6 +697,7 @@ PAGES = {
 <form action="/result"><input aria-label="Query" name="q"></form>
 <a href="/next">Next page</a>
 <select aria-label="Colour"><option value="r">red</option><option value="g">green</option></select>
+<ul><li>Nested item</li></ul>
 <img src="http://localhost:{port}/pixel.png" alt="pixel">""",
     "/next": "<!doctype html><title>Next</title><p>Second page</p>",
 }
@@ -675,6 +781,396 @@ async def test_live_navigate_type_click_select_screenshot(tmp_path, live, site):
         hooks = agent.tool_ctx.plugins["browser"]
         assert hooks._session is not None and hooks._session._browser is not None
     assert hooks._session is None
+
+
+@pytest.fixture
+async def owner_browser(live):
+    """A Chromium someone else launched with a DevTools port, like a harness."""
+    from playwright.async_api import async_playwright
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    async with async_playwright() as playwright:
+        with tempfile.TemporaryDirectory() as profile_dir:
+            context = await playwright.chromium.launch_persistent_context(
+                profile_dir, args=[f"--remote-debugging-port={port}"]
+            )
+            await context.add_init_script(
+                "addEventListener('DOMContentLoaded', () => document.body"
+                ".insertAdjacentHTML('beforeend', '<p>Injected by owner</p>'))"
+            )
+            try:
+                yield context, f"http://127.0.0.1:{port}"
+            finally:
+                await context.close()
+
+
+@pytest.fixture
+async def websocket_site():
+    """A local echo server supporting the small text/binary frames used below."""
+    hits, writers, tasks = [], set(), set()
+
+    async def echo(reader, writer):
+        task = asyncio.current_task()
+        tasks.add(task)
+        writers.add(writer)
+        try:
+            request = await reader.readuntil(b"\r\n\r\n")
+            hits.append(request.split(b"\r\n", 1)[0])
+            headers = dict(
+                line.split(b": ", 1)
+                for line in request.split(b"\r\n")[1:]
+                if b": " in line
+            )
+            accept = base64.b64encode(
+                hashlib.sha1(
+                    headers[b"Sec-WebSocket-Key"]
+                    + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+                ).digest()
+            )
+            writer.write(
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                b"Connection: Upgrade\r\nSec-WebSocket-Accept: "
+                + accept
+                + b"\r\nSec-WebSocket-Protocol: lingcore-test\r\n\r\n"
+            )
+            await writer.drain()
+            while True:
+                opcode, length = await reader.readexactly(2)
+                length &= 127
+                assert length < 126
+                mask = await reader.readexactly(4)
+                payload = await reader.readexactly(length)
+                decoded = bytes(value ^ mask[i % 4] for i, value in enumerate(payload))
+                writer.write(bytes([opcode, length]) + decoded)
+                await writer.drain()
+                if opcode & 15 == 8:
+                    break
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            writers.discard(writer)
+            tasks.discard(task)
+
+    server = await asyncio.start_server(echo, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        yield f"ws://127.0.0.1:{port}/socket", hits
+    finally:
+        server.close()
+        await server.wait_closed()
+        for writer in list(writers):
+            writer.close()
+        await asyncio.gather(*tasks)
+
+
+async def _exchange_web_socket(frame, url):
+    result = await frame.evaluate(
+        """url => new Promise((resolve, reject) => {
+          const socket = new WebSocket(url, ['lingcore-test']);
+          socket.binaryType = 'arraybuffer';
+          const result = { messages: [] };
+          const timer = setTimeout(() => reject(Error('WebSocket timed out')), 3000);
+          socket.onerror = () => { clearTimeout(timer); reject(Error('WebSocket failed')); };
+          socket.onopen = () => {
+            result.instance = socket instanceof WebSocket;
+            result.tag = Object.prototype.toString.call(socket);
+            result.protocol = socket.protocol;
+            result.open = socket.readyState === WebSocket.OPEN;
+            socket.send('hello');
+            socket.send(new Uint8Array([1, 2, 3]));
+          };
+          socket.addEventListener('message', event => {
+            result.messages.push(typeof event.data === 'string' ? event.data : [...new Uint8Array(event.data)]);
+            if (result.messages.length === 2) socket.close(1000, 'done');
+          });
+          socket.onclose = event => {
+            clearTimeout(timer);
+            result.code = event.code;
+            resolve(result);
+          };
+        })""",
+        url,
+    )
+    assert result == {
+        "messages": ["hello", [1, 2, 3]],
+        "instance": True,
+        "tag": "[object WebSocket]",
+        "protocol": "lingcore-test",
+        "open": True,
+        "code": 1000,
+    }
+
+
+async def test_live_attached_close_closes_a_session_created_tab(owner_browser):
+    owner, cdp_url = owner_browser
+    await owner.pages[0].close()
+    session = browser.BrowserSession(browser.BrowserOptions(cdp_url=cdp_url))
+    try:
+        page = await session.page()
+        assert page in session._opened
+        await session.close()
+        assert session._context is session._browser is session._playwright is None
+        assert not owner.pages
+    finally:
+        await session.close()
+
+
+async def test_live_attached_close_closes_only_tool_opened_popups(
+    tmp_path, owner_browser, site
+):
+    owner, cdp_url = owner_browser
+    owner_tab = owner.pages[0]
+    await owner_tab.set_content(
+        f'<a href="http://127.0.0.1:{site.server_port}/next" target="_blank">Open</a>'
+    )
+    profile = profile_for(
+        tmp_path, cdp_url=cdp_url, fetch={"allow_private_hosts": True}
+    )
+    async with Agent.from_profile(profile, llm=FakeLLMClient([])) as agent:
+        ctx = agent.tool_ctx
+        snapshot = await browser.browser_snapshot.run(browser.SnapshotArgs(), ctx)
+        await browser.browser_click.run(
+            browser.RefArgs(ref=_ref(snapshot, "Open")), ctx
+        )
+        session = ctx.plugins["browser"]._session
+        assert len(session._popup_targets) == 1 and not session._acting
+        independent_tab = await owner.new_page()
+        async with owner_tab.expect_popup() as pending:
+            await owner_tab.evaluate("window.open('about:blank')")
+        owner_popup = await pending.value
+        await browser.browser_close.run(browser.NoArgs(), ctx)
+        assert set(owner.pages) == {owner_tab, independent_tab, owner_popup}
+
+
+async def test_live_attach_preserves_owners_media_settings(owner_browser):
+    owner, cdp_url = owner_browser
+    page = owner.pages[0]
+    await page.emulate_media(color_scheme="dark", reduced_motion="reduce")
+    expression = """() => ({
+        dark: matchMedia('(prefers-color-scheme: dark)').matches,
+        reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+    })"""
+    before = await page.evaluate(expression)
+    session = browser.BrowserSession(browser.BrowserOptions(cdp_url=cdp_url))
+    try:
+        await session.page()
+        assert (
+            await page.evaluate(expression) == before == {"dark": True, "reduced": True}
+        )
+    finally:
+        await session.close()
+
+
+@pytest.mark.parametrize("in_frame", [False, True])
+async def test_live_attached_web_sockets_are_vetted_in_loaded_frames(
+    owner_browser, site, websocket_site, in_frame
+):
+    owner, cdp_url = owner_browser
+    page = owner.pages[0]
+    base = f"http://127.0.0.1:{site.server_port}/next"
+    await page.goto(base)
+    if in_frame:
+        await page.set_content(f'<iframe src="{base}"></iframe>')
+        frame = page.frames[1]
+        await frame.wait_for_load_state()
+    else:
+        frame = page.main_frame
+    url, hits = websocket_site
+    session = browser.BrowserSession(browser.BrowserOptions(cdp_url=cdp_url))
+    try:
+        await session.page()
+        code = await frame.evaluate(
+            """url => new Promise((resolve, reject) => {
+              const socket = new WebSocket(url, ['lingcore-test']);
+              const timer = setTimeout(() => reject(Error('WebSocket timed out')), 3000);
+              socket.onopen = () => socket.close();
+              socket.onclose = event => { clearTimeout(timer); resolve(event.code); };
+            })""",
+            url,
+        )
+        assert code == 1008 and hits == []
+        assert session._blocked == ["127.0.0.1"]
+        session.approved_hosts.add("127.0.0.1")
+        await _exchange_web_socket(frame, url)
+        assert len(hits) == 1
+    finally:
+        await session.close()
+
+
+async def test_live_attached_web_sockets_survive_disconnect_and_reattach(
+    owner_browser, site, websocket_site
+):
+    owner, cdp_url = owner_browser
+    page = owner.pages[0]
+    await page.goto(f"http://127.0.0.1:{site.server_port}/next")
+    url, _ = websocket_site
+    for _ in range(2):
+        await page.evaluate("() => { window.originalSocket = WebSocket; }")
+        session = browser.BrowserSession(
+            browser.BrowserOptions(cdp_url=cdp_url),
+            NetworkPolicy(allow_private_hosts=True),
+        )
+        try:
+            controlled = await session.page()
+            await _exchange_web_socket(page, url)
+            await session.close()
+            assert await page.evaluate("WebSocket === originalSocket")
+            await _exchange_web_socket(page, url)
+            # New documents are guarded too, and survive cleanup without reload.
+            controlled = await session.page()
+            await controlled.reload()
+            await _exchange_web_socket(page, url)
+        finally:
+            await session.close()
+        await _exchange_web_socket(page, url)
+
+
+@pytest.mark.parametrize("pending", [False, True])
+async def test_live_attached_open_and_pending_web_sockets_survive_disconnect(
+    owner_browser, site, websocket_site, pending
+):
+    owner, cdp_url = owner_browser
+    page = owner.pages[0]
+    await page.goto(f"http://127.0.0.1:{site.server_port}/next")
+    url, _ = websocket_site
+    session = browser.BrowserSession(
+        browser.BrowserOptions(cdp_url=cdp_url),
+        NetworkPolicy(allow_private_hosts=True),
+    )
+    checking, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed_check(source, url):
+        checking.set()
+        await release.wait()
+        return True
+
+    if pending:
+        session._allow_web_socket = delayed_check
+    try:
+        await session.page()
+        await page.evaluate(
+            """url => {
+              window.savedSocket = new WebSocket(url, ['lingcore-test']);
+              window.socketOpened = new Promise((resolve, reject) => {
+                savedSocket.onopen = resolve;
+                savedSocket.onerror = () => reject(Error('WebSocket failed'));
+              });
+            }""",
+            url,
+        )
+        if pending:
+            await asyncio.wait_for(checking.wait(), 3)
+        else:
+            await asyncio.wait_for(
+                page.evaluate("() => socketOpened.then(() => true)"), 3
+            )
+        await asyncio.wait_for(session.close(), 3)
+        release.set()
+        await asyncio.wait_for(page.evaluate("() => socketOpened.then(() => true)"), 3)
+        message = await asyncio.wait_for(
+            page.evaluate(
+                """() => new Promise(resolve => {
+              savedSocket.onmessage = event => { savedSocket.close(); resolve(event.data); };
+              savedSocket.send('after disconnect');
+            })"""
+            ),
+            3,
+        )
+        assert message == "after disconnect"
+    finally:
+        release.set()
+        await asyncio.wait_for(session.close(), 3)
+
+
+async def test_live_attached_session_drives_the_owners_tab_and_leaves_it_open(
+    tmp_path, owner_browser, site
+):
+    owner, cdp_url = owner_browser
+    base = f"http://127.0.0.1:{site.server_port}"
+    await owner.pages[0].goto(base + "/")
+    profile = profile_for(
+        tmp_path, fetch={"allow_private_hosts": True}, cdp_url=cdp_url, timeout=10
+    )
+    llm = FakeLLMClient([])
+    async with Agent.from_profile(profile, llm=llm) as agent:
+
+        async def step(name, **arguments):
+            llm._turns = [call(name, **arguments), ScriptedTurn(text="ok")]
+            (result,) = results([e async for e in agent.run("go")])
+            assert result.ok, result.content
+            return result.content
+
+        # The owner's tab is adopted as is, with its page already loaded.
+        home = await step("browser_snapshot")
+        assert home.startswith(f"[Home] {base}/") and "new tab" not in home
+        assert 'heading "Welcome"' in home
+        assert "Nested item" in home
+        shallow = await step("browser_snapshot", depth=1)
+        assert "- list" in shallow and "Nested item" not in shallow
+        clicked = await step("browser_click", ref=_ref(home, "Next page"))
+        # The owner's init script still runs on the session's navigations.
+        assert "Second page" in clicked and "Injected by owner" in clicked
+        back = await step("browser_back")
+        query = _ref(back, "Query")
+        scoped = await step("browser_snapshot", ref=query)
+        assert f"(Only the subtree of {query}.)" in scoped
+        assert "Next page" not in scoped
+        typed = await step(
+            "browser_type", ref=_ref(scoped, "Query"), text="cats", submit=True
+        )
+        assert "q=cats" in typed
+        assert await step("browser_close") == "browser closed"
+        # A fresh session re-attaches to the same tab.
+        assert "[Result]" in await step("browser_snapshot")
+    assert len(owner.pages) == 1 and "q=cats" in owner.pages[0].url
+    assert "Second page" in await owner.pages[0].evaluate(
+        "fetch('/next').then(r => r.text())"
+    )
+
+
+async def test_live_attached_session_refuses_private_hosts_per_request(
+    tmp_path, owner_browser, site
+):
+    owner, cdp_url = owner_browser
+    prompts = []
+
+    async def confirm(prompt):
+        prompts.append(prompt)
+        return True
+
+    base = f"http://127.0.0.1:{site.server_port}"
+    (result,) = await run_tools(
+        profile_for(tmp_path, cdp_url=cdp_url),
+        [call("browser_navigate", url=base + "/")],
+        confirm=confirm,
+    )
+    assert result.ok, result.content
+    assert len(prompts) == 1 and "127.0.0.1" in prompts[0]
+    # Without the proxy, routing still drops the unapproved localhost image.
+    assert "Blocked requests to non-public or unsupported hosts: localhost" in (
+        result.content
+    )
+    assert not any(hit.startswith("localhost") for hit in site.hits)
+    # Disconnecting removed the routes: the owner's own requests are unaffected.
+    await owner.pages[0].goto(f"http://localhost:{site.server_port}/next")
+    assert any(hit.startswith("localhost") for hit in site.hits)
+
+
+async def test_live_attach_failure_does_not_reveal_the_endpoint(tmp_path, live):
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    secret = f"ws://127.0.0.1:{port}/devtools/browser/secret-session-id"
+    (result,) = await run_tools(
+        profile_for(tmp_path, cdp_url=secret, timeout=2),
+        [call("browser_snapshot")],
+    )
+    assert not result.ok and "cannot attach" in result.content
+    assert "secret-session-id" not in result.content
 
 
 async def test_live_private_hosts_need_approval_and_subresources_are_dropped(

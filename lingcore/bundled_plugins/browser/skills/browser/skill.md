@@ -29,7 +29,9 @@ How the tools fit together:
   set `submit: true` to press Enter afterwards.
 - `browser_press` sends a key (`Enter`, `Escape`, `PageDown`, `Control+A`) to
   the focused element. `browser_back` goes back one page.
-- `browser_snapshot` re-reads the page (e.g. after content loads late).
+- `browser_snapshot` re-reads the page (e.g. after content loads late). Pass
+  `ref` to read only one element's subtree (a list, a form) or `depth` to read
+  only the top levels; this keeps long pages short.
 - `browser_screenshot` attaches an image when layout, charts or images matter.
   The snapshot is the source of truth for text and refs.
 - `browser_close` discards the session (tabs, cookies, approvals).

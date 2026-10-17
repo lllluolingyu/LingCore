@@ -236,7 +236,10 @@ Pages are returned as Playwright AI-mode accessibility snapshots whose
 `[ref=eN]` handles address elements for `browser_click`, `browser_type` and
 `browser_select`; each action returns a fresh snapshot, large ones offloaded
 like `fetch_url` output (`offload_over_chars`, default 20,000). Screenshots
-attach an image. Tool calls on one browser are serialized.
+attach an image. Tool calls on one browser are serialized. `browser_snapshot`
+accepts an optional `ref` (only that element's subtree, e.g. one list or form)
+and `depth` (only that many levels below the root), which keeps long pages
+cheap to read; refs in a partial snapshot stay valid for the action tools.
 
 The network policy is `fetch_url`'s (invariant 9) and is configured in one
 place: `allow_private_hosts`, `confirm_private_hosts` and `allowed_networks`
@@ -266,6 +269,46 @@ connections at the network layer; add its fake-IP ranges to
 Chromium's own sandbox is off by default as in Playwright
 (`chromium_sandbox: true` enables it where the host supports it), and
 `executable_path` selects another Chromium build.
+
+### Attaching to a running browser
+
+`tool_options.browser.cdp_url` makes the session attach to a Chromium that is
+already running with a DevTools port (`--remote-debugging-port`) instead of
+launching one — for example a browser a test harness prepared and logged in,
+or your own Chrome:
+
+```yaml
+tool_options:
+  browser:
+    cdp_url: http://127.0.0.1:9222   # loopback http(s)/ws(s) endpoint only
+```
+
+The session adopts the browser's default context and its open tabs (the newest
+is active), preserving its cookies, logins, init scripts, media preferences and
+download settings. Closing the session (`browser_close`, `Agent.aclose`) only
+disconnects: the browser, its context
+and its tabs stay open. Tabs created by the session and popups opened by its
+tool actions are closed; independently opened owner tabs stay open. The
+endpoint must be on loopback and free of credentials, and errors never echo
+it, since a `ws://` endpoint's path grants full control of the browser.
+`headless`, `executable_path`, `chromium_sandbox` and the viewport size
+configure a browser LingCore launches, so combining them with `cdp_url` is an
+error.
+
+The network policy still applies, but with weaker guarantees, because the
+vetting proxy can only be set when Chromium is launched. An attached session
+enforces HTTP requests in Playwright routing and guards new page WebSocket
+connections in both loaded and future documents, including frames. Each URL is
+validated and its host resolved and refused when non-public (approvals work as
+above). Disconnecting restores the original WebSocket constructor, and sockets
+remain usable without reloading. It cannot pin the vetted address, so DNS can
+change between the check and the
+connection; it does not see redirect hops; and it cannot block service workers
+or downloads in a context it did not create. Existing connections, cached
+WebSocket constructors and worker-created sockets are outside these guards.
+Attach only to a browser you trust, and set `allow_private_hosts` or
+`allowed_networks` under
+`tool_options.fetch_url` when the target app runs locally.
 
 Browser actions can submit forms on the public web. Gate the interaction tools
 behind the `browser` skill with `skill_gated_tools`. To make activation ask

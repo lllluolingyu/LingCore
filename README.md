@@ -535,7 +535,8 @@ tools: [browser_navigate, browser_snapshot, browser_click, browser_type,
 ```
 
 It shares `fetch_url`'s public-web policy and its `tool_options.fetch_url`
-settings; see
+settings, and `tool_options.browser.cdp_url` attaches it to an already running
+Chromium instead of launching one; see
 [the browser section](docs/plugins.md#bundled-browser-plugin).
 
 ## Skills

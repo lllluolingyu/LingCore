@@ -27,18 +27,30 @@ Design notes:
 - The context is ephemeral (no stored cookies or credentials), service
   workers are blocked so every request stays routable, downloads are refused,
   and JavaScript dialogs are dismissed and reported.
+- ``cdp_url`` attaches to an already running Chromium on loopback instead
+  (e.g. one a test harness prepared and logged in). The session adopts that
+  browser's default context and tabs, and closing only disconnects: it never
+  closes the owner's browser or tabs, only the tabs the session opened itself.
+  The proxy can be set only at launch, so an attached session enforces the
+  host policy in HTTP routing and a reversible page WebSocket guard instead:
+  it still refuses non-public hosts per request, but cannot pin the vetted
+  address, see redirect hops, cover existing connections/cached constructors/
+  worker sockets, or block service workers and downloads in an owner's context.
 """
 
 from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
@@ -62,6 +74,7 @@ if TYPE_CHECKING:
     from playwright.async_api import (
         Browser,
         BrowserContext,
+        CDPSession,
         Dialog,
         Page,
         Playwright,
@@ -81,6 +94,17 @@ _OPTIONS = frozenset(
         "viewport_height",
         "offload_over_chars",
         "max_chars",
+        "cdp_url",
+    }
+)
+# Options that shape a browser LingCore launches; meaningless when attaching.
+_LAUNCH_ONLY = frozenset(
+    {
+        "headless",
+        "executable_path",
+        "chromium_sandbox",
+        "viewport_width",
+        "viewport_height",
     }
 )
 _INSTALL_HINT = (
@@ -105,6 +129,45 @@ class BrowserOptions:
     viewport: tuple[int, int] = (1280, 800)
     offload_over_chars: int = 20_000
     max_chars: int = 40_000
+    cdp_url: str | None = None
+
+
+class _Closable(Protocol):
+    async def close(self) -> None: ...
+
+
+def _parse_cdp_url(raw: object) -> str:
+    """Validate ``cdp_url`` as a credential-free loopback DevTools endpoint.
+
+    Errors never echo the value: a ``ws://`` endpoint's path is the browser's
+    session id, which grants full control of it.
+    """
+    error = ConfigError(
+        f"{OPTION_PATH}.cdp_url must be an http(s) or ws(s) URL of a "
+        "DevTools endpoint on loopback (localhost, 127.0.0.0/8 or ::1)"
+    )
+    if not isinstance(raw, str) or not raw:
+        raise error
+    try:
+        parsed = urlparse(raw)
+        parsed.port  # noqa: B018  (raises on an out-of-range port)
+    except ValueError:
+        raise error from None
+    host = parsed.hostname
+    if (
+        parsed.scheme not in ("http", "https", "ws", "wss")
+        or parsed.username is not None
+        or parsed.password is not None
+        or not host
+    ):
+        raise error
+    if _normal_host(host) != "localhost":
+        try:
+            if not ipaddress.ip_address(host).is_loopback:
+                raise error
+        except ValueError:
+            raise error from None
+    return raw
 
 
 def parse_browser_options(raw: object) -> BrowserOptions:
@@ -123,6 +186,15 @@ def parse_browser_options(raw: object) -> BrowserOptions:
     if unknown:
         raise ConfigError(f"unknown {OPTION_PATH} option(s): {', '.join(unknown)}")
     path = OPTION_PATH
+    cdp_url = None
+    if "cdp_url" in raw:
+        cdp_url = _parse_cdp_url(raw["cdp_url"])
+        launch_only = sorted(str(name) for name in raw if name in _LAUNCH_ONLY)
+        if launch_only:
+            raise ConfigError(
+                f"{path}.{launch_only[0]} cannot be combined with {path}.cdp_url: "
+                "it configures a browser LingCore launches, not one it attaches to"
+            )
     executable = raw.get("executable_path")
     if executable is not None and (not isinstance(executable, str) or not executable):
         raise ConfigError(f"{path}.executable_path must be a non-empty string")
@@ -149,6 +221,7 @@ def parse_browser_options(raw: object) -> BrowserOptions:
         max_chars=int_option(
             raw, "max_chars", defaults.max_chars, minimum=1_000, option_path=path
         ),
+        cdp_url=cdp_url,
     )
 
 
@@ -305,7 +378,7 @@ class _VettingProxy:
 
 
 class BrowserSession:
-    """A lazily launched Chromium plus the request policy guarding it.
+    """A lazily launched (or attached) Chromium plus the request policy guarding it.
 
     Not safe for concurrent use: ``BrowserHooks.use`` serializes callers.
     """
@@ -323,17 +396,104 @@ class BrowserSession:
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
         self._pages: list[Page] = []
+        # Tabs this session opened in an attached browser; closing closes these.
+        self._opened: list[Page] = []
+        self._acting = False
+        self._cdp: CDPSession | None = None
+        self._page_targets: dict[Page, str] = {}
+        self._action_target: str | None = None
+        self._popup_targets: set[str] = set()
+        self._ws_key = f"__lingcore_ws_{uuid4().hex}"
+        self._ws_token = uuid4().hex
+        self._ws_script: _Closable | None = None
+        self._ws_binding: _Closable | None = None
+
+    @property
+    def attached(self) -> bool:
+        """Whether this session drives a browser it did not launch."""
+        return self.options.cdp_url is not None
 
     # -- lifecycle ---------------------------------------------------------
 
     async def page(self) -> Page:
-        """The active page, launching the browser on first use."""
+        """The active page, launching or attaching to the browser on first use."""
         if self._context is None:
-            await self._launch()
+            await (self._attach() if self.attached else self._launch())
         if not self._pages:
             assert self._context is not None
-            self._track(await self._context.new_page())
-        return self._pages[-1]
+            page = await self._context.new_page()
+            if self.attached:
+                self._opened.append(page)
+            self._track(page)
+        page = self._pages[-1]
+        if self.attached and page not in self._page_targets:
+            assert self._context is not None
+            target = await self._context.new_cdp_session(page)
+            try:
+                info = await target.send("Target.getTargetInfo")
+                self._page_targets[page] = info["targetInfo"]["targetId"]
+            finally:
+                await target.detach()
+        return page
+
+    async def _attach(self) -> None:
+        """Connect to the ``cdp_url`` browser and adopt its default context."""
+        playwright_error, _ = _playwright_errors()
+        from playwright.async_api import async_playwright
+
+        options = self.options
+        assert options.cdp_url is not None
+        try:
+            self._playwright = await async_playwright().start()
+            self._browser = await self._playwright.chromium.connect_over_cdp(
+                options.cdp_url, timeout=options.timeout_ms, no_defaults=True
+            )
+            if not self._browser.contexts:
+                raise ToolError("the browser at cdp_url has no open context")
+            self._context = self._browser.contexts[0]
+            self._context.set_default_timeout(options.timeout_ms)
+            for page in self._context.pages:
+                self._track(page, announce=False)
+            self._context.on("page", self._track)
+            self._cdp = await self._browser.new_browser_cdp_session()
+            self._cdp.on("Target.targetCreated", self._popup_created)
+            await self._cdp.send("Target.setDiscoverTargets", {"discover": True})
+            await self._context.route("**/*", self._route)
+            await self._guard_attached_web_sockets()
+        except playwright_error as exc:
+            await self.close()
+            detail = _error_text(exc).replace(options.cdp_url, "<cdp_url>")
+            raise ToolError(
+                f"cannot attach to the browser at {OPTION_PATH}.cdp_url: {detail}"
+            ) from None
+        except BaseException:
+            await self.close()
+            raise
+
+    async def _guard_attached_web_sockets(self) -> None:
+        """Guard both loaded and future documents, preserving native sockets."""
+        assert self._context is not None
+        binding = f"{self._ws_key}_check"
+        self._ws_binding = await self._context.expose_binding(
+            binding, self._allow_web_socket
+        )
+        source = Path(__file__).with_name("websocket_guard.js").read_text("utf-8")
+        config = {"binding": binding, "key": self._ws_key, "token": self._ws_token}
+        script = f"({source})({json.dumps(config)})"
+        self._ws_script = await self._context.add_init_script(script=script)
+        for page in self._context.pages:
+            for frame in page.frames:
+                if not frame.is_detached():
+                    await frame.evaluate(script)
+
+    async def _allow_web_socket(self, source: dict[str, Any], url: str) -> bool:
+        try:
+            if not await self.request_blocked(url):
+                return True
+        except Exception:
+            pass
+        self._record_block(url)
+        return False
 
     async def _launch(self) -> None:
         playwright_error, _ = _playwright_errors()
@@ -380,18 +540,33 @@ class BrowserSession:
             await self.close()
             raise
 
-    def _track(self, page: Page) -> None:
+    def _track(self, page: Page, *, announce: bool = True) -> None:
         if page in self._pages:
             return
-        if self._pages:
+        if self._pages and announce:
             self._notes.append("A new tab opened and is now active.")
         self._pages.append(page)
         page.on("close", self._untrack)
         page.on("dialog", self._dismiss)
 
+    def _popup_created(self, event: dict[str, Any]) -> None:
+        # Target creation precedes the action's completion. Playwright's page
+        # event can arrive much later, once the popup's first navigation loads.
+        info = event["targetInfo"]
+        opener = info.get("openerId")
+        if (
+            self._acting
+            and info["type"] == "page"
+            and (opener == self._action_target or opener in self._popup_targets)
+        ):
+            self._popup_targets.add(info["targetId"])
+
     def _untrack(self, page: Page) -> None:
         if page in self._pages:
             self._pages.remove(page)
+        if page in self._opened:
+            self._opened.remove(page)
+        self._page_targets.pop(page, None)
 
     async def _dismiss(self, dialog: Dialog) -> None:
         self._notes.append(
@@ -407,13 +582,49 @@ class BrowserSession:
 
         Each handle is dropped only once its own cleanup has finished, so a
         close interrupted by cancellation resumes where it stopped when called
-        again.
+        again. An attached browser is only disconnected from: its context
+        stays open, and only the tabs this session opened are closed.
         """
         self._pages = []
         if self._context is not None:
-            await _quietly(self._context.close())
+            if self.attached:
+                while self._opened:
+                    page = self._opened[0]
+                    await _quietly(page.close())
+                    self._untrack(page)
+                if self._cdp is not None:
+                    while self._popup_targets:
+                        target_id = next(iter(self._popup_targets))
+                        await _quietly(
+                            self._cdp.send(
+                                "Target.closeTarget", {"targetId": target_id}
+                            )
+                        )
+                        self._popup_targets.discard(target_id)
+                    await _quietly(self._cdp.detach())
+                    self._cdp = None
+                self._page_targets.clear()
+                if self._ws_script is not None:
+                    await _quietly(self._ws_script.close())
+                    self._ws_script = None
+                for page in self._context.pages:
+                    for frame in page.frames:
+                        await _quietly(
+                            frame.evaluate(
+                                "({key, token}) => globalThis[key]?.restore(token)",
+                                {"key": self._ws_key, "token": self._ws_token},
+                            )
+                        )
+                if self._ws_binding is not None:
+                    await _quietly(self._ws_binding.close())
+                    self._ws_binding = None
+                await _quietly(self._context.unroute_all(behavior="ignoreErrors"))
+            else:
+                await _quietly(self._context.close())
             self._context = None
+        self._opened = []
         if self._browser is not None:
+            # For a connect_over_cdp browser this disconnects without closing it.
             await _quietly(self._browser.close())
             self._browser = None
         if self._playwright is not None:
@@ -487,9 +698,20 @@ class BrowserSession:
         if host not in self._blocked:
             self._blocked.append(host)
 
+    async def request_blocked(self, url: str) -> bool:
+        """Whether routing refuses a page request for ``url``.
+
+        A launched browser's proxy vets hosts, so routing checks only the URL;
+        an attached browser has no proxy, so routing applies the host policy
+        as well (without pinning, which only the proxy can do).
+        """
+        if self.attached:
+            return await self.blocked_reason(url) is not None
+        return await self.url_error(url) is not None
+
     async def _route(self, route: Route, request: Request) -> None:
         try:
-            if await self.url_error(request.url) is None:
+            if not await self.request_blocked(request.url):
                 await route.continue_()
             else:
                 self._record_block(request.url)
@@ -501,7 +723,7 @@ class BrowserSession:
 
     async def _route_web_socket(self, ws: WebSocketRoute) -> None:
         try:
-            if await self.url_error(ws.url) is None:
+            if not await self.request_blocked(ws.url):
                 ws.connect_to_server()
             else:
                 self._record_block(ws.url)
@@ -537,16 +759,33 @@ class BrowserSession:
             self._blocked = []
         return notes
 
-    async def render(self, ctx: ToolContext, notes: list[str] | None = None) -> str:
-        """The active page as a titled AI snapshot plus any pending notes."""
+    async def render(
+        self,
+        ctx: ToolContext,
+        notes: list[str] | None = None,
+        *,
+        ref: str | None = None,
+        depth: int | None = None,
+    ) -> str:
+        """The active page as a titled AI snapshot plus any pending notes.
+
+        ``ref`` limits the snapshot to that element's subtree and ``depth`` to
+        that many levels; refs in a partial snapshot stay valid for actions.
+        """
         playwright_error, _ = _playwright_errors()
         page = await self.page()
+        target = page if ref is None else _locator(page, ref)
+        kwargs: dict[str, Any] = {"mode": "ai"}
+        if depth is not None:
+            kwargs["depth"] = depth
         try:
             title = await page.title()
-            snapshot = await page.aria_snapshot(mode="ai")
+            snapshot = await target.aria_snapshot(**kwargs)
         except playwright_error as exc:
             raise ToolError(f"cannot read the page: {_error_text(exc)}") from None
         lines = [f"[{title or 'untitled'}] {page.url}"]
+        if ref is not None:
+            lines.append(f"(Only the subtree of {ref.strip().removeprefix('ref=')}.)")
         if len(self._pages) > 1:
             lines.append(f"({len(self._pages)} tabs are open; the newest is active.)")
         lines.extend((notes or []) + self.drain_notes())
@@ -659,18 +898,24 @@ async def _act(
             await session.authorize_navigation(ctx, navigate_to)
         page = await session.page()
         notes: list[str] = []
+        session._action_target = session._page_targets.get(page)
+        session._acting = True
         try:
-            await action(page)
-            if settle:
-                # A click may start a navigation; wait briefly for it to land.
-                await page.wait_for_load_state("domcontentloaded", timeout=5_000)
-        except playwright_timeout as exc:
-            notes.append(f"Timed out: {_error_text(exc)}")
-        except playwright_error as exc:
-            raise ToolError(
-                " ".join([_error_text(exc), *session.drain_notes()])
-            ) from None
-        return await session.render(ctx, notes)
+            try:
+                await action(page)
+                if settle:
+                    # A click may start a navigation; wait briefly for it to land.
+                    await page.wait_for_load_state("domcontentloaded", timeout=5_000)
+            except playwright_timeout as exc:
+                notes.append(f"Timed out: {_error_text(exc)}")
+            except playwright_error as exc:
+                raise ToolError(
+                    " ".join([_error_text(exc), *session.drain_notes()])
+                ) from None
+            return await session.render(ctx, notes)
+        finally:
+            session._acting = False
+            session._action_target = None
 
 
 class NavigateArgs(BaseModel):
@@ -706,6 +951,21 @@ class ScreenshotArgs(BaseModel):
     )
 
 
+class SnapshotArgs(BaseModel):
+    ref: str | None = Field(
+        default=None,
+        description=(
+            "Only return this element's subtree (a ref from the latest "
+            "snapshot), e.g. one list or form instead of the whole page."
+        ),
+    )
+    depth: int | None = Field(
+        default=None,
+        ge=1,
+        description="Only return this many levels of the tree below the root.",
+    )
+
+
 class NoArgs(BaseModel):
     pass
 
@@ -735,13 +995,14 @@ async def browser_navigate(args: NavigateArgs, ctx: ToolContext) -> str:
 
 @tool(
     name="browser_snapshot",
-    description="Return the active page's current accessibility snapshot.",
+    description=(
+        "Return the active page's current accessibility snapshot, optionally "
+        "only one element's subtree (ref) or only the top levels (depth)."
+    ),
 )
-async def browser_snapshot(args: NoArgs, ctx: ToolContext) -> str:
-    async def noop(page: Page) -> None:
-        pass
-
-    return await _act(ctx, noop, settle=False)
+async def browser_snapshot(args: SnapshotArgs, ctx: ToolContext) -> str:
+    async with _hooks(ctx).use(ctx) as session:
+        return await session.render(ctx, ref=args.ref, depth=args.depth)
 
 
 @tool(
@@ -838,8 +1099,9 @@ async def browser_screenshot(args: ScreenshotArgs, ctx: ToolContext) -> ToolOutp
 @tool(
     name="browser_close",
     description=(
-        "Close the browser, discarding its tabs, cookies and approvals. The "
-        "next browser tool starts a fresh one."
+        "Close the browser, discarding its tabs, cookies and approvals (an "
+        "attached browser is only disconnected). The next browser tool starts "
+        "a fresh session."
     ),
 )
 async def browser_close(args: NoArgs, ctx: ToolContext) -> str:

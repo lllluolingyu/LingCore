@@ -5,6 +5,17 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+### Added
+
+- The browser plugin can attach to an already running Chromium on loopback
+  (`tool_options.browser.cdp_url`) instead of launching one. The session adopts
+  the browser's default context, tabs and preferences and only disconnects on
+  close, cleaning up tabs and popups created by its tools. Its network policy
+  uses HTTP routing and a reversible page WebSocket guard, without the vetting
+  proxy's address pinning or redirect-hop coverage.
+- `browser_snapshot` takes optional `ref` and `depth` arguments to return one
+  element's subtree or only the top levels of the page.
+
 ## [0.4.0] - 2026-10-10
 
 ### Added
