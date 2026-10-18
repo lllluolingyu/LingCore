@@ -35,7 +35,7 @@ dependencies = [
 pdf = ["pymupdf==1.27.2.3"]
 telegram = ["python-telegram-bot[rate-limiter,webhooks]==22.8"]
 # The bundled browser plugin; also run `playwright install chromium` once.
-browser = ["playwright==1.63.0"]
+browser = ["playwright==1.64.0"]
 
 [project.scripts]
 lingcore = "lingcore.__main__:main"
@@ -53,7 +53,7 @@ dev = [
     "pymupdf==1.27.2.3",  # keep in sync with optional-dependencies.pdf
     # Keep in sync with optional-dependencies.telegram.
     "python-telegram-bot[rate-limiter,webhooks]==22.8",
-    "playwright==1.63.0",  # keep in sync with optional-dependencies.browser
+    "playwright==1.64.0",  # keep in sync with optional-dependencies.browser
     "ruff==0.16.1",
 ]
 
