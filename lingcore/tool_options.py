@@ -31,6 +31,13 @@ SEARCH_DEFAULT_EXCLUDE_DIRS = (
     "dist",
     "build",
     ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".astro",
+    ".turbo",
+    ".parcel-cache",
+    ".vite",
+    "storybook-static",
 )
 _SEARCH_OPTION_NAMES = frozenset(
     {

@@ -94,6 +94,13 @@ tool_options:
   #     - dist
   #     - build
   #     - .next
+  #     - .nuxt
+  #     - .svelte-kit
+  #     - .astro
+  #     - .turbo
+  #     - .parcel-cache
+  #     - .vite
+  #     - storybook-static
   run_shell:
     # Default per-command timeout; the model may request up to max_timeout for
     # a slow build or test suite by passing `timeout` on the call.
