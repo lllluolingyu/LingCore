@@ -741,14 +741,32 @@ commitments.
    - Namespace tools and require explicit ceiling entries. Server descriptions
      remain untrusted; consent, cancellation and progress use frontend contracts.
 
-5. **Next — Tracing and evaluations**
+5. **v0.5 — Frontend development**
+   - Ship a separate `profiles/frontend/` profile instead of widening `coding`:
+     it enables `plugins: [browser]` and the `browser_*` tools (explicit plugin
+     consent, optional `lingcore[browser]` extra), carries a frontend
+     `workflow.md` (type-check, bundler build, snapshot + screenshot
+     verification, accessibility semantics), and documents opting the sandbox
+     into `network: true` and mounting user-space Node toolchains
+     (nvm/fnm/volta/bun) through `read_only_mounts`.
+   - Add runtime viewport control (a `browser_resize` tool or a viewport
+     argument) so one session can check mobile and desktop breakpoints; the
+     startup size is already configurable through `tool_options.browser`.
+   - Design a background-process tool for dev servers (`npm run dev`, `vite`,
+     `next dev`): start/logs/stop/list with bounded log capture, kill+reap on
+     Stop and `Agent.aclose`, an explicit Telegram policy, and a deliberate
+     answer to sandbox reachability — a server inside Bubblewrap's private
+     network namespace is unreachable from the host-side browser. Until then,
+     run the dev server on the host and approve `browser_navigate` to localhost.
+
+6. **Next — Tracing and evaluations**
    - Trace model requests, tools, retrieval, retries, compaction, confirmation
      decisions, token usage and latency, excluding sensitive content by default.
      Start with local structured traces and an optional OpenTelemetry exporter.
    - Add `lingcore eval` for profile datasets, tool-trajectory assertions,
      quality checks, latency/cost reporting and regression comparisons.
 
-6. **Later — Durable workflows**
+7. **Later — Durable workflows**
    - Build a detached turn runner so an in-flight task can survive a browser
      disconnect, with ownership, leases, progress and reconnect attachment.
    - Extend edit/fork flows with regenerate-without-edit and merge/export controls.
