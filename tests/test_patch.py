@@ -144,3 +144,93 @@ async def test_escape_rejected(ctx):
         await patch_file(
             PatchArgs(path="../evil.py", diff="@@ -1,1 +1,1 @@\n-a\n+b\n"), ctx
         )
+
+
+async def test_lf_hunk_patches_crlf_file_and_keeps_endings(ctx):
+    # read_file shows normalized lines, so models write LF hunks; interior CRLF
+    # lines must still match and the file's own endings must survive the write.
+    path = ctx.workspace / "f.py"
+    path.write_bytes(b"a\r\nb\r\nc\r\nd\r\n")
+    diff = "@@ -2,2 +2,3 @@\n b\n-c\n+C\n+c2\n"
+    await patch_file(PatchArgs(path="f.py", diff=diff), ctx)
+    assert path.read_bytes() == b"a\r\nb\r\nC\r\nc2\r\nd\r\n"
+
+
+async def test_untouched_crlf_lines_are_not_rewritten(ctx):
+    path = ctx.workspace / "f.py"
+    path.write_bytes(b"a\r\nb\r\nc\r\n")
+    await patch_file(PatchArgs(path="f.py", diff="@@ -1,1 +1,1 @@\n-a\n+A\n"), ctx)
+    assert path.read_bytes() == b"A\r\nb\r\nc\r\n"
+
+
+async def test_lf_hunk_patches_crlf_file_without_final_newline(ctx):
+    path = ctx.workspace / "f.py"
+    path.write_bytes(b"a\r\nb\r\nc")
+    diff = "@@ -2,2 +2,2 @@\n b\n-c\n+C\n"
+    await patch_file(PatchArgs(path="f.py", diff=diff), ctx)
+    assert path.read_bytes() == b"a\r\nb\r\nC"
+
+
+def test_apply_lf_hunk_to_cr_only_file():
+    assert _apply("a\rb\rc\r", "@@ -2,1 +2,1 @@\n-b\n+B\n") == "a\rB\rc\r"
+
+
+def test_apply_crlf_adaptation_still_rejects_stale_hunk():
+    with pytest.raises(ToolError, match="does not match"):
+        _apply("a\r\nb\r\nc\r\n", "@@ -2,1 +2,1 @@\n-x\n+B\n")
+
+
+async def test_rejects_non_utf8_file(ctx):
+    path = ctx.workspace / "bin.dat"
+    path.write_bytes(b"\xff\xfe\x00a\n")
+    with pytest.raises(ToolError, match="not a UTF-8 text file"):
+        await patch_file(
+            PatchArgs(path="bin.dat", diff="@@ -1,1 +1,1 @@\n-a\n+b\n"), ctx
+        )
+    assert path.read_bytes() == b"\xff\xfe\x00a\n"
+
+
+async def test_rejects_symlink_escaping_workspace(ctx, tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.py"
+    outside.write_text("a\n", encoding="utf-8")
+    try:
+        (ctx.workspace / "link.py").symlink_to(outside)
+        with pytest.raises(ToolError, match="escapes workspace"):
+            await patch_file(
+                PatchArgs(path="link.py", diff="@@ -1,1 +1,1 @@\n-a\n+b\n"), ctx
+            )
+        assert outside.read_text() == "a\n"
+    finally:
+        outside.unlink()
+
+
+async def test_patch_anchors_parent_against_swap(ctx, tmp_path, monkeypatch):
+    import shutil
+
+    from lingcore.paths import ConfinedDirectory
+
+    parent = ctx.workspace / "nested"
+    parent.mkdir()
+    (parent / "f.py").write_text("a\n", encoding="utf-8")
+    moved = tmp_path.parent / f"{tmp_path.name}-nested-held"
+    real_open = ConfinedDirectory.open_regular
+    swapped = False
+
+    def swap_then_open(self, name, mode="rb", *, permissions=0o644):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            parent.rename(moved)
+            moved.joinpath("f.py").write_text("a\n", encoding="utf-8")
+            parent.symlink_to(moved, target_is_directory=True)
+        return real_open(self, name, mode, permissions=permissions)
+
+    monkeypatch.setattr(ConfinedDirectory, "open_regular", swap_then_open)
+    try:
+        with pytest.raises(ToolError):
+            await patch_file(
+                PatchArgs(path="nested/f.py", diff="@@ -1,1 +1,1 @@\n-a\n+b\n"), ctx
+            )
+        assert (moved / "f.py").read_text() == "a\n"
+    finally:
+        shutil.rmtree(moved, ignore_errors=True)

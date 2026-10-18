@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
 from pydantic import BaseModel, Field
 
 from lingcore.errors import ToolError
+from lingcore.paths import PathEscapeError, confined_directory, resolve_confined
 from lingcore.tools import ToolContext, tool
 
 
@@ -25,14 +26,6 @@ class PatchArgs(BaseModel):
             "Must contain exactly one file's hunks; --- / +++ headers are optional."
         )
     )
-
-
-def _resolve(ctx: ToolContext, path: str) -> Path:
-    base = ctx.workspace.resolve()
-    full = (base / path).resolve()
-    if full != base and not full.is_relative_to(base):
-        raise ToolError(f"path escapes workspace: {path!r}")
-    return full
 
 
 @dataclass(slots=True)
@@ -65,6 +58,21 @@ def _lines_match(actual: list[str], expected: list[str], *, at_eof: bool) -> boo
     return True
 
 
+def _file_newline(text: str) -> str | None:
+    """The file's non-LF line terminator, if it uses one (``\\r\\n`` or ``\\r``)."""
+    return "\r\n" if "\r\n" in text else "\r" if "\r" in text else None
+
+
+def _with_newline(lines: list[str], newline: str) -> list[str]:
+    """Translate LF-terminated diff lines to the file's own terminator."""
+    return [
+        line[:-1] + newline
+        if line.endswith("\n") and not line.endswith("\r\n")
+        else line
+        for line in lines
+    ]
+
+
 def _apply(text: str, diff: str, *, target: str | None = None) -> str:
     """Apply unified diff hunks to *text*. Returns the patched text.
 
@@ -73,7 +81,8 @@ def _apply(text: str, diff: str, *, target: str | None = None) -> str:
     another by mistake.
     """
     lines = text.splitlines(keepends=True)
-    ended_with_newline = text.endswith("\n")
+    ended_with_newline = text.endswith(("\n", "\r"))
+    newline = _file_newline(text)
     hunks = _parse_hunks(diff)
     if not hunks:
         raise ToolError("no hunks found in diff")
@@ -93,24 +102,33 @@ def _apply(text: str, diff: str, *, target: str | None = None) -> str:
                 f"({len(lines)} lines)"
             )
         actual = lines[idx:end]
-        if not _lines_match(actual, hunk.old_lines, at_eof=end == len(lines)):
-            raise ToolError(
-                f"hunk @@ -{hunk.orig_start},{hunk.orig_len} does not match file "
-                f"content; expected {''.join(hunk.old_lines)!r}, "
-                f"got {''.join(actual)!r}"
-            )
-        lines[idx:end] = hunk.new_lines
+        at_eof = end == len(lines)
+        new_lines = hunk.new_lines
+        if not _lines_match(actual, hunk.old_lines, at_eof=at_eof):
+            # read_file shows normalized lines, so a model writes LF hunks even
+            # for a CRLF/CR file. Retry with the file's terminator (like
+            # edit_file's _match_newlines) and keep its endings in the result.
+            if newline is None or not _lines_match(
+                actual, _with_newline(hunk.old_lines, newline), at_eof=at_eof
+            ):
+                raise ToolError(
+                    f"hunk @@ -{hunk.orig_start},{hunk.orig_len} does not match file "
+                    f"content; expected {''.join(hunk.old_lines)!r}, "
+                    f"got {''.join(actual)!r}"
+                )
+            new_lines = _with_newline(new_lines, newline)
+        lines[idx:end] = new_lines
 
     result = "".join(lines)
     # Diff lines are always LF-terminated; restore the file's original
     # trailing-newline state so patching the last line doesn't silently add or
     # drop a final newline.
     if ended_with_newline:
-        if result and not result.endswith("\n"):
-            result += "\n"
+        if result and not result.endswith(("\n", "\r")):
+            result += newline or "\n"
     elif result.endswith("\r\n"):
         result = result[:-2]
-    elif result.endswith("\n"):
+    elif result.endswith(("\n", "\r")):
         result = result[:-1]
     return result
 
@@ -250,12 +268,29 @@ def _check_header_path(diff: str, target: str) -> None:
     )
 )
 async def patch_file(args: PatchArgs, ctx: ToolContext) -> str:
-    full = _resolve(ctx, args.path)
-    if not full.is_file():
-        raise ToolError(f"not a file: {args.path!r}")
-    original = full.read_text("utf-8")
-    patched = _apply(original, args.diff, target=args.path)
-    full.write_text(patched, encoding="utf-8")
+    base = ctx.workspace.resolve()
+    try:
+        rel = resolve_confined(base, args.path).relative_to(base)
+        # Like edit_file: one descriptor-anchored read/write keeps the
+        # validated parent in place for the whole patch, and the file is read
+        # as bytes so its line endings survive (text mode would turn CRLF
+        # into LF on every patch).
+        with confined_directory(base, rel.parent) as directory:
+            with directory.open_regular(rel.name, "r+b") as stream:
+                try:
+                    original = stream.read().decode("utf-8")
+                except UnicodeDecodeError:
+                    raise ToolError(f"not a UTF-8 text file: {args.path!r}") from None
+                patched = _apply(original, args.diff, target=args.path)
+                stream.seek(0)
+                stream.write(patched.encode("utf-8"))
+                stream.truncate()
+    except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+        raise ToolError(f"not a file: {args.path!r}") from None
+    except PathEscapeError as exc:
+        raise ToolError(str(exc)) from None
+    except OSError as exc:
+        raise ToolError(f"cannot patch {args.path!r}: {exc}") from None
     orig_lines = original.count("\n")
     new_lines = patched.count("\n")
     return f"patched {args.path} ({orig_lines} → {new_lines} lines)"
