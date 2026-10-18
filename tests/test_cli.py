@@ -891,3 +891,37 @@ def test_input_recall_is_scoped_to_one_session(monkeypatch):
     fresh, _ = cli._sessions()
     assert fresh is not main
     assert list(fresh.history.get_strings()) == []
+
+
+async def test_cli_confirm_background_process_never_offers_always_allow(monkeypatch):
+    from rich.console import Console
+
+    from lingcore.events import ToolCallStarted
+    from lingcore.message import ToolCall
+
+    opts: dict = {}
+    cli = CLIFrontend(tool_options=opts)
+    cli.console = Console(record=True, width=200)
+    prompts: list[str] = []
+
+    def fake_input(prompt, *a, **k):
+        prompts.append(prompt)
+        return "A"
+
+    monkeypatch.setattr(cli.console, "input", fake_input)
+    command = "npm run dev"
+    # Also a run_shell command this turn: the process framing still wins, so
+    # "A" can never write run_shell's allowlist.
+    _announce_shell(cli, command)
+    cli.render(
+        ToolCallStarted(
+            ToolCall(id="p", name="process_start", arguments={"command": command})
+        )
+    )
+    assert await cli.confirm(command) is True
+    out = cli.console.export_text()
+    assert "start background process?" in out and f"$ {command}" in out
+    assert "always allow" not in prompts[0]
+    assert opts.get("run_shell", {}).get("allow_patterns", []) == []
+    cli._start_turn()
+    assert cli._process_commands == set()

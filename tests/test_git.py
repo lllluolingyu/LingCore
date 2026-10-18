@@ -200,7 +200,7 @@ def test_git_environment_does_not_inherit_ambient_git_overrides(repo, monkeypatc
         assert "HOME" not in environment
 
 
-@pytest.mark.parametrize("profile_name", ["coding", "coding_ollama"])
+@pytest.mark.parametrize("profile_name", ["coding", "frontend"])
 def test_bundled_coding_profiles_enable_git(profile_name):
     profile_dir = Path(__file__).parents[1] / "profiles" / profile_name
     assert "git" in AgentProfile.load(profile_dir).tools

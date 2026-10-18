@@ -190,7 +190,7 @@ def test_every_shipped_profile_that_needs_env_has_complete_safe_example(
 
     expected = {
         "coding": {"LLY_API_KEY"},
-        "coding_ollama": set(),
+        "frontend": {"LLY_API_KEY"},
         "daily": {"DEEPSEEK_API_KEY"},
         "teaching": {"LLY_API_KEY", "CANVAS_URL", "CANVAS_TOKEN"},
     }

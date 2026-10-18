@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Literal
@@ -316,15 +316,40 @@ async def launch_shell(
     workspace: Path,
     options: ShellOptions,
     getenv: Callable[[str], str | None],
+    pass_fds: Sequence[int] = (),
+    extra_env: Mapping[str, str] | None = None,
 ) -> ShellExecution:
-    """Launch a command with the selected runner, without fallback."""
+    """Launch a command with the selected runner, without fallback.
+
+    Every runner gives the command ``/dev/null`` as stdin: an inherited stdin
+    is the frontend's terminal, which a command (or a dev server's keyboard
+    shortcuts) would otherwise read from and switch to raw mode.
+
+    ``pass_fds`` keeps those descriptors open, at the same numbers, in the
+    Bubblewrap guest; no other runner can carry them. ``extra_env`` holds
+    fixed, non-secret guest variables (e.g. ``NO_COLOR``); secrets go through
+    the sandbox's ``pass_env``.
+    """
     sandbox = options.sandbox
+    if pass_fds and not isinstance(sandbox, BubblewrapSandbox):
+        raise ToolError("only the bubblewrap runner can pass descriptors")
+    extra = dict(extra_env or {})
+    for name, value in extra.items():
+        if not _ENV_NAME.fullmatch(name) or "\x00" in value or "\n" in value:
+            raise ToolError(f"invalid extra environment variable {name!r}")
     if sandbox is None:
-        return await _launch_host(command, workspace)
+        return await _launch_host(command, workspace, extra)
     passed = _passed_environment(sandbox.pass_env, getenv)
     if isinstance(sandbox, BubblewrapSandbox):
-        return await _launch_bubblewrap(command, workspace, sandbox, passed)
-    return await _launch_oci(command, workspace, sandbox, passed)
+        return await _launch_bubblewrap(
+            command,
+            workspace,
+            sandbox,
+            passed,
+            pass_fds=tuple(pass_fds),
+            extra_env=extra,
+        )
+    return await _launch_oci(command, workspace, sandbox, passed, extra_env=extra)
 
 
 def _validate_environment_names(values: list[str]) -> list[str]:
@@ -413,11 +438,15 @@ def resolve_sandbox_executable(executable: str, workspace: Path, label: str) -> 
     return resolved
 
 
-async def _launch_host(command: str, workspace: Path) -> ShellExecution:
+async def _launch_host(
+    command: str, workspace: Path, extra_env: Mapping[str, str] | None = None
+) -> ShellExecution:
     try:
         process = await asyncio.create_subprocess_shell(
             command,
             cwd=str(workspace),
+            env={**os.environ, **extra_env} if extra_env else None,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             **_process_group_kwargs(),
@@ -550,6 +579,9 @@ async def _launch_bubblewrap(
     workspace: Path,
     config: BubblewrapSandbox,
     passed: Mapping[str, str],
+    *,
+    pass_fds: tuple[int, ...] = (),
+    extra_env: Mapping[str, str] | None = None,
 ) -> ShellExecution:
     if not sys.platform.startswith("linux"):
         raise ToolError("bubblewrap sandboxing is supported only on Linux hosts")
@@ -562,6 +594,7 @@ async def _launch_bubblewrap(
         "TMPDIR": "/tmp",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
+        **(extra_env or {}),
         **aliased_environment,
     }
     try:
@@ -569,8 +602,10 @@ async def _launch_bubblewrap(
             *_bubblewrap_argv(executable, command, workspace, config, aliases=aliases),
             cwd=str(workspace),
             env=environment,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            pass_fds=pass_fds,
             **_process_group_kwargs(),
         )
     except OSError as exc:
@@ -687,6 +722,7 @@ def _oci_create_argv(
     config: OciSandbox,
     *,
     environment_file: Path | None = None,
+    extra_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     assert config.workspace_target is not None
     assert config.command_prefix is not None
@@ -717,6 +753,8 @@ def _oci_create_argv(
         if environment_file is None:
             raise ValueError("OCI pass_env requires a staged environment file")
         argv.extend(["--env-file", str(environment_file)])
+    for name, value in (extra_env or {}).items():
+        argv.extend(["--env", f"{name}={value}"])
     for mount in config.read_only_mounts:
         argv.extend(
             [
@@ -762,6 +800,8 @@ async def _launch_oci(
     workspace: Path,
     config: OciSandbox,
     passed: Mapping[str, str],
+    *,
+    extra_env: Mapping[str, str] | None = None,
 ) -> ShellExecution:
     executable = resolve_sandbox_executable(
         config.executable, workspace, config.runtime
@@ -792,6 +832,7 @@ async def _launch_oci(
                 workspace,
                 config,
                 environment_file=environment_file,
+                extra_env=extra_env,
             ),
             timeout=60,
             environment=control_env,
@@ -822,6 +863,7 @@ async def _launch_oci(
             "--attach",
             name,
             env=control_env,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             **_process_group_kwargs(),
@@ -1020,6 +1062,7 @@ async def _run_control(
         process = await asyncio.create_subprocess_exec(
             *argv,
             env=environment,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             **_process_group_kwargs(),

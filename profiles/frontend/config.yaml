@@ -1,0 +1,193 @@
+# LingCore frontend-development profile (keyed provider).
+# Secrets never live here — api_key_env only *names* the env var holding the key.
+# Copy .env.example to .env for local configuration.
+#
+# The coding agent plus a headless browser for checking what it built, and
+# background processes for dev servers and watchers. Both are bundled plugins
+# (`browser`, `process`): listing them under `plugins:` is explicit consent
+# to run their code. The browser needs the optional Playwright extra:
+#
+#   uv sync --extra browser        # or: pip install 'lingcore[browser]'
+#   uv run playwright install chromium
+#
+# `uv run lingcore doctor -p profiles/frontend` reports a missing Playwright.
+
+name: frontend
+# Where the agent's file tools and shell operate. Unset resolves to
+# ./workspace inside this profile dir — point it at a real project with
+# --workspace or LINGCORE_WORKSPACE.
+workspace: ${LINGCORE_WORKSPACE:-}
+
+llm:
+  model: ${LINGCORE_MODEL:-claude-opus-5-5}
+  base_url: ${LINGCORE_BASE_URL:-https://www.cctq.ai}
+  api_key_env: ${LINGCORE_API_KEY_ENV:-LLY_API_KEY}
+  # Route same-session requests to the same warm prompt-cache node. Turn off if
+  # your endpoint rejects the prompt_cache_key field.
+  send_prompt_cache_key: true
+  # Screenshots are images: the model must accept them natively, or configure
+  # media_fallback.image with a vision model to describe them.
+  modalities: [image, file]
+  sampling:
+    temperature: 0.2
+
+persona:
+  # Inline fallback — role.md / workflow.md / world.md are loaded automatically
+  # if present, and the browser skill (declared below) appends its guidance.
+  system_prompt: |
+    You are a frontend engineering assistant with a headless browser for
+    verifying your changes.
+  # The workspace's own agent instructions (build/test commands, conventions)
+  # are re-read into the prompt each request; the first file found wins.
+  project_instructions:
+    - AGENTS.md
+    - CLAUDE.md
+
+plugins:
+  - browser
+  - process
+
+# Statically engage both skills: their instructions become always-on prompt
+# layers, so the model knows the tools without activating them.
+skills:
+  - browser
+  - process
+
+tools:
+  - read_file
+  - pdf2md
+  - write_file
+  - edit_file
+  - list_dir
+  - search
+  - git
+  - run_shell
+  - fetch_url
+  - patch_file
+  - todo_write
+  - activate_skill
+  - browser_navigate
+  - browser_snapshot
+  - browser_click
+  - browser_type
+  - browser_select
+  - browser_press
+  - browser_back
+  - browser_screenshot
+  - browser_resize
+  - browser_close
+  - process_start
+  - process_logs
+  - process_stop
+  - process_list
+
+tool_options:
+  activate_skill:
+    skills_dir: skills
+    allow_concurrent: false
+  browser:
+    # Seconds per browser action; dev servers compile a route on first load.
+    timeout: 30
+    # The startup viewport. browser_resize changes it during a session.
+    viewport_width: 1280
+    viewport_height: 800
+  # Background processes run in the run_shell sandbox below. A declared port
+  # (process_start's `port`) is bridged to the agent's browser at
+  # http://localhost:<port>/ while the sandbox network stays off; the server
+  # itself reaches nothing. Every start asks for confirmation.
+  process:
+    max_processes: 3
+    # Seconds a process may run before it is stopped (Bubblewrap has no CPU or
+    # memory budget, so this is the bound on a forgotten server).
+    max_lifetime: 3600
+    # Auto-approved starts, matched like run_shell's patterns. Kept separate:
+    # approving `npm run build` for run_shell never approves a server here.
+    # allow_patterns:
+    #   - "npm run dev"
+    allow_patterns: []
+  # Search is bounded and pruned by default; the default exclude_dirs already
+  # skip node_modules, dist, build and the framework caches (.next, .nuxt,
+  # .svelte-kit, .astro, .turbo, .parcel-cache, .vite, storybook-static).
+  # search:
+  #   max_files_scanned: 5000
+  run_shell:
+    # Default per-command timeout; the model may request up to max_timeout for
+    # a slow build or test suite by passing `timeout` on the call.
+    timeout: 180
+    max_timeout: 1800
+    require_confirmation: true
+    offload_over_chars: 8000
+    # Auto-approved command patterns (no confirmation prompt). A multi-token
+    # pattern matches that command plus ANY trailing arguments; a bare program
+    # name matches only itself. None ship by default: each of these runs
+    # project code (build plugins, test setup files, package scripts), so every
+    # pattern is an explicit operator decision. Shell control syntax is never
+    # auto-approved. A starting point for an npm project:
+    # allow_patterns:
+    #   - "npx tsc --noEmit"
+    #   - "npm run lint"
+    #   - "npm run build"
+    #   - "npm test"
+    allow_patterns: []
+    sandbox:
+      backend: bubblewrap
+      executable: /usr/bin/bwrap
+      # Off by default: builds, type-checks, tests and bridged dev servers work
+      # offline once node_modules exists. `npm install`/`pnpm install` need the
+      # network; `network: true` gives commands the host network namespace,
+      # including host loopback and private services, with no egress filtering
+      # (docs/sandboxing.md), and disables the dev-server port bridge. Prefer
+      # installing dependencies yourself.
+      network: false
+      # HOME is /tmp/home on this tmpfs, so package-manager caches land here.
+      tmpfs_mb: 1024
+      # A distribution Node (/usr/bin/node) is visible as is. A user-space
+      # toolchain must be mounted read-only (absolute source path) and put on
+      # PATH, e.g. for nvm:
+      #   path: /opt/node/bin:/usr/local/bin:/usr/bin:/bin
+      #   read_only_mounts:
+      #     - source: <home>/.nvm/versions/node/v22.11.0
+      #       target: /opt/node
+      # fnm keeps versions in ~/.local/share/fnm/node-versions/<v>/installation
+      # and Bun in ~/.bun (mount it at /opt/bun and add /opt/bun/bin to PATH).
+      path: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      pass_env: []
+      read_only_mounts: []
+  # The network policy for fetch_url *and* the browser (one shared setting).
+  # A local dev server (http://localhost:5173) is a non-public host:
+  # browser_navigate asks once, and the approval covers that hostname for the
+  # rest of the browser session. `allow_private_hosts: true` skips every such
+  # prompt for both tools and every private host — prefer approving.
+  fetch_url:
+    offload_over_chars: 8000
+    # Behind a TUN-mode fake-IP proxy (Clash/mihomo, Surge, ...) every host
+    # resolves into the benchmarking ranges below, so every fetch asks for
+    # approval as non-public.
+    # Exempting them lets the proxy route the request, but the proxy then picks
+    # the real address, so a hostname pointing at a private host is no longer
+    # caught (IP literals and localhost still are).
+    allowed_networks: [198.18.0.0/15, "2001:2::/48"]
+  read_file:
+    max_lines: 2000
+    max_line_chars: 2000
+  list_dir:
+    max_entries: 200
+
+memory:
+  # Accessibility snapshots and build output are large; size for real projects.
+  max_messages: 400
+  max_tokens: 120000
+  evict_to_ratio: 0.5
+  compaction:
+    enabled: true
+    compact_at_ratio: 0.85
+    keep_recent_ratio: 0.35
+    max_summary_chars: 8000
+
+loop:
+  # Edit, build, look, fix loops add up.
+  max_iters: 100
+  parallel_tools: true
+
+guardrail:
+  policy: noop

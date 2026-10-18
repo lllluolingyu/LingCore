@@ -70,7 +70,7 @@ def allowlist_pattern_for(command: str) -> str:
     return " ".join(shlex.quote(p) for p in parts)
 
 
-def _matches_allowlist(command: str, patterns: list[str]) -> bool:
+def matches_allowlist(command: str, patterns: list[str]) -> bool:
     """Return True only for simple commands matching an allowlisted pattern.
 
     A *multi-token* pattern (e.g. ``git status``) matches that command plus any
@@ -113,7 +113,7 @@ async def run_shell(args: ShellArgs, ctx: ToolContext) -> str:
     except (ValidationError, ValueError) as exc:
         raise ToolError(f"invalid run_shell options: {exc}") from None
 
-    needs_confirm = options.require_confirmation and not _matches_allowlist(
+    needs_confirm = options.require_confirmation and not matches_allowlist(
         args.command, options.allow_patterns
     )
 

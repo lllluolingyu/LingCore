@@ -11,6 +11,7 @@ requested_tools:
 - browser_press
 - browser_back
 - browser_screenshot
+- browser_resize
 - browser_close
 ---
 
@@ -34,6 +35,10 @@ How the tools fit together:
   only the top levels; this keeps long pages short.
 - `browser_screenshot` attaches an image when layout, charts or images matter.
   The snapshot is the source of truth for text and refs.
+- `browser_resize` changes the active tab's viewport (e.g. 390x844 for a
+  phone, 1280x800 for a desktop) to check responsive layouts; screenshot
+  afterwards to see the result. It changes only the size, not touch or the
+  user agent.
 - `browser_close` discards the session (tabs, cookies, approvals).
 
 Guidance:

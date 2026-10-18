@@ -97,14 +97,17 @@ jobs:
           /tmp/lingcore-base/bin/lingcore --help
           work="$(mktemp -d)"
           export LINGCORE_STATE_HOME="$work/state"
+          # A placeholder model key, so the Telegram token below is doctor's
+          # only error.
+          export LLY_API_KEY=ci-placeholder
           /tmp/lingcore-base/bin/lingcore profile list
-          /tmp/lingcore-base/bin/lingcore profile init coding_ollama --name coding
+          /tmp/lingcore-base/bin/lingcore profile init coding
           /tmp/lingcore-base/bin/lingcore --list-sessions
           profile="$work/state/profiles/coding"
           printf '%s\n' \
             'token_env: TELEGRAM_BOT_TOKEN' \
             'allowed_user_ids: [1]' > "$profile/telegram.yaml"
-          printf '%s\n' 'TELEGRAM_BOT_TOKEN=' > "$profile/.env.example"
+          printf '%s\n' 'TELEGRAM_BOT_TOKEN=' >> "$profile/.env.example"
           set +e
           /tmp/lingcore-base/bin/lingcore doctor \
             --telegram-config "$profile/telegram.yaml"

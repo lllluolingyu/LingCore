@@ -1,0 +1,14 @@
+name: process
+version: 1.0.0
+api: 1
+description: Run long-lived commands (dev servers, watchers) in the background in
+  the run_shell sandbox, read their logs, and let the browser reach a declared port.
+module: process_tools.py
+provides:
+- process_start
+- process_logs
+- process_stop
+- process_list
+hooks: ProcessHooks
+# Closing stops every process; an OCI removal can take a while.
+hook_timeout: 60

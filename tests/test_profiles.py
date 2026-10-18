@@ -16,13 +16,15 @@ from lingcore.profiles import (
 
 def test_initialize_profile_copies_only_declared_template_files(tmp_path):
     destination = tmp_path / "local-agent"
-    initialized = initialize_profile("coding_ollama", destination=destination)
+    initialized = initialize_profile("coding", destination=destination)
 
     assert initialized == destination
-    assert {path.name for path in destination.iterdir()} == {"config.yaml"}
+    assert {path.name for path in destination.iterdir()} == set(
+        PROFILE_TEMPLATE_FILES["coding"]
+    )
     assert not (destination / "sessions.db").exists()
     assert not (destination / "workspace").exists()
-    assert AgentProfile.load(destination).name == "coding_ollama"
+    assert AgentProfile.load(destination).name == "coding"
 
 
 def test_initialize_profile_never_overwrites_existing_directory(tmp_path):
@@ -49,13 +51,13 @@ def test_profile_cli_lists_and_initializes(tmp_path, capsys):
     listed = capsys.readouterr().out
     assert set(PROFILE_TEMPLATE_FILES) <= set(listed.split())
 
-    destination = tmp_path / "ollama"
+    destination = tmp_path / "frontend"
     assert (
         main(
             [
                 "profile",
                 "init",
-                "coding_ollama",
+                "frontend",
                 "--destination",
                 str(destination),
             ]
@@ -63,7 +65,7 @@ def test_profile_cli_lists_and_initializes(tmp_path, capsys):
         == 0
     )
     assert (destination / "config.yaml").is_file()
-    assert "Initialized 'coding_ollama'" in capsys.readouterr().out
+    assert "Initialized 'frontend'" in capsys.readouterr().out
 
 
 def test_main_help_advertises_profile_management(capsys):

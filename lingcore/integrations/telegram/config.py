@@ -255,6 +255,13 @@ def _resolve_state_path(profile_dir: Path, config: TelegramConfig) -> Path:
 def _validate_profile_policy(profile: "AgentProfile") -> None:
     if not profile.sessions.enabled:
         raise ConfigError("Telegram requires sessions.enabled: true")
+    if "process_start" in profile.tools:
+        # Unattended per-user runtimes are evicted and rebuilt in one process;
+        # a background process would die silently with its runtime.
+        raise ConfigError(
+            "Telegram refuses process_start: background processes need an "
+            "attended frontend (CLI or LingChat)"
+        )
     if "run_shell" not in profile.tools:
         return
     raw_options = profile.tool_options.get("run_shell", {})

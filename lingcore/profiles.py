@@ -26,7 +26,13 @@ PROFILE_TEMPLATE_FILES: dict[str, tuple[str, ...]] = {
         "workflow.md",
         "world.md",
     ),
-    "coding_ollama": ("config.yaml",),
+    "frontend": (
+        ".env.example",
+        "config.yaml",
+        "role.md",
+        "workflow.md",
+        "world.md",
+    ),
     "daily": (
         ".env.example",
         "config.yaml",

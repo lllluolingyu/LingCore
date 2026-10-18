@@ -340,6 +340,11 @@ def _brief(value: object, limit: int = 40) -> str:
     return _short(text, limit)
 
 
+# Tools whose headline argument is a shell command: shown as "$ command", and
+# their confirmations get command framing.
+COMMAND_TOOLS = frozenset({"run_shell", "process_start"})
+
+
 def _call_text(call: ToolCall) -> Text:
     """One-line summary of a tool call: marker, name, headline argument, rest.
 
@@ -347,7 +352,8 @@ def _call_text(call: ToolCall) -> Text:
     output, so they must render literally.
     """
     args: dict[str, Any] = call.arguments
-    text = Text(no_wrap=call.name != "run_shell", overflow="ellipsis")
+    command_tool = call.name in COMMAND_TOOLS
+    text = Text(no_wrap=not command_tool, overflow="ellipsis")
     text.append("▸ ", style="cyan")
     text.append(call.name, style="bold")
     shown: set[str] = set()
@@ -358,7 +364,7 @@ def _call_text(call: ToolCall) -> Text:
         shown.add(head)
         value = _short(args[head], 300)
         text.append(" ")
-        text.append(f"$ {value}" if call.name == "run_shell" else value)
+        text.append(f"$ {value}" if command_tool else value)
     if call.name in {"edit_file", "patch_file"}:
         shown.update({"old", "new", "diff"})  # shown as the diff preview
     if call.name == "write_file" and isinstance(args.get("content"), str):
@@ -668,6 +674,9 @@ class CLIFrontend:
         # them is a shell prompt (with "always allow"); any other is a generic
         # approval (skill activation, a non-public fetch, ...).
         self._shell_commands: set[str] = set()
+        # This turn's process_start commands: shell-framed too, but never
+        # "always allow", which writes run_shell's allowlist.
+        self._process_commands: set[str] = set()
         # Shared with the agent's ToolContext so "allow always" writes land live.
         self._tool_options: dict = tool_options if tool_options is not None else {}
         # Session store for /sessions and /resume (None = persistence off).
@@ -1030,6 +1039,7 @@ class CLIFrontend:
         self._working.started = self._turn_started
         self._last_kind = None
         self._shell_commands.clear()
+        self._process_commands.clear()
         self._show_working("thinking")
 
     # --- streamed reply -------------------------------------------------
@@ -1106,10 +1116,12 @@ class CLIFrontend:
                 # terminal styling/spoofing or crash the render on a "[".
                 self._feed(text)
             case ToolCallStarted(call):
-                if call.name == "run_shell":
-                    command = call.arguments.get("command")
-                    if isinstance(command, str):
+                command = call.arguments.get("command")
+                if isinstance(command, str):
+                    if call.name == "run_shell":
                         self._shell_commands.add(command)
+                    elif call.name == "process_start":
+                        self._process_commands.add(command)
                 self._flush()
                 self._render_call(call)
                 self._show_working(f"running {call.name}")
@@ -1325,7 +1337,11 @@ class CLIFrontend:
         # One prompt at a time: parallel tool calls must not race on stdin.
         async with self._confirm_lock:
             self._flush()
-            if command in self._shell_commands:
+            if command in self._process_commands:
+                # Checked first: "always allow" would land in run_shell's list.
+                allowed = await self._confirm_process(command)
+                label = "process_start" if allowed else "tools"
+            elif command in self._shell_commands:
                 allowed = await self._confirm_shell(command)
                 label = "run_shell" if allowed else "tools"
             else:
@@ -1358,6 +1374,28 @@ class CLIFrontend:
                 Text(request),
                 title="[yellow]approve?[/]",
                 title_align="left",
+                border_style="yellow",
+                expand=False,
+            )
+        )
+        answer = await self._ask(
+            "  [yellow]y[/] allow once [dim](Enter)[/] · [yellow]n[/] deny\n"
+            "[yellow]❯[/] "
+        )
+        if answer is None:
+            return False
+        allowed = answer.lower() in {"", "a", "y", "yes"}
+        self.console.print("[dim]  allowed once[/]" if allowed else "[red]  denied[/]")
+        return allowed
+
+    async def _confirm_process(self, command: str) -> bool:
+        self.console.print(
+            Panel(
+                Text(f"$ {command}", style="bold"),
+                title="[yellow]start background process?[/]",
+                subtitle="[dim]keeps running until stopped[/]",
+                title_align="left",
+                subtitle_align="left",
                 border_style="yellow",
                 expand=False,
             )

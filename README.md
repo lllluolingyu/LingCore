@@ -116,7 +116,7 @@ On Linux the default root follows `XDG_STATE_HOME` (falling back to
 locations. `LINGCORE_STATE_HOME` overrides the LingCore state root. Templates
 are copied atomically and never overwrite an existing profile. Use
 `--destination` for an explicit location, or initialize the local profile as
-the installed default with `lingcore profile init coding_ollama --name coding`.
+the installed default with, for example, `lingcore profile init frontend --name coding`.
 
 PDF text extraction (the `pdf2md` tool and the automatic PDF→text fallback)
 needs PyMuPDF, which is AGPL-3.0 while LingCore is Apache-2.0 — so it ships as
@@ -147,14 +147,6 @@ playwright install chromium
 
 ## Quick start
 
-### Local Ollama (no API key)
-
-```bash
-ollama pull qwen2.5-coder:7b      # or any model you have
-cd LingCore
-uv run lingcore --profile profiles/coding_ollama --workspace /path/to/your/project
-```
-
 ### Keyed provider (OpenAI, etc.)
 
 For local development, put values in the selected profile's gitignored `.env`:
@@ -183,6 +175,22 @@ creates a workspace, builds the agent, or contacts a provider.
 Exporting the same variables remains supported as a fallback when the selected
 profile's `.env` does not define them, which is useful for CI and production
 secret injection.
+
+### Local OpenAI-compatible server (Ollama, vLLM)
+
+The same profile works against a local server. Local servers ignore the key,
+but the profile names one, so give it any value:
+
+```dotenv
+# profiles/coding/.env
+LINGCORE_BASE_URL=http://localhost:11434/v1
+LINGCORE_MODEL=qwen2.5-coder:7b
+LLY_API_KEY=local
+```
+
+For a text-only model, set `llm.modalities: []` in your copy of the profile so
+attached images and PDFs degrade to text instead of failing the request. Set
+`llm.send_prompt_cache_key: false` if the server rejects that field.
 
 ### Telegram
 
@@ -306,7 +314,7 @@ prompt-layer files. The source repository and wheel template manifest include
 four examples (`lingcore profile list` shows the installed set):
 
 - `profiles/coding/` — default profile, targets a keyed provider via env vars.
-- `profiles/coding_ollama/` — keyless variant for local Ollama/vLLM.
+- `profiles/frontend/` — the coding agent plus the `browser` and `process` plugins for running dev servers and checking web UIs (needs the `lingcore[browser]` extra; see [Frontend development](#frontend-development)).
 - `profiles/daily/` — general-purpose assistant (research, notes, persistent memory; no shell).
 - `profiles/teaching/` — teaching assistant built on the Canvas skill (courses, due dates, file sync).
 
@@ -338,8 +346,7 @@ current directory or a parent—before expanding `${VAR}` and
 into global `os.environ`) and override same-named variables inherited from the
 launching process. Real `.env` files are gitignored; commit a secret-free
 `.env.example` when a profile or skill needs setup documentation. The example
-`coding`, `daily`, and `teaching` profiles include one; keyless
-`coding_ollama` needs none. Run `lingcore doctor --profile <path>` after copying
+`coding`, `frontend`, `daily`, and `teaching` profiles include one. Run `lingcore doctor --profile <path>` after copying
 or editing one. To create a new agent type, add a directory—no code required.
 
 ### Native Anthropic, caching, and thinking
@@ -531,13 +538,46 @@ want (each Agent gets its own ephemeral browser, closed with the Agent):
 plugins: [browser]
 tools: [browser_navigate, browser_snapshot, browser_click, browser_type,
         browser_select, browser_press, browser_back, browser_screenshot,
-        browser_close]
+        browser_resize, browser_close]
 ```
 
 It shares `fetch_url`'s public-web policy and its `tool_options.fetch_url`
 settings, and `tool_options.browser.cdp_url` attaches it to an already running
 Chromium instead of launching one; see
 [the browser section](docs/plugins.md#bundled-browser-plugin).
+
+### Frontend development
+
+`profiles/frontend/` is the coding agent with the browser and background
+processes engaged: it enables `plugins: [browser, process]`, authorizes the
+`browser_*` and `process_*` tools, statically engages both skills, and carries
+a frontend workflow (type-check, lint, tests and a production build, then a
+snapshot, screenshot and `browser_resize` check of the changed page).
+
+```bash
+uv sync --extra browser && uv run playwright install chromium
+cp profiles/frontend/.env.example profiles/frontend/.env
+uv run lingcore doctor -p profiles/frontend
+uv run lingcore -p profiles/frontend --workspace /path/to/web-app
+```
+
+The agent starts dev servers itself with `process_start`, after you confirm
+each command. They run in the same Bubblewrap sandbox as `run_shell` and keep
+running across turns until stopped, at a lifetime limit (an hour by default),
+or when the session ends. Declaring the server's `port` bridges it to the
+agent's browser at `http://localhost:<port>/`, while the sandbox network stays
+off: the server reaches nothing, and the browser reaches only that port. See
+[the process plugin](docs/plugins.md#bundled-process-plugin).
+
+A server you run on your machine still works: give the agent its URL, and its
+first `browser_navigate` to `localhost` asks you once. That approval covers
+the hostname for the rest of the browser session.
+
+The sandbox keeps `network: false`, so install dependencies yourself, or opt
+in with `network: true` (the host network namespace, unfiltered). A
+distribution Node in `/usr` is visible as is; a user-space toolchain (nvm, fnm,
+Bun) must be added through `read_only_mounts` and `path`, as the profile's
+comments show.
 
 ## Skills
 
@@ -742,22 +782,20 @@ commitments.
      remain untrusted; consent, cancellation and progress use frontend contracts.
 
 5. **v0.5 — Frontend development**
-   - Ship a separate `profiles/frontend/` profile instead of widening `coding`:
-     it enables `plugins: [browser]` and the `browser_*` tools (explicit plugin
-     consent, optional `lingcore[browser]` extra), carries a frontend
-     `workflow.md` (type-check, bundler build, snapshot + screenshot
-     verification, accessibility semantics), and documents opting the sandbox
-     into `network: true` and mounting user-space Node toolchains
-     (nvm/fnm/volta/bun) through `read_only_mounts`.
-   - Add runtime viewport control (a `browser_resize` tool or a viewport
-     argument) so one session can check mobile and desktop breakpoints; the
-     startup size is already configurable through `tool_options.browser`.
-   - Design a background-process tool for dev servers (`npm run dev`, `vite`,
-     `next dev`): start/logs/stop/list with bounded log capture, kill+reap on
-     Stop and `Agent.aclose`, an explicit Telegram policy, and a deliberate
-     answer to sandbox reachability — a server inside Bubblewrap's private
-     network namespace is unreachable from the host-side browser. Until then,
-     run the dev server on the host and approve `browser_navigate` to localhost.
+   - Implemented: a separate `profiles/frontend/` profile (rather than widening
+     `coding`) enables `plugins: [browser]` and the `browser_*` tools, carries
+     a frontend workflow (type-check, lint, tests, build, then snapshot,
+     screenshot and breakpoint checks), and documents opting the sandbox into
+     `network: true` and mounting user-space Node toolchains through
+     `read_only_mounts`.
+   - Implemented: `browser_resize` changes the active tab's viewport during a
+     session, so one session can check mobile and desktop breakpoints.
+   - Implemented: the bundled `process` plugin runs dev servers and watchers
+     in the background (start/logs/stop/list, kill+reap on Stop, `Agent.aclose`
+     and a lifetime limit, a sandbox requirement, Telegram refused). A port
+     bridge lets the host-side browser reach a sandboxed server whose network
+     stays off; see [the process plugin](docs/plugins.md#bundled-process-plugin). OCI
+     sandboxes run processes but cannot bridge a port yet.
 
 6. **Next — Tracing and evaluations**
    - Trace model requests, tools, retrieval, retries, compaction, confirmation

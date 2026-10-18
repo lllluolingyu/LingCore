@@ -16,7 +16,8 @@ confirmation controls whether that code may run at all.
 
 ## Bubblewrap (Linux)
 
-The bundled `coding` and `coding_ollama` profiles use this configuration:
+The bundled `coding` profile uses this configuration (`frontend` differs only
+in a longer `timeout` and a 1 GiB `tmpfs_mb`):
 
 ```yaml
 tool_options:
@@ -42,6 +43,9 @@ provides a minimal set of account/name-resolution files, private `/proc` and
 creates user, PID, IPC, UTS, and cgroup namespaces, drops all capabilities,
 disables nested user namespaces, and removes networking when `network: false`.
 The sandbox inherits neither the host home directory nor the host environment.
+Every runner, the host runner included, gives the command `/dev/null` as stdin,
+so a command can never read from (or switch into raw mode) the terminal of the
+frontend that launched it.
 
 Bubblewrap does not create or manage a resource-control cgroup. `tmpfs_mb`
 bounds `/tmp` only; CPU time, memory, process count, and writable workspace
@@ -54,7 +58,9 @@ command the host network namespace, including host loopback and private
 services. It does not apply the public-address checks used by `fetch_url` or an
 egress allowlist. OCI networking is likewise all-or-nothing at this layer:
 `false` selects no network and `true` leaves the runtime's normal networking in
-place.
+place. The bundled `process` plugin can bridge one declared port of a
+background process to the agent's browser while `network: false` stays in
+effect (see [plugins.md](plugins.md#bundled-process-plugin)).
 
 Tools installed outside `/usr` must be explicitly mounted. The mount target is
 visible read-only:

@@ -8,6 +8,7 @@ grants a tool or suppresses the tool's own confirmation.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -18,6 +19,8 @@ from typing import Any, Literal, Protocol
 from lingcore.events import PluginNotice
 from lingcore.message import Attachment, ToolResult
 from lingcore.tools import ToolContext
+
+_log = logging.getLogger(__name__)
 
 MAX_CONTEXT_CHARS = 16_000
 MAX_RESULT_PATCH_CHARS = 16_000
@@ -131,6 +134,21 @@ class TurnEndEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class TurnRolledBackEvent:
+    """A turn's conversation state was voided: its tool results never happened.
+
+    ``reason`` is ``"cancelled"`` (the frontend's Stop), ``"failed"`` (the turn
+    raised) or ``"abandoned"`` (its event stream was closed unfinished).
+    ``started_at`` is the ``time.monotonic()`` value when the turn began, so a
+    plugin can tell the voided turn's side effects (recorded at or after it)
+    from earlier, committed ones without tracking turns itself.
+    """
+
+    reason: Literal["cancelled", "failed", "abandoned"]
+    started_at: float
+
+
+@dataclass(frozen=True, slots=True)
 class UserMessageDecision:
     action: Literal["block", "add_context"]
     reason: str = ""
@@ -202,6 +220,14 @@ class PluginHooks:
 
     async def turn_end(self, event: TurnEndEvent) -> None:
         pass
+
+    def turn_rolled_back(self, event: TurnRolledBackEvent) -> None:
+        """Synchronous and observe-only: record what to undo, never block.
+
+        Called after the turn's memory has been restored, from the frontend's
+        synchronous Stop finalization among other places. Schedule any async
+        cleanup as a task the plugin owns and awaits (e.g. in ``aclose``).
+        """
 
     async def aclose(self) -> None:
         pass
@@ -419,6 +445,26 @@ class HookRunner:
                 await self._invoke(factory, instance, "turn_end", event)
             except Exception as error:
                 self._failure(factory, "turn_end", error)
+
+    def turn_rolled_back(self, event: TurnRolledBackEvent) -> None:
+        """Notify every overriding plugin; a failure is logged, never raised.
+
+        Runs inside rollback, whose callers (Stop finalization, stream close,
+        failure containment) must not be interrupted, and adds no notice: a
+        notice raised here would surface in the next turn.
+        """
+        for factory, instance in self._entries:
+            hook = type(instance).turn_rolled_back
+            if hook is PluginHooks.turn_rolled_back:
+                continue
+            try:
+                hook(instance, event)
+            except Exception as error:
+                _log.warning(
+                    "plugin %s turn_rolled_back failed (%s)",
+                    factory.name,
+                    type(error).__name__,
+                )
 
     async def aclose(self) -> None:
         async with self._lifecycle_lock:

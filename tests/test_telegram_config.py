@@ -301,3 +301,16 @@ tool_options:
     unsafe = AgentProfile.load(root)
     with pytest.raises(ConfigError, match="require_confirmation"):
         load_telegram_config(unsafe, path, require_secrets=False)
+
+
+def test_config_refuses_background_processes(tmp_path):
+    root, _ = _profile(tmp_path)
+    text = (
+        (root / "config.yaml")
+        .read_text()
+        .replace("tools: []\n", "plugins: [process]\ntools: [process_start]\n")
+    )
+    (root / "config.yaml").write_text(text, encoding="utf-8")
+    path = _telegram(root, "token_env: TELEGRAM_TOKEN\nallowed_user_ids: [1]\n")
+    with pytest.raises(ConfigError, match="process_start"):
+        load_telegram_config(AgentProfile.load(root), path, require_secrets=False)

@@ -15,6 +15,37 @@ Notable user-facing changes to LingCore are documented here. The project uses
   proxy's address pinning or redirect-hop coverage.
 - `browser_snapshot` takes optional `ref` and `depth` arguments to return one
   element's subtree or only the top levels of the page.
+- `browser_resize` changes the active tab's viewport during a session, within
+  the startup viewport bounds, to check responsive layouts. It changes only the
+  size and is refused for an attached browser.
+- The bundled `process` plugin (`process_start`, `process_logs`,
+  `process_stop`, `process_list`) runs dev servers and watchers in the
+  background in the `run_shell` sandbox, which it requires. Every start is
+  confirmed, with its own `allow_patterns`. Logs are byte-bounded and
+  normalized. Processes stop at `process_stop`, at `max_lifetime` (one hour by
+  default), on `Agent.aclose`, and when the turn that started them is rolled
+  back. A declared `port` (Bubblewrap with `network: false`) is bridged to the
+  same Agent's browser at `http://localhost:<port>/` without an approval
+  prompt, while the server itself keeps no network. Telegram refuses the tool.
+- A synchronous, observe-only `turn_rolled_back(event)` plugin hook runs after
+  a turn's conversation state is voided (Stop, a failed turn, an abandoned
+  stream). `TurnRolledBackEvent` carries `reason` and the turn's `started_at`.
+- `profiles/frontend/`: the coding agent with the `browser` and `process`
+  plugins engaged and a frontend workflow (type-check, lint, tests, build,
+  then snapshot, screenshot and breakpoint checks).
+
+### Changed
+
+- Every `run_shell` runner, the host runner included, now gives commands
+  `/dev/null` as stdin instead of inheriting the frontend's terminal.
+- The CLI, LingChat and agentgui frame `process_start` confirmations as
+  commands and never offer "always allow" for them.
+
+### Removed
+
+- The `coding_ollama` profile and template. Point `profiles/coding` at a local
+  OpenAI-compatible server instead with `LINGCORE_BASE_URL`, `LINGCORE_MODEL`
+  and any placeholder `LLY_API_KEY` (see the README).
 
 ## [0.4.0] - 2026-10-10
 

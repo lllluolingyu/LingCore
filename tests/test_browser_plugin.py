@@ -40,6 +40,7 @@ TOOLS = [
     "browser_press",
     "browser_back",
     "browser_screenshot",
+    "browser_resize",
     "browser_close",
 ]
 
@@ -207,6 +208,30 @@ async def test_tools_without_plugin_consent_explain_the_plugins_entry(tmp_path):
     (result,) = await run_tools(profile, [call("browser_snapshot")])
     assert not result.ok
     assert "plugins:" in result.content
+
+
+async def test_frontend_profile_ships_the_browser_engaged(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from lingcore.composer import ComposeContext
+
+    monkeypatch.setenv("LINGCORE_WORKSPACE", str(tmp_path / "workspace"))
+    root = Path(__file__).parents[1] / "profiles" / "frontend"
+    profile = AgentProfile.load(root)
+    assert profile.plugins == ["browser", "process"]
+    assert profile.skills == ["browser", "process"]
+    assert set(TOOLS) <= profile.initial_tool_set()
+    # The sandbox stays offline unless the operator opts in.
+    assert profile.tool_options["run_shell"]["sandbox"]["network"] is False
+    async with Agent.from_profile(profile, llm=FakeLLMClient([])) as agent:
+        assert isinstance(agent.tool_ctx.plugins["browser"], browser.BrowserHooks)
+        advertised = {s["function"]["name"] for s in agent._effective_tool_schemas()}
+        assert set(TOOLS) <= advertised
+        prompt = await agent.composer.compose(
+            ComposeContext(user_message="hi", turn_index=0)
+        )
+    assert "browser_resize" in prompt  # the browser skill's guidance
+    assert "dev server" in prompt  # world.md's notes on reaching one
 
 
 def test_doctor_reports_missing_playwright_and_missing_consent(tmp_path, monkeypatch):
@@ -642,6 +667,24 @@ async def test_attached_close_disconnects_and_closes_only_opened_tabs():
     assert not owner_tab.closed and not session._context
 
 
+async def test_resize_is_bounded_and_refused_for_an_attached_browser(tmp_path):
+    from pydantic import ValidationError
+
+    browser.ResizeArgs(width=320, height=240)
+    for width, height in [(319, 800), (1280, 239), (3841, 800), (1280, 2161)]:
+        with pytest.raises(ValidationError):
+            browser.ResizeArgs(width=width, height=height)
+
+    profile = profile_for(tmp_path, cdp_url="http://127.0.0.1:9")
+    (result,) = await run_tools(
+        profile, [call("browser_resize", width=390, height=844)]
+    )
+    assert not result.ok
+    # Refused before attaching: nothing listens on port 9.
+    assert "not available for an attached browser" in result.content
+    assert "cannot attach" not in result.content
+
+
 def test_element_refs_are_validated():
     class Page:
         def locator(self, selector):
@@ -700,6 +743,10 @@ PAGES = {
 <ul><li>Nested item</li></ul>
 <img src="http://localhost:{port}/pixel.png" alt="pixel">""",
     "/next": "<!doctype html><title>Next</title><p>Second page</p>",
+    "/responsive": """<!doctype html><title>Responsive</title><style>
+.narrow {{ display: none }} @media (max-width: 600px) {{
+.wide {{ display: none }} .narrow {{ display: block }} }}</style>
+<p class="wide">Desktop layout</p><p class="narrow">Mobile layout</p>""",
     "/broken": """<!doctype html><title>Broken</title><div id="root"></div>
 <script src="/missing.js"></script>
 <script>console.error("render failed: boom"); console.log("plain-log-line");</script>
@@ -782,6 +829,15 @@ async def test_live_navigate_type_click_select_screenshot(tmp_path, live, site):
         assert shot.attachments[0].media_type == "image/png"
         stale = await step("browser_snapshot")
         assert "[Next]" in stale.content
+        wide = (await step("browser_navigate", url=base + "/responsive")).content
+        assert "Desktop layout" in wide and "Mobile layout" not in wide
+        narrow = (await step("browser_resize", width=390, height=844)).content
+        assert narrow.startswith(f"Viewport is now 390x844.\n[Responsive] {base}/")
+        assert "Mobile layout" in narrow and "Desktop layout" not in narrow
+        session = agent.tool_ctx.plugins["browser"]._session
+        assert session._pages[-1].viewport_size == {"width": 390, "height": 844}
+        restored = (await step("browser_resize", width=1280, height=800)).content
+        assert "Desktop layout" in restored
         hooks = agent.tool_ctx.plugins["browser"]
         assert hooks._session is not None and hooks._session._browser is not None
     assert hooks._session is None

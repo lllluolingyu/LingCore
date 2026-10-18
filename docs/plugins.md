@@ -108,7 +108,7 @@ third-party code loads only for a plugin named in `plugins:`. Plugin names in
 that list must be valid and unique. Hooks, commands and prompt layers always
 require this explicit entry, even for bundled plugins.
 
-Canvas, Codex, Claude Code and Browser are bundled first-party plugins. Their skills
+Canvas, Codex, Claude Code, Browser and Process are bundled first-party plugins. Their skills
 remain in the catalog, and their code also loads when the profile statically
 names one of their skills or authorizes a provided tool. Existing teaching and
 coding profiles therefore keep working without edits. Skill catalog order is
@@ -171,6 +171,7 @@ order and applies the manifest timeout separately to each hook call.
 | `before_tool(event)` | After authorization and argument validation. Return `allow()`, `deny(reason)` or `ask(prompt)`. Denial stops the before-hook chain; ask uses the frontend's confirmation handler and denies without one or on decline. The hook timeout bounds the hook call, not the human's answer, which the frontend's own confirmation timeout governs. Allow continues the chain and preserves the tool's own confirmation. |
 | `after_tool(event, result)` | For valid, authorized calls, on success and error, including plugin denials. Return `ToolResultPatch(content=..., note=...)`, `replace(content)` or `append_note(note)`. Replacement content and each note are capped at 16,000 characters before commit; a note is appended after the tool's full output and never truncates it. Identity, success, name and attachments cannot change. |
 | `turn_end(event)` | Observe only, after the outcome is committed and before Final or a model/iteration error. It does not run when Stop lands earlier. Stop during `turn_end` rolls nothing back: `finalize_cancelled_turn()` returns the committed `Final` or `Error` instead of `TurnCancelled`. |
+| `turn_rolled_back(event)` | **Synchronous**, observe only. Called after a turn's conversation state has been voided: Stop (`reason="cancelled"`), a turn that raised (`"failed"`) or an event stream closed unfinished (`"abandoned"`), even when the durable truncate failed and is pending. Not called for a committed turn, Stop during `turn_end`, or a blocked user message. `event.started_at` is the turn's `time.monotonic()` start, so a plugin can undo side effects it recorded at or after it. Never block: schedule async cleanup as a task the plugin owns and awaits (e.g. in `aclose`). Errors are logged by type and never change finalization; no notice is raised. |
 | `aclose()` | Once per instance, in reverse order, including failed starts. Ordinary errors are reduced to exception types and swallowed; cancellation propagates and another close can finish remaining instances. |
 
 `PluginContext` is frozen: `name`, `root`, `workspace`, `profile_dir`,
@@ -183,7 +184,8 @@ Input events and result views are frozen snapshots. `UserMessageEvent` contains
 `text`, `input_text`, and an immutable attachment tuple. `ToolCallEvent` contains
 `call_id`, `name`, and recursively frozen `arguments`. `ToolResultView` contains
 `call_id`, `name`, `content`, `ok`, and immutable attachments. `TurnEndEvent`
-contains `content`, optional `error`, and `turn_index`.
+contains `content`, optional `error`, and `turn_index`. `TurnRolledBackEvent`
+contains `reason` and `started_at`.
 
 One hook instance belongs to one Agent. Plugin tools can access it through
 `ctx.plugins["audit"]` to share, for example, an HTTP client. Parallel tool
@@ -219,7 +221,7 @@ a missing Chromium build surfaces as the first tool call's error.
 plugins: [browser]
 tools: [browser_navigate, browser_snapshot, browser_click, browser_type,
         browser_select, browser_press, browser_back, browser_screenshot,
-        browser_close]
+        browser_resize, browser_close]
 tool_options:
   browser:
     timeout: 15                 # seconds per browser action (1-120)
@@ -240,6 +242,12 @@ attach an image. Tool calls on one browser are serialized. `browser_snapshot`
 accepts an optional `ref` (only that element's subtree, e.g. one list or form)
 and `depth` (only that many levels below the root), which keeps long pages
 cheap to read; refs in a partial snapshot stay valid for the action tools.
+`browser_resize` changes the active tab's viewport during a session (within the
+same 320-3840 x 240-2160 bounds as `viewport_width`/`viewport_height`, which set
+the startup size), so one session can check mobile and desktop breakpoints. It
+changes only the size, not touch or user-agent emulation, and new tabs open at
+the configured size. An attached browser refuses it, since its tabs belong to
+the owner.
 
 The network policy is `fetch_url`'s (invariant 9) and is configured in one
 place: `allow_private_hosts`, `confirm_private_hosts` and `allowed_networks`
@@ -315,6 +323,189 @@ behind the `browser` skill with `skill_gated_tools`. To make activation ask
 first, add them to `tool_options.activate_skill.high_risk_tools`; that list
 replaces the builtin baseline, so keep `run_shell`, `write_file`, `patch_file`
 and `edit_file` in it.
+
+## Bundled process plugin
+
+`process` runs long-lived commands (dev servers such as `npm run dev`, `vite`
+or `next dev`, and watchers such as `tsc --watch`) in the background, in the
+`run_shell` sandbox, and lets the agent's browser reach a declared server port.
+`run_shell` cannot do this by construction: it kills and reaps the whole
+process tree when a command returns, and with `network: false` a server inside
+the sandbox listens in a private network namespace the host-side browser
+cannot enter. The tools take the plugin's name as their prefix, so it is
+enabled as `process`:
+
+```yaml
+plugins: [process]
+skills: [process]               # always-on guidance for the tools
+tools: [process_start, process_logs, process_stop, process_list]
+tool_options:
+  run_shell:
+    sandbox: {backend: bubblewrap}   # required: Bubblewrap or OCI
+  process:
+    max_processes: 3
+    max_lifetime: 3600          # seconds before a process is stopped
+    allow_patterns: []          # auto-approved starts; separate from run_shell's
+```
+
+### Tools
+
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `process_start` | `command`, optional `name`, `port`, `ready_pattern` (regex), `ready_timeout` (s) | id, runner, state (`ready`/`running`/`exited`), the browser URL for `port`, the first log lines |
+| `process_logs` | `id`, optional `since` (line cursor), `tail`, `grep` | log lines plus the next cursor; large output is offloaded like `run_shell`'s |
+| `process_stop` | `id` | exit status and the last log lines; removes the entry |
+| `process_list` | none | id, name, command, state, uptime, time left, exit code, port |
+
+- `process_start` is `@tool(high_risk=True)`. It asks for confirmation unless
+  its own `allow_patterns` match (same exact-or-prefix rules as `run_shell`).
+  The list is separate on purpose: a pattern approving `npm run build` for
+  `run_shell` never approves a long-lived server.
+- `ready_pattern` makes the call wait until a log line matches (for example
+  `Local:\s+http`) or `ready_timeout` passes, so the model does not poll.
+  Without it the call still waits briefly to catch an immediate failure. A
+  process that exits early is a normal result with its exit code and output.
+- Ids carry a random suffix (`p-3f9a1c`) and are never reused, so an id from a
+  resumed or forked transcript cannot reach a new process; an unknown id is an
+  error explaining that processes do not survive an Agent restart.
+- An exited process stays listed with its log until `process_stop` removes it.
+  At most `max_exited` are kept; the oldest are dropped with a note.
+
+Options live under `tool_options.process` and are validated when a tool runs,
+like the browser's, so a typo is reported in the first tool result:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `max_processes` | 3 | concurrently running processes (1-16) |
+| `max_exited` | 5 | exited entries kept for a final read |
+| `max_log_bytes` | 1 MiB | ring buffer per process |
+| `max_line_chars` | 2000 | longest stored line |
+| `ready_timeout` | 60 s | default wait, clamped to `max_ready_timeout` (300 s) |
+| `max_lifetime` | 3600 s | a process is stopped when it reaches this age |
+| `require_confirmation` | `true` | ask before every start not matched by `allow_patterns` |
+| `allow_patterns` | `[]` | auto-approved `process_start` commands |
+| `offload_over_chars` | 8000 | larger `process_logs` output is staged to a workspace file |
+| `sandbox` | `run_shell`'s | a separate sandbox configuration for processes |
+
+`max_lifetime` is on by default because Bubblewrap has no CPU, memory or PID
+budget: `run_shell`'s timeout was the only bound on a command, and a
+background process would otherwise have none.
+
+### Logs and environment
+
+Combined stdout and stderr are drained continuously (a chatty server never
+blocks on a full pipe) into a byte-bounded ring buffer with a monotonic line
+counter; a read from before the retained range says how many lines were
+dropped. Lines are normalized before they are stored or matched: ANSI escape
+sequences are stripped, a carriage return starts a new line (progress bars
+redraw one line many times), and a line longer than `max_line_chars` is cut
+with a marker, so `ready_pattern` and `grep` see what a person would read.
+Processes start with `NO_COLOR=1` and `FORCE_COLOR=0` to reduce escapes at the
+source, and `PYTHONUNBUFFERED=1` so a Python server's ready line is not held
+in a pipe buffer. Like every runner, they get `/dev/null` as stdin; an
+inherited stdin is the CLI's terminal, which a dev server's keyboard shortcuts
+would otherwise switch to raw mode.
+
+### Lifecycle
+
+A configured Bubblewrap or OCI sandbox is required; the legacy host runner is
+refused because a host process group can outlive a crashed LingCore. Bubblewrap
+runs the command in its own PID namespace with `--die-with-parent`, so a crash
+kills the whole tree, including processes that detach themselves; OCI's
+watchdog removes the container.
+
+| Event | Behavior |
+| --- | --- |
+| `process_stop` | kill and reap the tree, return the last log lines, remove the entry |
+| Process exits by itself | state becomes `exited`; the log stays until `process_stop` |
+| `max_lifetime` reached | killed like `process_stop`; the entry stays as `exited` with a note |
+| Stop of the turn that started it | killed, because the `process_start` result is voided from the conversation and the model would lose track of a live process |
+| Stop of a later turn | untouched: earlier starts are committed history |
+| `Agent.aclose` | every process is killed in reverse start order by an owned task that resumes after cancellation |
+| LingCore crash | Bubblewrap's `--die-with-parent` or the OCI watchdog |
+
+The turn-scoped kill uses the synchronous `turn_rolled_back` hook: the plugin
+kills exactly the processes it started at or after the event's `started_at`.
+Only one turn runs per Agent and processes start only inside its tool calls,
+so that set is the voided turn's starts, whichever plugin hooks did or did not
+run before the rollback. The doomed processes leave the registry at once and
+the next `process_*` call waits for their reaping, so a killed process never
+appears as running. A `process_stop` in a turn that is then stopped has the
+mirror problem (the process is gone, the conversation forgets the stop);
+re-launching is not safe, so `process_list` simply shows the truth.
+
+Every Agent replacement closes the old Agent and so stops all its processes:
+CLI `/new`, `/resume` and exit, LingChat session switches, tab close and
+**Edit** (which rebuilds the Agent, so it also stops processes from turns the
+edit keeps), and Telegram runtime eviction. Handing a live registry to a
+rebuilt Agent would need a cross-Agent ownership model. Processes are not
+persisted: logs reach `sessions.db` only through tool results the model read,
+and a resumed session's old ids fail with an explanation.
+
+### Port bridge
+
+With `port`, a Bubblewrap sandbox with `network: false` is required. That
+private namespace guarantees `127.0.0.1:<port>` inside it is the sandbox's own
+server and nothing else. `port` is refused under `network: true`, where the
+bridge would expose whatever host service holds that loopback port and bypass
+the browser's private-host approval, and under OCI, whose runtimes cannot be
+handed the bridge's socket (Podman's `--preserve-fds` could carry it; Docker
+would need a per-session `--internal` network with published ports). Without
+`port` the process uses the sandbox's configured network; under
+`network: true` its server is on host loopback and `browser_navigate` asks
+before opening it, as for any local host.
+
+No filesystem path is involved:
+
+1. LingCore creates a Unix socketpair and passes one end into Bubblewrap as an
+   inherited descriptor. The command runs under `relay.py`, a stdlib-only
+   script shipped with the plugin, mounted read-only and run by the sandbox's
+   `/usr/bin/python3` (the host's, through the read-only `/usr` mount; Python
+   3.9 or later). The relay is the command's parent and exits with its status,
+   so killing the sandbox kills both. It never lets the command inherit the
+   control socket.
+2. For each browser connection the plugin sends the relay one end of a fresh
+   socketpair over the control socket (`SCM_RIGHTS`). The relay connects it to
+   `127.0.0.1:<port>`, then `::1` (Node binds `localhost` to either), answers
+   one status byte before any data so a server that is still starting gives a
+   clean "connection refused", and copies bytes both ways.
+
+A listening socket in a mounted directory would be simpler, but that directory
+would be writable from inside the sandbox, which could replace the socket with
+a symlink to a host socket (Docker's, an ssh-agent's) that the host's
+`connect` would follow. A compromised server can kill or replace the relay,
+which runs as the same user in the same sandbox, but gains nothing: the relay
+only ever carries the server's own traffic to the browser.
+
+The browser plugin of the same Agent routes the origin the server prints,
+`http://localhost:<port>/` (also `127.0.0.1` and `[::1]`), through the bridge
+instead of TCP. HMR WebSockets, absolute redirects, CORS settings, OAuth
+callbacks and dev-server host checks are all configured for that origin. It
+needs no private-host approval, because the user confirmed the command serving
+it and the bridge reaches nothing else; every other local host the page
+requests is vetted as before. The agent's browser is per-Agent and ephemeral,
+so this does not affect the user's own browser. A listed process keeps
+shadowing its port after it exits (connections are refused), so a stopped dev
+server never silently falls through to a host service on the same port. If
+the log announces a different `localhost` port than the declared one (Vite
+moves to the next free port unless given `--strictPort`), `process_start` says
+so. An attached (`cdp_url`) browser has no proxy and never uses a bridge. This
+was verified with Vite 6.3.5 in the frontend profile's sandbox, including an
+HMR reload over the bridged WebSocket.
+
+### Frontends and limits
+
+- The CLI, LingChat and agentgui frame a `process_start` confirmation as a
+  command ("start background process?") but never offer "always allow", which
+  would write `run_shell`'s allowlist.
+- Telegram refuses a profile that lists `process_start`: it runs unattended
+  per-user runtimes in one process, and evicting one would silently kill a
+  user's server.
+- Not provided: supervision or restart-on-crash, surviving an Agent
+  replacement or a LingCore restart, and networking between two background
+  processes. Each has its own private namespace, so a frontend and its API
+  server must be one command (for example a `dev` script using
+  `concurrently`).
 
 ## Prompt-template commands
 

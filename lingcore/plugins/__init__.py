@@ -15,6 +15,7 @@ from lingcore.plugins.hooks import (
     ToolResultPatch,
     ToolResultView,
     TurnEndEvent,
+    TurnRolledBackEvent,
     UserMessageDecision,
     UserMessageEvent,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "ToolResultPatch",
     "ToolResultView",
     "TurnEndEvent",
+    "TurnRolledBackEvent",
     "UserMessageDecision",
     "UserMessageEvent",
 ]

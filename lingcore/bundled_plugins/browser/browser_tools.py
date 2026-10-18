@@ -24,6 +24,10 @@ Design notes:
   the vetted address, as ``fetch_url`` does. Only a model-requested navigation
   can put such a host to the user; an approval covers that hostname for the
   rest of the session.
+- A target the ``process`` plugin bridges (a sandboxed dev server's declared
+  port on ``localhost``/``127.0.0.1``/``::1``) is connected through that
+  plugin's relay instead of TCP, and needs no private-host approval: the user
+  confirmed the command serving it. Attached browsers never use a bridge.
 - The context is ephemeral (no stored cookies or credentials), service
   workers are blocked so every request stays routable, downloads are refused,
   and JavaScript dialogs are dismissed and reported.
@@ -45,6 +49,7 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import functools
 import ipaddress
 import json
 import re
@@ -52,7 +57,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -119,6 +124,9 @@ _INSTALL_HINT = (
     "pip install 'lingcore[browser]' && playwright install chromium"
 )
 _REF = re.compile(r"(?:f[0-9]+)?e[0-9]+")  # iframe refs carry an fN prefix
+# Viewport bounds in CSS pixels, for the startup size and browser_resize alike.
+_MIN_WIDTH, _MAX_WIDTH = 320, 3840
+_MIN_HEIGHT, _MAX_HEIGHT = 240, 2160
 _MAX_NOTED_HOSTS = 5
 _MAX_PAGE_PROBLEMS = 10
 _MAX_PROBLEM_CHARS = 300
@@ -147,6 +155,21 @@ class BrowserOptions:
 
 class _Closable(Protocol):
     async def close(self) -> None: ...
+
+
+StreamPair = tuple[asyncio.StreamReader, asyncio.StreamWriter]
+BridgeOpener = Callable[[], Awaitable[StreamPair]]
+
+
+class PortBridges(Protocol):
+    """A plugin that serves some ``host:port`` targets itself (e.g. ``process``).
+
+    ``bridge_opener`` returns a connector for a target it owns, else ``None``.
+    The browser uses it only for a browser it launched: the connector replaces
+    the proxy's TCP connection, so the target needs no private-host approval.
+    """
+
+    def bridge_opener(self, host: str, port: int) -> BridgeOpener | None: ...
 
 
 def _parse_cdp_url(raw: object) -> str:
@@ -222,10 +245,20 @@ def parse_browser_options(raw: object) -> BrowserOptions:
         chromium_sandbox=bool_option(raw, "chromium_sandbox", False, option_path=path),
         viewport=(
             int_option(
-                raw, "viewport_width", 1280, minimum=320, maximum=3840, option_path=path
+                raw,
+                "viewport_width",
+                1280,
+                minimum=_MIN_WIDTH,
+                maximum=_MAX_WIDTH,
+                option_path=path,
             ),
             int_option(
-                raw, "viewport_height", 800, minimum=240, maximum=2160, option_path=path
+                raw,
+                "viewport_height",
+                800,
+                minimum=_MIN_HEIGHT,
+                maximum=_MAX_HEIGHT,
+                option_path=path,
             ),
         ),
         offload_over_chars=int_option(
@@ -283,15 +316,19 @@ class _VettingProxy:
     Chromium sends it unresolved hostnames, so ``vet`` sees every host the
     browser connects to — including redirect targets Playwright's routing
     never reports — and returns the address to pin, or ``None`` to refuse.
+    ``bridge`` is consulted first: a target it owns is connected through its
+    connector instead of TCP (a sandboxed dev server's port bridge).
     """
 
     def __init__(
         self,
         vet: Callable[[str, int], Awaitable[str | None]],
         connect_timeout: float,
+        bridge: Callable[[str, int], BridgeOpener | None] | None = None,
     ) -> None:
         self._vet = vet
         self._connect_timeout = connect_timeout
+        self._bridge = bridge
         self._server: asyncio.Server | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
 
@@ -326,19 +363,20 @@ class _VettingProxy:
             if target is None:
                 return
             host, port = target
-            code = _SOCKS_NOT_ALLOWED
-            try:
-                address = await self._vet(host, port)
-            except ToolError:  # unresolvable
-                address, code = None, _SOCKS_UNREACHABLE
-            if address is None:
-                await self._reply(writer, code)
-                return
+            opener = self._bridge(host, port) if self._bridge is not None else None
+            if opener is None:
+                code = _SOCKS_NOT_ALLOWED
+                try:
+                    address = await self._vet(host, port)
+                except ToolError:  # unresolvable
+                    address, code = None, _SOCKS_UNREACHABLE
+                if address is None:
+                    await self._reply(writer, code)
+                    return
+                opener = functools.partial(asyncio.open_connection, address, port)
             try:
                 async with asyncio.timeout(self._connect_timeout):
-                    upstream_reader, upstream = await asyncio.open_connection(
-                        address, port
-                    )
+                    upstream_reader, upstream = await opener()
             except (OSError, TimeoutError):
                 await self._reply(writer, _SOCKS_UNREACHABLE)
                 return
@@ -397,10 +435,15 @@ class BrowserSession:
     """
 
     def __init__(
-        self, options: BrowserOptions, policy: NetworkPolicy | None = None
+        self,
+        options: BrowserOptions,
+        policy: NetworkPolicy | None = None,
+        bridges: PortBridges | None = None,
     ) -> None:
         self.options = options
         self.policy = policy or NetworkPolicy()
+        # An attached browser has no proxy to route a bridge through.
+        self.bridges = None if options.cdp_url is not None else bridges
         self.approved_hosts: set[str] = set()
         self._blocked: list[str] = []
         self._notes: list[str] = []
@@ -518,7 +561,11 @@ class BrowserSession:
         try:
             # Each handle is stored as soon as it exists so close() can release
             # a launch that fails or is cancelled midway.
-            self._proxy = _VettingProxy(self.connect_address, options.timeout_ms / 1000)
+            self._proxy = _VettingProxy(
+                self.connect_address,
+                options.timeout_ms / 1000,
+                bridge=self.bridge_opener if self.bridges is not None else None,
+            )
             try:
                 proxy_url = await self._proxy.start()
             except OSError as exc:
@@ -722,6 +769,8 @@ class BrowserSession:
         reason = await self.url_error(url)
         if reason is not None or self.policy.allow_private_hosts:
             return reason
+        if self.bridged(url):
+            return None
         try:
             target = await _vet_url(
                 _http_form(url) or url,
@@ -752,6 +801,22 @@ class BrowserSession:
             self._record_block(host)
             return None
         return target.pinned or host
+
+    def bridge_opener(self, host: str, port: int) -> BridgeOpener | None:
+        if self.bridges is None:
+            return None
+        return self.bridges.bridge_opener(host, port)
+
+    def bridged(self, url: str) -> bool:
+        """Whether ``url``'s host and port are served through a plugin bridge."""
+        parsed = urlparse(_http_form(url) or url)
+        if parsed.hostname is None:
+            return False
+        try:
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        except ValueError:
+            return False
+        return self.bridge_opener(parsed.hostname, port) is not None
 
     def _record_block(self, url_or_host: str) -> None:
         host = urlparse(url_or_host).hostname or url_or_host
@@ -915,7 +980,13 @@ class BrowserHooks(PluginHooks):
                 policy = parse_network_policy(options.get("fetch_url", {}))
             except ConfigError as exc:
                 raise ToolError(str(exc)) from None
-            self._session = BrowserSession(browser, policy)
+            # The process plugin's dev-server ports, when it is enabled.
+            bridges = ctx.plugins.get("process")
+            if not callable(getattr(bridges, "bridge_opener", None)):
+                bridges = None
+            self._session = BrowserSession(
+                browser, policy, cast("PortBridges | None", bridges)
+            )
         return self._session
 
     async def _close_session(self) -> None:
@@ -956,14 +1027,21 @@ async def _act(
     *,
     settle: bool = True,
     navigate_to: str | None = None,
+    launched_only: str | None = None,
 ) -> str:
     """Run ``action(page)`` holding the browser and return a fresh snapshot.
 
     ``navigate_to`` is authorized against the session the action will use,
-    before the browser launches.
+    before the browser launches. ``launched_only`` names a tool an attached
+    browser refuses, before anything attaches.
     """
     playwright_error, playwright_timeout = _playwright_errors()
     async with _hooks(ctx).use(ctx) as session:
+        if launched_only is not None and session.attached:
+            raise ToolError(
+                f"{launched_only} is not available for an attached browser "
+                f"({OPTION_PATH}.cdp_url): its tabs belong to the browser's owner"
+            )
         if navigate_to is not None:
             await session.authorize_navigation(ctx, navigate_to)
         page = await session.page()
@@ -1018,6 +1096,19 @@ class PressArgs(BaseModel):
 class ScreenshotArgs(BaseModel):
     full_page: bool = Field(
         default=False, description="Capture the whole page instead of the viewport."
+    )
+
+
+class ResizeArgs(BaseModel):
+    width: int = Field(
+        ge=_MIN_WIDTH,
+        le=_MAX_WIDTH,
+        description="Viewport width in CSS pixels, e.g. 390 (phone), 768 (tablet), 1280 (desktop).",
+    )
+    height: int = Field(
+        ge=_MIN_HEIGHT,
+        le=_MAX_HEIGHT,
+        description="Viewport height in CSS pixels, e.g. 844 (phone), 1024 (tablet), 800 (desktop).",
     )
 
 
@@ -1164,6 +1255,24 @@ async def browser_screenshot(args: ScreenshotArgs, ctx: ToolContext) -> ToolOutp
             text=f"attached a screenshot of {page.url} ({len(data)} bytes)",
             attachments=[attachment],
         )
+
+
+@tool(
+    name="browser_resize",
+    description=(
+        "Resize the active tab's viewport to check a responsive layout (CSS "
+        "media queries, breakpoints) and return the new snapshot; follow with "
+        "browser_screenshot to see it. Only the size changes: there is no touch "
+        "or mobile user-agent emulation, and new tabs open at the configured "
+        "size."
+    ),
+)
+async def browser_resize(args: ResizeArgs, ctx: ToolContext) -> str:
+    async def resize(page: Page) -> None:
+        await page.set_viewport_size({"width": args.width, "height": args.height})
+
+    snapshot = await _act(ctx, resize, settle=False, launched_only="browser_resize")
+    return f"Viewport is now {args.width}x{args.height}.\n{snapshot}"
 
 
 @tool(

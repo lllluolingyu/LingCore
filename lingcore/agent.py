@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from lingcore.composer import ComposeContext, PromptComposer, StaticComposer
 from lingcore.errors import LLMStreamError
@@ -52,7 +53,7 @@ from lingcore.plugins import (
     UserMessageEvent,
 )
 from lingcore.plugins.commands import CommandCatalog
-from lingcore.plugins.hooks import HookRunner
+from lingcore.plugins.hooks import HookRunner, TurnRolledBackEvent
 from lingcore.todos import TodoItem, TodoState
 from lingcore.tools import Tool, ToolContext, ToolOutput, ToolRegistry
 from lingcore.usage import UsageMeter
@@ -208,6 +209,9 @@ class Agent:
         self._turn_todos_checkpoint: tuple[TodoItem, ...] | None = None
         self._turn_message_seq: int | None = None
         self._turn_cancel_requested = False
+        # time.monotonic() when the current turn acquired its lease; plugins
+        # use it to tell a rolled-back turn's side effects from earlier ones.
+        self._turn_started_at = 0.0
         # Set when Stop lands during observe-only turn_end hooks: the outcome is
         # already committed, so finalization returns it instead of rolling back.
         self._turn_committed: Final | Error | None = None
@@ -691,8 +695,16 @@ class Agent:
             )
         return TurnCancelled(reason=reason)
 
-    def _rollback_turn(self, lease: object | None = None) -> None:
-        """Restore the turn checkpoint and always release its lease."""
+    def _rollback_turn(
+        self,
+        lease: object | None = None,
+        reason: Literal["cancelled", "failed", "abandoned"] = "cancelled",
+    ) -> None:
+        """Restore the turn checkpoint and always release its lease.
+
+        Plugins hear ``turn_rolled_back`` even when the durable truncate fails:
+        the conversation the model sees no longer contains the turn either way.
+        """
         if lease is not None and self._turn_lease is not lease:
             return
         try:
@@ -730,6 +742,9 @@ class Agent:
             # A failed repair (for example, the same SQLite outage that ended
             # the turn) must not leave the in-process turn lease wedged.
             self._hooks.drain_notices()
+            self._hooks.turn_rolled_back(
+                TurnRolledBackEvent(reason, self._turn_started_at)
+            )
             self._clear_turn_state(lease)
 
     def _clear_turn_state(self, lease: object | None = None) -> None:
@@ -802,6 +817,7 @@ class Agent:
         lease = object()
         self._active_turn_task = asyncio.current_task()
         self._turn_lease = lease
+        self._turn_started_at = time.monotonic()
         self._turn_checkpoint = turn_checkpoint
         self._turn_user_message = None
         self._turn_index_checkpoint = turn_index_checkpoint
@@ -860,7 +876,7 @@ class Agent:
                 # must repair the abandoned turn. Durable cleanup failures are
                 # pending and retried before a later turn.
                 try:
-                    self._rollback_turn(lease)
+                    self._rollback_turn(lease, "abandoned")
                 except Exception:
                     pass
             raise
@@ -868,7 +884,7 @@ class Agent:
             notices = self._hooks.drain_notices()
             message = f"agent turn failed: {type(exc).__name__}: {exc}"
             try:
-                self._rollback_turn(lease)
+                self._rollback_turn(lease, "failed")
             except Exception as rollback_exc:
                 message += (
                     f"; rollback failed: {type(rollback_exc).__name__}: {rollback_exc}"
@@ -881,7 +897,7 @@ class Agent:
         except BaseException:
             # Do not turn process-level exits into ordinary agent events, but
             # do release the lease before allowing them to propagate.
-            self._rollback_turn(lease)
+            self._rollback_turn(lease, "abandoned")
             raise
 
     async def _run_turn(

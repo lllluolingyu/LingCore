@@ -13,6 +13,7 @@ provides:
 - browser_press
 - browser_back
 - browser_screenshot
+- browser_resize
 - browser_close
 hooks: BrowserHooks
 hook_timeout: 30

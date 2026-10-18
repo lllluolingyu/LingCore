@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 from pydantic import BaseModel
@@ -16,6 +17,7 @@ from lingcore.plugins import (
     PluginHooks,
     ToolDecision,
     ToolResultPatch,
+    TurnRolledBackEvent,
     UserMessageDecision,
 )
 from lingcore.plugins.hooks import HookFactory, HookRunner
@@ -560,3 +562,97 @@ async def test_display_text_passes_the_guardrail_before_storage(tmp_path):
     stored = agent.memory.messages[0]
     assert stored.input_text == "/review [redacted]"
     assert "hunter2" not in stored.content
+
+
+async def test_turn_rolled_back_reports_stop_with_the_turn_start(tmp_path):
+    reached = asyncio.Event()
+    seen: list[TurnRolledBackEvent] = []
+
+    class Wait(PluginHooks):
+        async def before_tool(self, e):
+            reached.set()
+            await asyncio.Event().wait()
+
+        def turn_rolled_back(self, event):
+            seen.append(event)
+
+    agent, _ = build(
+        tmp_path, [Wait], timeout=60, turns=[ScriptedTurn(text="done"), tool_turn()]
+    )
+    assert isinstance((await drain(agent))[-1], Final)
+    assert seen == []  # a committed turn is never rolled back
+    before = time.monotonic()
+    task = asyncio.create_task(drain(agent))
+    await reached.wait()
+    assert agent.cancel_turn()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert isinstance(agent.finalize_cancelled_turn(), TurnCancelled)
+    assert [event.reason for event in seen] == ["cancelled"]
+    assert before <= seen[0].started_at <= time.monotonic()
+
+
+async def test_turn_rolled_back_is_skipped_when_stop_lands_in_turn_end(tmp_path):
+    reached = asyncio.Event()
+    seen: list[TurnRolledBackEvent] = []
+
+    class SlowObserver(PluginHooks):
+        async def turn_end(self, e):
+            reached.set()
+            await asyncio.Event().wait()
+
+        def turn_rolled_back(self, event):
+            seen.append(event)
+
+    agent, _ = build(tmp_path, [SlowObserver], timeout=60)
+    task = asyncio.create_task(drain(agent))
+    await reached.wait()
+    assert agent.cancel_turn()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert agent.finalize_cancelled_turn() == Final("done")
+    assert seen == []
+
+
+async def test_turn_rolled_back_reports_an_abandoned_stream(tmp_path):
+    seen: list[str] = []
+
+    class Observer(PluginHooks):
+        def turn_rolled_back(self, event):
+            seen.append(event.reason)
+
+    agent, _ = build(tmp_path, [Observer], turns=[tool_turn(), ScriptedTurn("done")])
+    stream = agent.run("hello")
+    async for event in stream:
+        if isinstance(event, ToolResultEvent):
+            break
+    await stream.aclose()
+    assert seen == ["abandoned"]
+    assert [m.role for m in agent.memory.messages] == ["user"]
+
+
+async def test_failing_turn_rolled_back_hook_never_changes_finalization(tmp_path):
+    reached = asyncio.Event()
+    later: list[str] = []
+
+    class Wait(PluginHooks):
+        async def before_tool(self, e):
+            reached.set()
+            await asyncio.Event().wait()
+
+        def turn_rolled_back(self, event):
+            raise RuntimeError("boom")
+
+    class Observer(PluginHooks):
+        def turn_rolled_back(self, event):
+            later.append(event.reason)
+
+    agent, _ = build(tmp_path, [Wait, Observer], timeout=60, turns=[tool_turn()])
+    task = asyncio.create_task(drain(agent))
+    await reached.wait()
+    assert agent.cancel_turn()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert isinstance(agent.finalize_cancelled_turn(), TurnCancelled)
+    assert later == ["cancelled"]  # one failure never skips the next plugin
+    assert agent.drain_plugin_notices() == []  # nothing leaks into the next turn
