@@ -439,6 +439,12 @@ async def _launch_host(command: str, workspace: Path) -> ShellExecution:
     return ShellExecution(process, "host (unsandboxed)", exit_code, cleanup)
 
 
+# The guest's HOME lives on the bounded /tmp tmpfs, so the dotfiles and caches
+# that npm, pnpm, pip, playwright and friends write under ~ (.npm, .cache,
+# .config, .local) never land in the user's project and vanish with the command.
+BUBBLEWRAP_HOME = "/tmp/home"
+
+
 def bubblewrap_system_mount_args() -> list[str]:
     """Mirror the host's executable/library aliases without assuming usrmerge."""
     argv = ["--ro-bind", "/usr", "/usr"]
@@ -524,6 +530,8 @@ def _bubblewrap_argv(
             str(config.tmpfs_mb * 1024 * 1024),
             "--tmpfs",
             "/tmp",
+            "--dir",
+            BUBBLEWRAP_HOME,
         ]
     )
     # /bin, /sbin, /lib, and /lib64 vary across usrmerged distributions.
@@ -549,7 +557,7 @@ async def _launch_bubblewrap(
     _check_mount_sources(config.read_only_mounts)
     aliases, aliased_environment = _alias_guest_environment(passed)
     environment = {
-        "HOME": "/workspace",
+        "HOME": BUBBLEWRAP_HOME,
         "PATH": config.path,
         "TMPDIR": "/tmp",
         "LANG": "C.UTF-8",

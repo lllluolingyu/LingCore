@@ -145,6 +145,9 @@ def test_bubblewrap_argv_has_empty_root_security_and_workspace_mount(tmp_path):
         argv.index("--bind") : argv.index("--bind") + 3
     ]
     assert "--bind / /" not in joined
+    # HOME is created inside the bounded tmpfs, after it is mounted.
+    tmpfs = argv.index("--tmpfs")
+    assert argv[tmpfs : tmpfs + 4] == ["--tmpfs", "/tmp", "--dir", "/tmp/home"]
     assert argv[-3:] == ["/bin/sh", "-c", "echo ok"]
 
 
@@ -214,6 +217,7 @@ async def test_bubblewrap_launcher_never_receives_guest_variable_names(
     )
 
     assert execution.runner == "bubblewrap"
+    assert captured_environment["HOME"] == "/tmp/home"
     assert "LD_PRELOAD" not in captured_environment
     aliases = [name for name in captured_environment if name.startswith("LINGCORE_")]
     assert len(aliases) == 1
