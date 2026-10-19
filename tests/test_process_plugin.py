@@ -68,8 +68,12 @@ def host_launcher(monkeypatch):
                 "env": dict(extra_env or {}),
             }
         )
+        host_command = command
+        # The guest sees mounts at their targets; on the host use the sources.
+        for mount in getattr(options.sandbox, "read_only_mounts", []):
+            host_command = host_command.replace(mount.target, mount.source)
         proc = await asyncio.create_subprocess_shell(
-            command.replace(process.RELAY_TARGET, str(RELAY)),
+            host_command,
             cwd=str(workspace),
             env={**os.environ, **(extra_env or {})},
             stdin=asyncio.subprocess.DEVNULL,
@@ -86,10 +90,12 @@ def host_launcher(monkeypatch):
             if abort:
                 await _kill_and_reap(proc)
 
-        return ShellExecution(proc, "fake", exit_code, cleanup)
+        oci = getattr(options.sandbox, "backend", None) == "oci"
+        return ShellExecution(proc, "oci/fake" if oci else "fake", exit_code, cleanup)
 
     monkeypatch.setattr(process, "launch_shell", fake_launch)
     monkeypatch.setattr(process, "GUEST_PYTHON", sys.executable)
+    monkeypatch.setattr(process, "OCI_GUEST_PYTHON", sys.executable)
     return launched
 
 
@@ -374,26 +380,35 @@ async def test_exited_entries_are_capped(tmp_path, host_launcher):
 # --------------------------------------------------------------------------- #
 
 
+OCI = {
+    "backend": "oci",
+    "runtime": "podman",
+    "executable": "/usr/bin/podman",
+    "image": "node:22",
+    "user": "1000:1000",
+    "resources": {
+        "cpus": 1,
+        "memory_mb": 512,
+        "pids": 128,
+        "ephemeral_storage_mb": 256,
+    },
+}
+WINDOWS_OCI = {
+    "backend": "oci",
+    "runtime": "docker",
+    "executable": "/usr/bin/docker",
+    "image": "mcr.microsoft.com/windows/nanoserver:ltsc2022",
+    "container_os": "windows",
+    "resources": {"cpus": 1, "memory_mb": 512, "ephemeral_storage_mb": 256},
+}
+
+
 @pytest.mark.parametrize(
     ("sandbox", "message"),
     [
         ({"backend": "bubblewrap", "network": True}, "network off"),
-        (
-            {
-                "backend": "oci",
-                "runtime": "podman",
-                "executable": "/usr/bin/podman",
-                "image": "node:22",
-                "user": "1000:1000",
-                "resources": {
-                    "cpus": 1,
-                    "memory_mb": 512,
-                    "pids": 128,
-                    "ephemeral_storage_mb": 256,
-                },
-            },
-            "Bubblewrap sandbox",
-        ),
+        ({**OCI, "network": True}, "network off"),
+        (WINDOWS_OCI, "Linux containers on a Linux host"),
     ],
 )
 async def test_port_is_refused_where_it_cannot_be_bridged(
@@ -479,6 +494,76 @@ async def test_the_bridge_refuses_when_nothing_listens_or_after_stop(
     with pytest.raises(ConnectionRefusedError):
         await hooks.bridge_opener("localhost", port)()
     await hooks.aclose()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux OCI only")
+async def test_an_oci_relay_connects_once_to_a_private_listener(
+    tmp_path, host_launcher
+):
+    ctx, hooks, _ = make_ctx(tmp_path)
+    ctx.options["process"] = {"sandbox": OCI}
+    port = free_port()
+    script = tmp_path / "server.py"
+    script.write_text(SERVER)
+    result = await start(
+        ctx,
+        f"{sys.executable} -u {script} {port}",
+        port=port,
+        ready_pattern="Local:",
+        ready_timeout=10,
+    )
+    assert f"Browser URL: http://localhost:{port}/" in result
+    launched = host_launcher[0]
+    # The relay is told the in-container path of the mounted listener.
+    assert f" {process.CONTROL_TARGET} {port} " in launched["command"]
+    mounts = {m.target: m.source for m in launched["sandbox"].read_only_mounts}
+    listener = Path(mounts[process.CONTROL_TARGET])
+    body = await http_get(hooks.bridge_opener("localhost", port), f"localhost:{port}")
+    assert body.startswith(b"HTTP/1.0 200")
+    # Once the relay is in, nothing else can connect: the listener is gone.
+    assert not listener.parent.exists()
+    body = await http_get(hooks.bridge_opener("localhost", port), f"localhost:{port}")
+    assert body.startswith(b"HTTP/1.0 200")
+    await hooks.aclose()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux OCI only")
+async def test_an_oci_listener_is_removed_when_the_relay_never_connects(
+    tmp_path, host_launcher, monkeypatch
+):
+    monkeypatch.setattr(process, "_BRIDGE_TIMEOUT", 0.2)
+    ctx, hooks, _ = make_ctx(tmp_path)
+    ctx.options["process"] = {"sandbox": OCI}
+    port = free_port()
+    # No relay: the "image" has no python3, so the wrapper exits at once.
+    monkeypatch.setattr(process, "OCI_GUEST_PYTHON", "/nonexistent/python3")
+    result = await start(ctx, "true", port=port)
+    assert "exited (code 127)" in result
+    assert "the port bridge runs" in result
+    mounts = {m.target: m.source for m in host_launcher[0]["sandbox"].read_only_mounts}
+    listener = Path(mounts[process.CONTROL_TARGET])
+    with pytest.raises(ConnectionRefusedError):
+        await hooks.bridge_opener("localhost", port)()
+    assert not listener.parent.exists()
+    await hooks.aclose()
+
+
+async def test_the_relay_never_runs_the_command_without_its_bridge(tmp_path):
+    marker = tmp_path / "ran"
+    relay = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-I",
+        "-S",
+        str(RELAY),
+        str(tmp_path / "missing.sock"),
+        "1",
+        f"touch {marker}",
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await relay.communicate()
+    assert relay.returncode == 1
+    assert b"the command was not started" in err
+    assert not marker.exists()
 
 
 async def test_a_moved_port_is_reported(tmp_path, host_launcher):
@@ -713,6 +798,76 @@ asyncio.run(main())
     async with asyncio.timeout(10):
         while await _pgrep(marker):
             await asyncio.sleep(0.1)
+
+
+OCI_E2E = os.environ.get("LINGCORE_SANDBOX_E2E", "")
+
+
+@pytest.mark.skipif(
+    OCI_E2E not in {"docker-linux", "podman-linux"},
+    reason="set LINGCORE_SANDBOX_E2E=docker-linux or podman-linux",
+)
+async def test_oci_server_is_bridged_and_offline(tmp_path):
+    import shutil
+
+    runtime = OCI_E2E.removesuffix("-linux")
+    executable = os.environ.get("LINGCORE_SANDBOX_EXECUTABLE") or shutil.which(runtime)
+    assert executable, f"{runtime} is required by LINGCORE_SANDBOX_E2E={OCI_E2E}"
+    ctx, hooks, _ = make_ctx(tmp_path)
+    ctx.options["process"] = {
+        "sandbox": {
+            **OCI,
+            "runtime": runtime,
+            "executable": str(Path(executable).resolve()),
+            "image": os.environ.get("LINGCORE_SANDBOX_IMAGE", "python:3.13-slim"),
+            "user": os.environ.get(
+                "LINGCORE_SANDBOX_USER", f"{os.getuid()}:{os.getgid()}"
+            ),
+        }
+    }
+    port = 8123
+    (tmp_path / "server.py").write_text(SERVER)
+    result = await start(
+        ctx,
+        f"python3 server.py {port}",
+        port=port,
+        ready_pattern="Local:",
+        ready_timeout=60,
+    )
+    assert f"(runner: oci/{runtime}:linux" in result and ": ready" in result, result
+    body = await http_get(hooks.bridge_opener("localhost", port), f"localhost:{port}")
+    assert body.startswith(b"HTTP/1.0 200")
+    offline = await start(
+        ctx,
+        "python3 -c \"import socket; socket.create_connection(('1.1.1.1', 80), 3)\"",
+        ready_timeout=30,
+    )
+    assert "Network is unreachable" in offline, offline
+    # The bridged command inherits neither the control connection nor the
+    # listener, and it cannot reconnect through the mounted socket.
+    # The pause lets LingCore accept the relay first; a connection queued
+    # before that is still never accepted, but its connect() would succeed.
+    probe = (
+        "import os, socket, time\n"
+        "print('FDS', len(os.listdir('/proc/self/fd')))\n"
+        "time.sleep(1)\n"
+        "s = socket.socket(socket.AF_UNIX)\n"
+        "try:\n"
+        f"    s.connect({process.CONTROL_TARGET!r}); print('CONNECTED')\n"
+        "except OSError as e:\n"
+        "    print('REFUSED', type(e).__name__)\n"
+    )
+    (tmp_path / "probe.py").write_text(probe)
+    fds = await start(
+        ctx,
+        "python3 probe.py",
+        port=8124,
+        ready_pattern="REFUSED|CONNECTED",
+        ready_timeout=60,
+    )
+    assert "FDS 4" in fds and "REFUSED" in fds, fds
+    await hooks.aclose()
+    assert hooks.processes() == []
 
 
 async def _pgrep(pattern: str) -> bool:

@@ -519,38 +519,57 @@ and a resumed session's old ids fail with an explanation.
 
 ### Port bridge
 
-With `port`, a Bubblewrap sandbox with `network: false` is required. That
-private namespace guarantees `127.0.0.1:<port>` inside it is the sandbox's own
-server and nothing else. `port` is refused under `network: true`, where the
-bridge would expose whatever host service holds that loopback port and bypass
-the browser's private-host approval, and under OCI, whose runtimes cannot be
-handed the bridge's socket (Podman's `--preserve-fds` could carry it; Docker
-would need a per-session `--internal` network with published ports). Without
-`port` the process uses the sandbox's configured network; under
-`network: true` its server is on host loopback and `browser_navigate` asks
-before opening it, as for any local host.
+With `port`, the sandbox's network must be off (`network: false`): either
+Bubblewrap, or a Linux OCI container (Docker or Podman) on a Linux host. That
+private network namespace guarantees `127.0.0.1:<port>` inside it is the
+sandbox's own server and nothing else. `port` is refused under `network: true`,
+where the bridge could expose whatever host service holds that loopback port and
+bypass the browser's private-host approval. It is also refused for Windows
+containers and on non-Linux hosts, where the runtime runs containers in a VM
+that cannot receive a host socket. Without `port` the process uses the
+sandbox's configured network; under `network: true` its server may be on host
+loopback, and `browser_navigate` asks before opening it, as for any local host.
 
-No filesystem path is involved:
+LingCore never connects to a path the sandbox controls:
 
-1. LingCore creates a Unix socketpair and passes one end into Bubblewrap as an
-   inherited descriptor. The command runs under `relay.py`, a stdlib-only
-   script shipped with the plugin, mounted read-only and run by the sandbox's
-   `/usr/bin/python3` (the host's, through the read-only `/usr` mount; Python
-   3.9 or later). The relay is the command's parent and exits with its status,
-   so killing the sandbox kills both. It never lets the command inherit the
-   control socket.
-2. For each browser connection the plugin sends the relay one end of a fresh
-   socketpair over the control socket (`SCM_RIGHTS`). The relay connects it to
-   `127.0.0.1:<port>`, then `::1` (Node binds `localhost` to either), answers
-   one status byte before any data so a server that is still starting gives a
-   clean "connection refused", and copies bytes both ways.
+1. The command runs under `relay.py`, a stdlib-only script shipped with the
+   plugin and mounted read-only. The relay is the command's parent and exits
+   with its status, so killing the sandbox kills both. It never lets the
+   command inherit its control connection. Its interpreter is
+   - Bubblewrap: the sandbox's `/usr/bin/python3`, which is the host's,
+     through the read-only `/usr` mount;
+   - OCI: `python3` from the image's `PATH`. Use an image that has one
+     (`node:22` does, `node:22-slim` does not); without it the process exits
+     with code 127 and the result says why.
 
-A listening socket in a mounted directory would be simpler, but that directory
-would be writable from inside the sandbox, which could replace the socket with
-a symlink to a host socket (Docker's, an ssh-agent's) that the host's
-`connect` would follow. A compromised server can kill or replace the relay,
-which runs as the same user in the same sandbox, but gains nothing: the relay
-only ever carries the server's own traffic to the browser.
+   Either way it needs Python 3.9 or later.
+2. The relay gets a control connection back to LingCore:
+   - Bubblewrap: LingCore creates a Unix socketpair and passes one end into
+     the sandbox as an inherited descriptor.
+   - OCI: a container cannot inherit a descriptor. LingCore listens on a Unix
+     socket in a fresh `0700` host directory and bind-mounts **only that
+     socket file**, read-only, at `/run/lingcore/bridge.sock`. The relay
+     connects to it *before* it starts the command (and exits without running
+     the command if it cannot). LingCore accepts that first connection, then
+     closes the listener and removes the directory, so the command can never
+     connect in the relay's place.
+3. For each browser connection the plugin sends the relay one end of a fresh
+   socketpair over the control connection (`SCM_RIGHTS`). The relay connects it
+   to `127.0.0.1:<port>`, then `::1` (Node binds `localhost` to either),
+   answers one status byte before any data so a server that is still starting
+   gives a clean "connection refused", and copies bytes both ways.
+
+The obvious alternative is LingCore *connecting* to a socket the relay creates
+in a mounted directory. That directory would be writable from inside the
+sandbox, which could replace the socket with a symlink to a host socket
+(Docker's, an ssh-agent's) that the host's `connect` would follow. In the OCI
+design the host only listens and accepts, and the container sees one socket
+file, not a directory it could write to. A compromised server can kill or
+replace the relay, which runs as the same user in the same sandbox, but gains
+nothing: the relay only ever carries the server's own traffic to the browser.
+
+The OCI bridge was verified with Docker 29.9.1 (`python:3.13-slim`, run as the
+host user). Podman uses the same code path but has not been run end to end.
 
 The browser plugin of the same Agent routes the origin the server prints,
 `http://localhost:<port>/` (also `127.0.0.1` and `[::1]`), through the bridge

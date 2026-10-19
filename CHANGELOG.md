@@ -5,6 +5,15 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+### Added
+
+- `process_start` can bridge a declared `port` from a Linux OCI container
+  (Docker or Podman) on a Linux host, not only from Bubblewrap. The relay runs
+  on the image's `python3` and connects once, before the command starts, to a
+  socket LingCore mounts into the container; the listener is closed right
+  after, so the command cannot take its place. Windows containers and
+  non-Linux hosts are still refused, as is `network: true` for both backends.
+
 ### Changed
 
 - MCP plugin components, previously planned for v0.4.x, are postponed with no

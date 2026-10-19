@@ -793,8 +793,10 @@ commitments.
      in the background (start/logs/stop/list, kill+reap on Stop, `Agent.aclose`
      and a lifetime limit, a sandbox requirement, Telegram refused). A port
      bridge lets the host-side browser reach a sandboxed server whose network
-     stays off; see [the process plugin](docs/plugins.md#bundled-process-plugin). OCI
-     sandboxes run processes but cannot bridge a port yet.
+     stays off; see [the process plugin](docs/plugins.md#bundled-process-plugin).
+   - Implemented: the port bridge also works in Linux OCI containers (Docker,
+     Podman) on a Linux host, through a single-use socket mounted into the
+     container.
 
 5. **Next — Tracing and evaluations**
    - Trace model requests, tools, retrieval, retries, compaction, confirmation

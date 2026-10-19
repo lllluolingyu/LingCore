@@ -17,11 +17,13 @@ user-facing contract is the "Bundled process plugin" section of
 - Output is drained continuously into a byte-bounded ring buffer of
   normalized lines: ANSI escapes stripped, carriage returns split, long lines
   cut, so ``ready_pattern`` and ``grep`` see what a person would read.
-- A declared ``port`` needs Bubblewrap with ``network: false``. The command
-  then runs under ``relay.py``, which LingCore hands one end of a fresh
-  socketpair per browser connection; the browser plugin routes
-  ``http://localhost:<port>`` through it. The server reaches no network, and
-  the browser reaches exactly that port.
+- A declared ``port`` needs the sandbox's network off: Bubblewrap, or a Linux
+  OCI container on a Linux host. The command then runs under ``relay.py``,
+  which LingCore hands one end of a fresh socketpair per browser connection;
+  the browser plugin routes ``http://localhost:<port>`` through it. The server
+  reaches no network, and the browser reaches exactly that port. Bubblewrap
+  inherits the relay's control socket; an OCI container cannot, so its relay
+  connects once to a private socket LingCore listens on (see ``Bridge``).
 """
 
 from __future__ import annotations
@@ -35,6 +37,8 @@ import secrets
 import shlex
 import signal
 import socket
+import sys
+import tempfile
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -50,6 +54,7 @@ from lingcore.errors import ToolError
 from lingcore.plugins import PluginContext, PluginHooks, TurnRolledBackEvent
 from lingcore.sandbox import (
     BubblewrapSandbox,
+    OciSandbox,
     ReadOnlyMount,
     SandboxConfig,
     ShellExecution,
@@ -68,7 +73,10 @@ OPTION_PATH = "tool_options.process"
 GUEST_ENV = {"NO_COLOR": "1", "FORCE_COLOR": "0", "PYTHONUNBUFFERED": "1"}
 # /usr is mounted read-only from the host, so this is the host's own Python.
 GUEST_PYTHON = "/usr/bin/python3"
+# An OCI image brings its own interpreter, wherever its PATH puts it.
+OCI_GUEST_PYTHON = "python3"
 RELAY_TARGET = "/run/lingcore/relay.py"
+CONTROL_TARGET = "/run/lingcore/bridge.sock"
 LOOPBACK_NAMES = frozenset({"localhost", "127.0.0.1", "::1"})
 
 _READ_CHUNK = 64 * 1024
@@ -257,22 +265,53 @@ class Bridge:
 
     ``open`` hands the relay a fresh socketpair end and returns the connected
     stream once the relay reports that the server accepted the connection.
+
+    Bubblewrap's relay inherits its end of a socketpair, so the control socket
+    exists from the start. An OCI relay connects to a listening socket instead
+    (``pending`` accepts it, see ``_accept_relay``); ``open`` waits for that
+    connection.
     """
 
-    def __init__(self, control: socket.socket, port: int) -> None:
-        control.setblocking(False)
+    def __init__(
+        self,
+        control: socket.socket | None,
+        port: int,
+        *,
+        pending: asyncio.Task[socket.socket] | None = None,
+    ) -> None:
+        if control is not None:
+            control.setblocking(False)
         self._control = control
+        self._pending = pending
         self.port = port
         self.closed = False
         self._writers: set[asyncio.StreamWriter] = set()
 
+    async def _connected(self) -> socket.socket:
+        if self._control is not None:
+            return self._control
+        pending = self._pending
+        assert pending is not None
+        # wait() neither cancels the accept on timeout nor turns close()'s
+        # cancellation of it into the caller's own cancellation.
+        await asyncio.wait({pending}, timeout=_BRIDGE_TIMEOUT)
+        if self.closed:
+            raise ConnectionRefusedError("the background process has stopped")
+        if not pending.done() or pending.cancelled() or pending.exception():
+            raise ConnectionRefusedError("the relay has not connected to the bridge")
+        if self._control is None:
+            self._control = pending.result()
+            self._control.setblocking(False)
+        return self._control
+
     async def open(self) -> StreamPair:
         if self.closed:
             raise ConnectionRefusedError("the background process has stopped")
+        control = await self._connected()
         host, guest = socket.socketpair()
         try:
             try:
-                socket.send_fds(self._control, [b"c"], [guest.fileno()])
+                socket.send_fds(control, [b"c"], [guest.fileno()])
             except BlockingIOError:
                 raise ConnectionRefusedError("the relay is not accepting") from None
         except BaseException:
@@ -302,10 +341,70 @@ class Bridge:
         if self.closed:
             return
         self.closed = True
-        self._control.close()
+        pending = self._pending
+        if pending is not None and not pending.done():
+            pending.cancel()  # its finally removes the listener
+        elif (
+            pending is not None and not pending.cancelled() and not pending.exception()
+        ):
+            pending.result().close()
+        if self._control is not None:
+            self._control.close()
         for writer in self._writers:
             writer.transport.abort()
         self._writers.clear()
+
+
+def _relay_listener() -> tuple[Path, socket.socket]:
+    """A listening socket for one OCI relay, in a fresh private directory.
+
+    The directory is 0700, so no other host user can reach the socket; the
+    socket itself is world-connectable because only it is mounted into the
+    container, where the image's user may have any uid.
+    """
+    directory = Path(tempfile.mkdtemp(prefix="lingcore-bridge-"))
+    path = directory / "bridge.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(str(path))
+        os.chmod(path, 0o666)
+        listener.listen(1)
+        listener.setblocking(False)
+    except BaseException:
+        listener.close()
+        _remove_listener_dir(directory)
+        raise
+    return directory, listener
+
+
+async def _accept_relay(listener: socket.socket, directory: Path) -> socket.socket:
+    """Accept the relay's one connection, then stop listening for good.
+
+    The relay connects before it starts the command, so the first connection
+    is always the relay's; closing the listener right after it means the
+    command (or anything else) can never connect in its place.
+    """
+    try:
+        control, _ = await asyncio.get_running_loop().sock_accept(listener)
+    finally:
+        listener.close()
+        _remove_listener_dir(directory)
+    return control
+
+
+def _remove_listener_dir(directory: Path) -> None:
+    try:
+        (directory / "bridge.sock").unlink(missing_ok=True)
+        directory.rmdir()
+    except OSError:
+        pass
+
+
+def _retrieve(task: asyncio.Task[socket.socket]) -> None:
+    # A relay that never connects leaves the accept cancelled or failed; mark
+    # the outcome retrieved so asyncio does not log it as unhandled.
+    if not task.cancelled():
+        task.exception()
 
 
 @dataclass(eq=False)
@@ -438,8 +537,11 @@ class ProcessHooks(PluginHooks):
                 getenv=ctx.getenv,
                 extra_env=GUEST_ENV,
             )
+        elif isinstance(sandbox, OciSandbox):
+            execution, bridge = await self._launch_oci_bridged(
+                ctx, sandbox, command, port
+            )
         else:
-            assert isinstance(sandbox, BubblewrapSandbox)
             relay = Path(__file__).with_name("relay.py").resolve()
             config = sandbox.model_copy(
                 update={
@@ -485,6 +587,47 @@ class ProcessHooks(PluginHooks):
         self._processes[proc.id] = proc
         proc.supervisor = asyncio.create_task(self._supervise(proc))
         return proc
+
+    async def _launch_oci_bridged(
+        self, ctx: ToolContext, sandbox: OciSandbox, command: str, port: int
+    ) -> tuple[ShellExecution, Bridge]:
+        """Run ``command`` under the relay in a container, bridged to ``port``.
+
+        A container cannot inherit a descriptor, so the relay connects to a
+        socket LingCore listens on, mounted into the container as one file.
+        """
+        relay = Path(__file__).with_name("relay.py").resolve()
+        directory, listener = _relay_listener()
+        config = sandbox.model_copy(
+            update={
+                "read_only_mounts": [
+                    *sandbox.read_only_mounts,
+                    ReadOnlyMount(source=str(relay), target=RELAY_TARGET),
+                    ReadOnlyMount(
+                        source=str(directory / "bridge.sock"), target=CONTROL_TARGET
+                    ),
+                ]
+            }
+        )
+        pending = asyncio.create_task(_accept_relay(listener, directory))
+        pending.add_done_callback(_retrieve)
+        wrapped = (
+            f"exec {OCI_GUEST_PYTHON} -I -S {RELAY_TARGET} {CONTROL_TARGET} {port} "
+            f"{shlex.quote(command)}"
+        )
+        try:
+            execution = await launch_shell(
+                wrapped,
+                workspace=ctx.workspace,
+                options=ShellOptions(sandbox=config),
+                getenv=ctx.getenv,
+                extra_env=GUEST_ENV,
+            )
+        except BaseException:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+            raise
+        return execution, Bridge(None, port, pending=pending)
 
     async def _supervise(self, proc: Process) -> None:
         """Drain output until exit, enforcing the lifetime; then mark exited."""
@@ -775,20 +918,25 @@ async def process_start(args: StartArgs, ctx: ToolContext) -> str:
     if not command:
         raise ToolError("command must not be blank")
     if args.port is not None:
-        if not isinstance(sandbox, BubblewrapSandbox):
+        if isinstance(sandbox, OciSandbox) and (
+            sandbox.container_os != "linux" or not sys.platform.startswith("linux")
+        ):
             raise ToolError(
-                "port needs the Bubblewrap sandbox: the OCI runner cannot be given "
-                "the bridge's socket yet. Start the process without port (watchers "
-                "and test runners work) or select a Bubblewrap sandbox"
+                "port with an OCI sandbox needs Linux containers on a Linux host: "
+                "the bridge passes sockets into the container, which Windows "
+                "containers and runtimes in a VM cannot receive. Start the process "
+                "without port (watchers and test runners work)"
             )
         if sandbox.network:
             raise ToolError(
                 "port needs the sandbox's network off (network: false). With the "
-                "host network the bridge would expose whatever host service holds "
-                "that port. Start the server without port; it then listens on host "
-                "loopback and browser_navigate asks the user to approve it"
+                "network on, the sandbox's loopback can be the host's (always for "
+                "Bubblewrap, under host networking for OCI), so the bridge would "
+                "expose whatever host service holds that port. Start the server "
+                "without port; browser_navigate then asks before opening a host "
+                "loopback address"
             )
-        if not Path(GUEST_PYTHON).is_file():
+        if isinstance(sandbox, BubblewrapSandbox) and not Path(GUEST_PYTHON).is_file():
             raise ToolError(
                 f"port needs {GUEST_PYTHON} in the sandbox to run the port bridge"
             )
@@ -857,6 +1005,15 @@ def _start_result(
         )
     if proc.note:
         lines.append(f"Note: {proc.note}")
+    if (
+        proc.port is not None
+        and proc.runner.startswith("oci/")
+        and proc.exit_code == 127
+    ):
+        lines.append(
+            f"Note: the port bridge runs {OCI_GUEST_PYTHON} inside the image. Use "
+            "an image that has it (node:22 does, node:22-slim does not)."
+        )
     shown = proc.log.lines_from(1)
     if proc.port is not None:
         ports = _announced_ports(shown)
