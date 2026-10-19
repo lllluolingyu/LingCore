@@ -780,13 +780,7 @@ commitments.
      lifecycle cleanup and `lingcore plugin list/info/new`.
    - The explicit `tools:` ceiling and profile-owned environment remain binding.
 
-4. **v0.4.x — MCP as a plugin component**
-   - Add stdio and Streamable HTTP MCP transports behind the plugin manifest,
-     initially for tools and later for resources and prompts.
-   - Namespace tools and require explicit ceiling entries. Server descriptions
-     remain untrusted; consent, cancellation and progress use frontend contracts.
-
-5. **v0.5 — Frontend development**
+4. **v0.5 — Frontend development**
    - Implemented: a separate `profiles/frontend/` profile (rather than widening
      `coding`) enables `plugins: [browser]` and the `browser_*` tools, carries
      a frontend workflow (type-check, lint, tests, build, then snapshot,
@@ -802,19 +796,29 @@ commitments.
      stays off; see [the process plugin](docs/plugins.md#bundled-process-plugin). OCI
      sandboxes run processes but cannot bridge a port yet.
 
-6. **Next — Tracing and evaluations**
+5. **Next — Tracing and evaluations**
    - Trace model requests, tools, retrieval, retries, compaction, confirmation
      decisions, token usage and latency, excluding sensitive content by default.
      Start with local structured traces and an optional OpenTelemetry exporter.
    - Add `lingcore eval` for profile datasets, tool-trajectory assertions,
      quality checks, latency/cost reporting and regression comparisons.
 
-7. **Later — Durable workflows**
+6. **Later — Durable workflows**
    - Build a detached turn runner so an in-flight task can survive a browser
      disconnect, with ownership, leases, progress and reconnect attachment.
    - Extend edit/fork flows with regenerate-without-edit and merge/export controls.
    - Add schema-validated results and an optional Responses API backend behind
      the existing LLM seam.
+
+7. **Postponed — MCP as a plugin component**
+   - Postponed in favor of trusted, in-process tools and the plugin API. To
+     reach an external service today, wrap it in a plugin whose declared tools
+     stay under the `tools:` ceiling.
+   - The original scope stands if this resumes: stdio and Streamable HTTP MCP
+     transports behind the plugin manifest, initially for tools and later for
+     resources and prompts; namespaced tools with explicit ceiling entries;
+     untrusted server descriptions; consent, cancellation and progress through
+     frontend contracts.
 
 Multi-agent handoffs, Discord/voice frontends, marketplaces, and additional
 persona profiles remain later possibilities. They should follow retrieval,

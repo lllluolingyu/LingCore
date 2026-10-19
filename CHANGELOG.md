@@ -5,6 +5,12 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+### Changed
+
+- MCP plugin components, previously planned for v0.4.x, are postponed with no
+  target release. Trusted in-process plugins remain the way to integrate
+  external services; the roadmap keeps the original MCP scope for later.
+
 ## [0.4.2] - 2026-10-19
 
 ### Added

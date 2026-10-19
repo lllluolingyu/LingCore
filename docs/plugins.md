@@ -631,6 +631,7 @@ initializers free of registration side effects. Ship local relative imports
 only if your module layout supports the file loader; absolute imports from
 your package work after the plugin is enabled.
 
-MCP components are deferred to v0.4.x. Subprocess hooks, before-tool argument
+MCP components are postponed with no target release; wrap an external service
+in a plugin with declared tools instead. Subprocess hooks, before-tool argument
 rewriting, plugin versions in session metadata, hot reload and a plugin
 marketplace are also outside v0.4.0.
