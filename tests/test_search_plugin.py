@@ -426,9 +426,15 @@ async def test_daily_has_search_immediately_without_code_review(tmp_path, monkey
     monkeypatch.delenv("LINGCORE_SEARCH_PROVIDER", raising=False)
     destination = initialize_profile("daily", destination=tmp_path / "daily")
     profile = AgentProfile.load(destination)
-    assert profile.plugins == ["search"]
+    assert profile.plugins == ["search", "clock"]
     assert profile.tool_options["search_web"]["provider"] == "searxng"
-    assert {"search", "search_web", "fetch_url"} <= profile.initial_tool_set()
+    assert {
+        "search",
+        "search_web",
+        "fetch_url",
+        "calendar_add",
+        "calendar_list",
+    } <= profile.initial_tool_set()
     async with Agent.from_profile(
         profile, llm=FakeLLMClient([ScriptedTurn(text="hello")])
     ) as agent:

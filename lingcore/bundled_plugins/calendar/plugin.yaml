@@ -1,0 +1,11 @@
+name: calendar
+version: 1.0.0
+api: 1
+description: Save events as iCalendar (.ics) files in the workspace and list saved
+  events. Works offline; nothing is sent to an online calendar.
+module: calendar_tools.py
+provides:
+- calendar_add
+- calendar_list
+skills: null
+commands: null

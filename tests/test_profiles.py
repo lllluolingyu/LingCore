@@ -27,6 +27,45 @@ def test_initialize_profile_copies_only_declared_template_files(tmp_path):
     assert AgentProfile.load(destination).name == "coding"
 
 
+def test_every_template_file_is_packaged_into_the_wheel():
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text("utf-8"))
+    included = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    for template, files in PROFILE_TEMPLATE_FILES.items():
+        for relative in files:
+            source = f"profiles/{template}/{relative}"
+            assert included.get(source) == (
+                f"lingcore/profile_templates/{template}/{relative}"
+            ), source
+            assert (root / source).is_file(), source
+
+
+async def test_daily_ships_its_slash_commands(tmp_path, monkeypatch):
+    from lingcore.agent import Agent
+    from tests.fakes import FakeLLMClient
+
+    monkeypatch.delenv("LINGCORE_TIMEZONE", raising=False)
+    destination = initialize_profile("daily", destination=tmp_path / "daily")
+    assert sorted(p.name for p in (destination / "commands").iterdir()) == [
+        "brief.md",
+        "compare.md",
+        "event.md",
+        "plan.md",
+        "summarize.md",
+    ]
+    profile = AgentProfile.load(destination)
+    async with Agent.from_profile(profile, llm=FakeLLMClient([])) as agent:
+        names = {command.qualified_name for command in agent.commands.commands}
+        assert names == {"/brief", "/compare", "/event", "/plan", "/summarize"}
+        expanded = agent.commands.resolve("/event dentist friday 3pm", reserved=())
+    assert expanded is not None
+    assert "Add to my calendar: dentist friday 3pm" in expanded.text
+    assert expanded.display_text == "/event dentist friday 3pm"
+
+
 def test_initialize_profile_never_overwrites_existing_directory(tmp_path):
     destination = tmp_path / "existing"
     destination.mkdir()

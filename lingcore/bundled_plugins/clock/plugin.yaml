@@ -1,0 +1,11 @@
+name: clock
+version: 1.0.0
+api: 1
+description: Tell the model the current local date and time with every user message.
+module: clock_hooks.py
+hooks: ClockHooks
+skills: null
+commands: null
+# A clock failure must never keep the user's message from reaching the model.
+on_hook_error: ignore
+hook_timeout: 5

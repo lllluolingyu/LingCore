@@ -108,8 +108,9 @@ third-party code loads only for a plugin named in `plugins:`. Plugin names in
 that list must be valid and unique. Hooks, commands and prompt layers always
 require this explicit entry, even for bundled plugins.
 
-Canvas, Codex, Claude Code, Browser, Process, and Search are bundled first-party
-plugins. Their declared skills remain in the catalog, and their code also loads
+Canvas, Codex, Claude Code, Browser, Process, Search, Clock, and Calendar are
+bundled first-party plugins. Their declared skills remain in the catalog, and
+their code also loads
 when the profile statically names one of their skills or authorizes a provided
 tool. Existing teaching and
 coding profiles therefore keep working without edits. Skill catalog order is
@@ -398,6 +399,95 @@ loopback instance, use an IP literal such as `http://127.0.0.1:8080` with
 Redirects are refused so credentials and POST bodies stay at their
 intended endpoint. Network errors, invalid JSON, and oversized responses fail
 explicitly; they are not reported as empty search results.
+
+## Bundled clock plugin
+
+Models have no clock, so without help they guess "today" from their training
+data. The `clock` plugin adds one line to every user message:
+
+```text
+[clock] Now: Monday 2026-10-19 22:32 Asia/Shanghai (UTC+08:00)
+```
+
+```yaml
+plugins: [clock]                 # a hooks-only plugin: needs this entry
+tool_options:
+  clock:
+    timezone: ${LINGCORE_TIMEZONE:-}   # IANA name; blank uses the host's zone
+```
+
+- The line is `user_message` hook context, not a system-prompt layer, so the
+  cached system prefix stays byte-stable. It is stored with the message
+  (`input_text` keeps only what the user typed), which also lets the model see
+  when each earlier message was sent.
+- Without a configured zone the host's is detected from `TZ`, the
+  `/etc/localtime` link or `/etc/timezone`. A host whose zone has no IANA name
+  falls back to its current UTC offset, shown without a name and unable to
+  follow daylight-saving changes. On Windows, install the `tzdata` package to
+  use IANA names.
+- Options are validated when the Agent is built: an unknown zone or option key
+  fails at launch. `on_hook_error: ignore` keeps a clock failure from blocking
+  a message.
+
+## Bundled calendar plugin
+
+`calendar` saves events as standard iCalendar (`.ics`, RFC 5545) files in the
+workspace and reads them back. It works offline: the user adds events to any
+calendar app (Apple Calendar, Google Calendar, Outlook, Thunderbird) by opening
+or importing the file, and nothing is sent to an online calendar. Authorizing
+its tools engages it; it has no hooks.
+
+```yaml
+tools: [calendar_add, calendar_list]
+tool_options:
+  calendar:
+    directory: calendar          # inside the workspace
+    # timezone: Europe/Berlin    # default: tool_options.clock.timezone, then the host's
+    default_duration_minutes: 60
+    list_days: 30                # calendar_list's default window
+```
+
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `calendar_add` | `events` (1-20), optional file `name` | the new file's path, each event as saved, the timezone |
+| `calendar_list` | optional `start`, `end` (dates, inclusive), `path` (one `.ics` file) | events overlapping the window, sorted, with their source files |
+
+Each event has a `title` and a `start`: `YYYY-MM-DD` for an all-day event, or
+a local `YYYY-MM-DDTHH:MM` in the calendar's timezone (an explicit offset is
+converted). It may also have
+- `end` (for an all-day event, the last day, inclusive) or `duration_minutes`,
+- `location` and `description`,
+- up to three `reminders` (minutes before the start),
+- `repeat`: `frequency` (daily, weekly, monthly or yearly), `interval`, and
+  `count` or `until`.
+
+A time skipped by a daylight-saving change, an end before the start, and a mix
+of all-day and timed values are refused instead of being guessed.
+
+- **Never overwrites.** Each `calendar_add` call creates a new file named
+  after the first event's date and title (`2026-10-21-dentist.ics`, then
+  `-2`, `-3`, ...), using an exclusive, no-follow create inside the confined
+  workspace directory. A mistaken call cannot change an earlier file. Editing
+  or deleting events is left to the user's calendar app.
+- **Daylight saving.** Timed events carry their IANA `TZID` and a `VTIMEZONE`
+  listing the zone's offset changes over the events' span (at most ten
+  years), so a weekly 09:00 meeting stays at 09:00 after the clocks change,
+  even in clients that do not know the zone name. `UNTIL` is written in UTC
+  as the RFC requires. Without an IANA zone, times are saved as UTC instants
+  and the result says so.
+- **Listing.** `calendar_list` reads every `.ics` in the calendar directory
+  (at most 50 files of 2 MiB each), so files the user drops there count too,
+  or one `path` such as an attached export under `attachments/`. Symlinked
+  files are skipped. Repeats using only `FREQ`, `INTERVAL`, `COUNT` and
+  `UNTIL` are expanded (the 31st is skipped in shorter months, as RFC 5545
+  says); other rules, and series with `RDATE`, `EXDATE` or overridden
+  occurrences, are listed once and marked as not expanded. Cancelled events
+  are omitted. At most 100 entries are shown. Titles and places are untrusted
+  file content, and the result says so.
+
+The daily profile enables both plugins. Its `/event` command turns a
+plain-language description into a `calendar_add` call, and `/plan` checks
+`calendar_list` before planning.
 
 ## Bundled process plugin
 

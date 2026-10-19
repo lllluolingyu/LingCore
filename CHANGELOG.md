@@ -13,6 +13,20 @@ Notable user-facing changes to LingCore are documented here. The project uses
   socket LingCore mounts into the container; the listener is closed right
   after, so the command cannot take its place. Windows containers and
   non-Linux hosts are still refused, as is `network: true` for both backends.
+- A bundled `clock` plugin. Each user message carries a
+  `[clock] Now: <weekday> <date> <time> <zone> (<offset>)` line, so the model
+  knows the current date and time. It is added through the `user_message`
+  hook, outside the cached system prompt, and stored with the message.
+  `tool_options.clock.timezone` takes an IANA name; blank uses the host's zone.
+- A bundled `calendar` plugin with `calendar_add` and `calendar_list`. Events
+  (all-day or timed, with location, reminders and daily/weekly/monthly/yearly
+  repeats) are saved as a new RFC 5545 `.ics` file in the workspace's
+  `calendar/` folder for any calendar app to import. Files are never
+  overwritten, and repeats keep their local time across daylight-saving
+  changes. `calendar_list` lists saved or user-provided events in a date range.
+- The `daily` profile enables both plugins (`LINGCORE_TIMEZONE` in its `.env`)
+  and ships `/plan`, `/brief`, `/compare`, `/summarize` and `/event`
+  prompt-template commands.
 
 ### Changed
 

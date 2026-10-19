@@ -316,10 +316,16 @@ four examples (`lingcore profile list` shows the installed set):
 - `profiles/coding/` — default profile, targets a keyed provider via env vars.
 - `profiles/frontend/` — the coding agent plus the `browser` and `process` plugins for running dev servers and checking web UIs (needs the `lingcore[browser]` extra; see [Frontend development](#frontend-development)).
 - `profiles/daily/` — everyday assistant (web research, local notes, persistent
-  memory; no shell or coding-skill activation). Web search uses the bundled
-  [`search` plugin](docs/plugins.md#bundled-search-plugin): set `SEARXNG_URL`
-  for a JSON-enabled SearXNG instance, or select Exa / DeepSeek in the profile's
-  `.env.example` configuration.
+  memory, calendar files; no shell or coding-skill activation). Web search uses
+  the bundled [`search` plugin](docs/plugins.md#bundled-search-plugin): set
+  `SEARXNG_URL` for a JSON-enabled SearXNG instance, or select Exa / DeepSeek in
+  the profile's `.env.example` configuration. The
+  [`clock` plugin](docs/plugins.md#bundled-clock-plugin) tells the model the
+  current date and time (set `LINGCORE_TIMEZONE`, or leave it blank for the
+  host's zone), the [`calendar` plugin](docs/plugins.md#bundled-calendar-plugin)
+  saves events as `.ics` files under `workspace/calendar/`, and the
+  `/plan`, `/brief`, `/compare`, `/summarize` and `/event` commands are
+  profile-local prompt templates in `profiles/daily/commands/`.
 - `profiles/teaching/` — teaching assistant built on the Canvas skill (courses, due dates, file sync).
 
 ```
@@ -780,7 +786,7 @@ commitments.
      lifecycle cleanup and `lingcore plugin list/info/new`.
    - The explicit `tools:` ceiling and profile-owned environment remain binding.
 
-4. **v0.5 — Frontend development**
+4. **v0.5 — Frontend development and the daily assistant**
    - Implemented: a separate `profiles/frontend/` profile (rather than widening
      `coding`) enables `plugins: [browser]` and the `browser_*` tools, carries
      a frontend workflow (type-check, lint, tests, build, then snapshot,
@@ -797,6 +803,13 @@ commitments.
    - Implemented: the port bridge also works in Linux OCI containers (Docker,
      Podman) on a Linux host, through a single-use socket mounted into the
      container.
+   - Implemented: the `daily` profile gains the bundled `clock` plugin (the
+     current date, time and timezone with every message, outside the cached
+     system prompt), the bundled `calendar` plugin (offline `.ics` event files
+     with reminders and DST-correct repeats, plus listing saved events), and
+     the `/plan`, `/brief`, `/compare`, `/summarize` and `/event` commands.
+   - Later for daily: a documented Telegram setup and `knowledge` over saved
+     notes.
 
 5. **Next — Tracing and evaluations**
    - Trace model requests, tools, retrieval, retries, compaction, confirmation

@@ -2,8 +2,10 @@
 # Secrets never live here — api_key_env only *names* the env var holding the key.
 # Copy .env.example to .env for local configuration.
 #
-# A general-purpose everyday assistant: research, planning, note-taking, and
-# remembering your preferences across sessions. It does NOT run shell commands.
+# A general-purpose everyday assistant: research, planning, note-taking, saving
+# events to calendar files, and remembering your preferences across sessions.
+# It does NOT run shell commands. Slash commands live in ./commands
+# (/plan, /brief, /compare, /summarize, /event).
 
 name: daily
 # Notes and saved files land in ./workspace inside this profile dir by
@@ -42,11 +44,24 @@ tools:
   - search_web
   - fetch_url
   - memory
+  - calendar_add
+  - calendar_list
 
 # Everyday tools are available immediately, including search over saved notes.
-plugins: [search]
+# clock tells the model the current date and time with each message (its hook
+# needs this explicit entry); calendar's tools engage through the list above.
+plugins: [search, clock]
 
 tool_options:
+  clock:
+    # IANA name such as Asia/Shanghai or Europe/Berlin; blank uses the host's
+    # timezone. The calendar uses the same zone unless calendar.timezone is set.
+    timezone: ${LINGCORE_TIMEZONE:-}
+  calendar:
+    # New .ics files land here, inside the workspace; open or import them in
+    # any calendar app. Nothing is sent to an online calendar.
+    directory: calendar
+    default_duration_minutes: 60
   search_web:
     # SearXNG needs a JSON-enabled instance (SEARXNG_URL in this profile's .env).
     # Optional providers: exa (EXA_API_KEY), deepseek (DEEPSEEK_API_KEY).

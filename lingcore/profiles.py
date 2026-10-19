@@ -39,6 +39,11 @@ PROFILE_TEMPLATE_FILES: dict[str, tuple[str, ...]] = {
         "role.md",
         "workflow.md",
         "world.md",
+        "commands/brief.md",
+        "commands/compare.md",
+        "commands/event.md",
+        "commands/plan.md",
+        "commands/summarize.md",
     ),
     "teaching": (
         ".env.example",
