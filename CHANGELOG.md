@@ -5,6 +5,27 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+### Added
+
+- A bundled `search` plugin with `search_web` for SearXNG (no API key), Exa,
+  and DeepSeek's Search API. It returns bounded source links and snippets,
+  shares the public-web network policy, and resolves API keys per profile.
+
+### Changed
+
+- The daily profile offers web search and local note search directly, without
+  `activate_skill` or the coding-oriented `code-review` option. Its workflow
+  finds sources, verifies current details, and cites links for everyday tasks.
+- Daily research keeps a 64k-token working set with automatic compaction and
+  allows up to 50 tool iterations per turn for search and source verification.
+
+### Fixed
+
+- Search errors do not echo custom API-key variable settings. Malformed Unicode
+  in provider text is replaced and unencodable result URLs are discarded.
+- SearXNG endpoint construction normalizes empty trailing query and fragment
+  delimiters before adding the search path and query.
+
 ## [0.4.1] - 2026-10-19
 
 ### Added

@@ -1,0 +1,18 @@
+name: search
+version: 1.0.0
+api: 1
+description: Search the web with a key-free SearXNG instance, Exa, or DeepSeek.
+module: search_tools.py
+provides:
+- search_web
+options_key: search_web
+skills: null
+commands: null
+environment:
+- name: SEARXNG_URL
+  required: false
+- name: DEEPSEEK_API_KEY
+  required: false
+- option: api_key_env
+  default: EXA_API_KEY
+  required: false

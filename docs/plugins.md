@@ -108,9 +108,10 @@ third-party code loads only for a plugin named in `plugins:`. Plugin names in
 that list must be valid and unique. Hooks, commands and prompt layers always
 require this explicit entry, even for bundled plugins.
 
-Canvas, Codex, Claude Code, Browser and Process are bundled first-party plugins. Their skills
-remain in the catalog, and their code also loads when the profile statically
-names one of their skills or authorizes a provided tool. Existing teaching and
+Canvas, Codex, Claude Code, Browser, Process, and Search are bundled first-party
+plugins. Their declared skills remain in the catalog, and their code also loads
+when the profile statically names one of their skills or authorizes a provided
+tool. Existing teaching and
 coding profiles therefore keep working without edits. Skill catalog order is
 the instruction-only core skills, plugin skills, then the profile's
 `activate_skill.skills_dir` (default `skills`). Two visible plugins cannot
@@ -323,6 +324,80 @@ behind the `browser` skill with `skill_gated_tools`. To make activation ask
 first, add them to `tool_options.activate_skill.high_risk_tools`; that list
 replaces the builtin baseline, so keep `run_shell`, `write_file`, `patch_file`
 and `edit_file` in it.
+
+## Bundled search plugin
+
+The `search` plugin exposes `search_web` for everyday research, including local
+services, travel planning, opening hours, and current information. It uses the
+existing HTTP dependency and needs no additional SDK or browser. The provider
+is selected by the profile; the model cannot switch providers or endpoints.
+
+```yaml
+plugins: [search]
+tools: [search_web, fetch_url]
+tool_options:
+  search_web:
+    provider: searxng              # searxng (default), exa, or deepseek
+    # searxng_url: https://your-instance.example  # or SEARXNG_URL in .env
+    # api_key_env: MY_SEARCH_KEY   # optional override for an API provider
+    max_bytes: 1048576            # response cap; 1024–2097152 bytes
+    timeout: 20                   # per-request network timeout; 1–60 seconds
+```
+
+`search_web(query, max_results=5)` accepts a nonblank query of up to 128 Unicode
+characters and returns up to 10 deduplicated results with titles, direct HTTP(S)
+URLs, snippets, and publication dates when supplied. Include relevant places,
+dates, and search operators in the query. Results are untrusted source data;
+use `fetch_url` to verify important details and cite their source URLs. A search
+never fetches the returned URLs itself.
+
+| Provider | Configuration | Request |
+| --- | --- | --- |
+| SearXNG | `SEARXNG_URL` or `searxng_url`; no API key | `GET <instance>/search?format=json&q=…` |
+| Exa | `EXA_API_KEY` (or `api_key_env`) | `POST https://api.exa.ai/search`, with highlights |
+| DeepSeek | `DEEPSEEK_API_KEY` (or `api_key_env`) | `POST https://api.deepseek.com/v1/tools/search`, with summaries and no full page content |
+
+SearXNG requires an instance with `json` enabled in `search.formats`; many public
+instances disable it and return HTTP 403. The plugin does not pick an arbitrary
+public instance. Configure one you operate or trust. See the official
+[SearXNG Search API](https://docs.searxng.org/dev/search_api.html),
+[Exa Search API](https://exa.ai/docs/reference/search), and
+[DeepSeek Search API](https://api-docs.deepseek.com/guides/search/) contracts.
+
+The daily profile enables this plugin and defaults to SearXNG. Its 64k-token,
+200-message working set uses automatic compaction and allows up to 50 tool
+iterations per turn for search and source verification. Copy its
+`.env.example` to `.env` and set `SEARXNG_URL`. To use an API provider, set
+`LINGCORE_SEARCH_PROVIDER=exa` with `EXA_API_KEY`, or
+`LINGCORE_SEARCH_PROVIDER=deepseek` to reuse `DEEPSEEK_API_KEY`. Keys resolve
+through the selected profile's environment and never appear in tool output.
+The manifest declares all three environment variables as optional because only
+the selected provider needs its settings; missing settings are reported when
+search runs. There is no automatic provider fallback.
+
+Requests share `tool_options.fetch_url`'s network policy, including vetted-IP
+pinning, fake-IP exemptions, and approval before private addresses. A local
+SearXNG instance therefore asks before every query unless explicitly allowed by
+that policy; an approval covers only that one request. For a trusted instance,
+configure a narrow address exemption, for example:
+
+```yaml
+tool_options:
+  search_web:
+    provider: searxng
+    searxng_url: http://192.168.1.20:8080
+  fetch_url:
+    allowed_networks: [192.168.1.20/32]
+```
+
+Use the instance's exact address (`/32` for IPv4, `/128` for IPv6). This
+exemption also applies to `fetch_url` and the browser at that address. For a
+loopback instance, use an IP literal such as `http://127.0.0.1:8080` with
+`127.0.0.1/32`; `localhost` remains a named-local-host approval.
+
+Redirects are refused so credentials and POST bodies stay at their
+intended endpoint. Network errors, invalid JSON, and oversized responses fail
+explicitly; they are not reported as empty search results.
 
 ## Bundled process plugin
 

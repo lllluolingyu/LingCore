@@ -87,3 +87,12 @@ def test_scaffold_failure_never_publishes_partial_dir(tmp_path, monkeypatch):
         scaffold_plugin(root, "hello")
     assert not (root / "plugins" / "hello").exists()
     assert list((root / "plugins").iterdir()) == []
+
+
+def test_search_info_has_unique_environment_and_no_unused_components(tmp_path, capsys):
+    root = profile(tmp_path)
+    assert main(["plugin", "info", "search", "-p", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert out.count("EXA_API_KEY") == 1
+    assert "Skills:" not in out
+    assert "Commands:" not in out

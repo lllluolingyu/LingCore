@@ -39,25 +39,18 @@ tools:
   - edit_file
   - list_dir
   - search
+  - search_web
   - fetch_url
   - memory
-  - activate_skill
 
-# Least privilege / progressive disclosure: `tools` above is the hard ceiling;
-# only these are enabled before any skill activates. `search` (bulk content
-# grep) stays gated until a skill that requests it — e.g. the bundled
-# code-review skill — is activated, which unlocks it for the session.
-initial_tools:
-  - read_file
-  - pdf2md
-  - write_file
-  - edit_file
-  - list_dir
-  - fetch_url
-  - memory
-  - activate_skill
+# Everyday tools are available immediately, including search over saved notes.
+plugins: [search]
 
 tool_options:
+  search_web:
+    # SearXNG needs a JSON-enabled instance (SEARXNG_URL in this profile's .env).
+    # Optional providers: exa (EXA_API_KEY), deepseek (DEEPSEEK_API_KEY).
+    provider: ${LINGCORE_SEARCH_PROVIDER:-searxng}
   fetch_url:
     # Public-web research. A private/loopback target asks for approval first
     # (confirm_private_hosts: false refuses it outright).
@@ -77,9 +70,6 @@ tool_options:
     # model (merge/drop stale notes) instead of hard-failing the write.
     auto_compact: true
     compact_at_ratio: 0.8
-  activate_skill:
-    skills_dir: skills
-    allow_concurrent: false
 
 # Text fallbacks for kinds missing from llm.modalities — consulted only when
 # a kind is NOT registered above, so with [image, file] neither applies.
@@ -96,11 +86,18 @@ tool_options:
 #     api_key_env: VISION_API_KEY
 
 memory:
-  max_messages: 60
-  max_tokens: 16000
+  # Keep searches and verified source pages across a multi-turn research task.
+  max_messages: 200
+  max_tokens: 64000
+  evict_to_ratio: 0.5
+  compaction:
+    enabled: true
+    compact_at_ratio: 0.85
+    keep_recent_ratio: 0.35
+    max_summary_chars: 8000
 
 loop:
-  max_iters: 20
+  max_iters: 50
   parallel_tools: true
 
 guardrail:

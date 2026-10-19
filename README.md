@@ -315,7 +315,11 @@ four examples (`lingcore profile list` shows the installed set):
 
 - `profiles/coding/` — default profile, targets a keyed provider via env vars.
 - `profiles/frontend/` — the coding agent plus the `browser` and `process` plugins for running dev servers and checking web UIs (needs the `lingcore[browser]` extra; see [Frontend development](#frontend-development)).
-- `profiles/daily/` — general-purpose assistant (research, notes, persistent memory; no shell).
+- `profiles/daily/` — everyday assistant (web research, local notes, persistent
+  memory; no shell or coding-skill activation). Web search uses the bundled
+  [`search` plugin](docs/plugins.md#bundled-search-plugin): set `SEARXNG_URL`
+  for a JSON-enabled SearXNG instance, or select Exa / DeepSeek in the profile's
+  `.env.example` configuration.
 - `profiles/teaching/` — teaching assistant built on the Canvas skill (courses, due dates, file sync).
 
 ```
@@ -628,10 +632,11 @@ provider key named by the teaching profile if it is not already exported. A
 `CANVAS_TOKEN` in the teaching profile's `.env` overrides an exported value, so
 each profile reliably selects its own Canvas account.
 
-The bundled instruction-only `code-review` skill is also live: the `daily`
-profile exposes `activate_skill`, and its authorized `read_file`/`search` ceiling
-makes `code-review` dynamically offerable. To make it always-on in another
-profile, add `skills: [code-review]` and authorize the tools it should receive.
+The bundled instruction-only `code-review` skill remains available to profiles
+that expose `activate_skill` and authorize its requested tools. To make it
+always-on, add `skills: [code-review]` and authorize the tools it should receive.
+The `daily` profile uses its everyday tools directly and does not offer coding
+skills.
 
 Two bundled first-party plugins contribute collaboration skills connecting LingCore to independently installed
 coding-agent CLIs:

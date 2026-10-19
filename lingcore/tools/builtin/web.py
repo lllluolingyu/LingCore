@@ -11,6 +11,7 @@ import asyncio
 import ipaddress
 import re
 import socket
+from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
@@ -203,6 +204,7 @@ async def _authorize(
     *,
     ask: bool,
     approved: set[tuple[str, str | None]],
+    tool_name: str = "fetch_url",
 ) -> str | None:
     """Return the IP to pin, asking the user before a non-public target.
 
@@ -219,23 +221,29 @@ async def _authorize(
         return target.pinned
     if not ask or ctx.confirm is None:
         raise ToolError(blocked.error())
-    if not await ctx.confirm(blocked.prompt(url)):
+    if not await ctx.confirm(blocked.prompt(url, tool=tool_name)):
         raise ToolError(f"user declined: {blocked.error()}")
     approved.add(key)
     return target.pinned
 
 
 def _build_request(
-    client: httpx.AsyncClient, url: str, pinned_ip: str | None
+    client: httpx.AsyncClient,
+    url: str,
+    pinned_ip: str | None,
+    *,
+    method: str = "GET",
+    extra_headers: Mapping[str, str] | None = None,
+    content: bytes | None = None,
 ) -> httpx.Request:
-    """Build a GET request, pinning the connection to *pinned_ip* when set.
+    """Build a request, pinning the connection to *pinned_ip* when set.
 
     Pinning rewrites the authority to the vetted IP but keeps the Host header
     and (for TLS) the SNI/cert-verification hostname as the original host. That
     closes the DNS-rebinding window — httpx never re-resolves the name — while
     keeping certificate verification bound to the hostname (verified live).
     """
-    headers = {"User-Agent": _USER_AGENT}
+    headers = {"User-Agent": _USER_AGENT, **(extra_headers or {})}
     target = url
     sni: str | None = None
     if pinned_ip is not None:
@@ -254,7 +262,10 @@ def _build_request(
         headers["Host"] = host_header
         if parsed.scheme == "https":
             sni = parsed.hostname
-    req = client.build_request("GET", target, headers=headers)
+    if content is None:
+        req = client.build_request(method, target, headers=headers)
+    else:
+        req = client.build_request(method, target, headers=headers, content=content)
     if sni is not None:
         req.extensions["sni_hostname"] = sni
     return req
