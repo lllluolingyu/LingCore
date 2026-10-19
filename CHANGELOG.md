@@ -5,6 +5,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-19
+
 ### Added
 
 - `process_start` can bridge a declared `port` from a Linux OCI container
@@ -33,6 +35,13 @@ Notable user-facing changes to LingCore are documented here. The project uses
 - MCP plugin components, previously planned for v0.4.x, are postponed with no
   target release. Trusted in-process plugins remain the way to integrate
   external services; the roadmap keeps the original MCP scope for later.
+
+### Fixed
+
+- Closing a finished turn's event stream late, after the next turn had
+  started, could consume that next turn's usage tally and timing, so its
+  `TurnStatsReported` and `turn_stats` event were lost. A turn's stats are
+  now captured before its last events are yielded and belong to that turn only.
 
 ## [0.4.2] - 2026-10-19
 
@@ -446,7 +455,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 - Initial tagged preview of the config-driven async agent runtime.
 
-[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/lllluolingyu/LingCore/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/lllluolingyu/LingCore/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/lllluolingyu/LingCore/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/lllluolingyu/LingCore/compare/v0.3.1...v0.4.0
