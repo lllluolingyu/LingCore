@@ -224,6 +224,7 @@ class Agent:
         # outlive _clear_turn_state, which runs before the terminal event that
         # reports them; _finish_turn_stats consumes them exactly once.
         self._turn_clock: TurnClock | None = None
+        self._turn_stats_lease: object | None = None
         self._turn_stats_committed = False  # the user message reached memory
         self._turn_stats_seq: int | None = None  # ... and this durable row
 
@@ -763,7 +764,9 @@ class Agent:
         clock = self._turn_clock
         return clock.waiting() if clock is not None else nullcontext()
 
-    def _finish_turn_stats(self, *, persist: bool = True) -> TurnStats | None:
+    def _finish_turn_stats(
+        self, lease: object | None = None, *, persist: bool = True
+    ) -> TurnStats | None:
         """Close the turn's clock and usage tally; persist and return its stats.
 
         Only a turn whose user message was committed has stats: blocked input
@@ -771,6 +774,11 @@ class Agent:
         rollback has run, so a stopped or failed turn's billed requests stay
         on record. Persisting is display data, so a store failure is ignored.
         """
+        # Stats outlive the conversation lease; a stale generator may close
+        # after another turn has started and must not consume its tally.
+        if lease is not None and self._turn_stats_lease is not lease:
+            return None
+        self._turn_stats_lease = None
         clock, self._turn_clock = self._turn_clock, None
         if clock is None:
             return None
@@ -872,6 +880,7 @@ class Agent:
         self._turn_cancel_requested = False
         self._turn_committed = None
         self._turn_clock = TurnClock()
+        self._turn_stats_lease = lease
         self._turn_stats_committed = False
         self._turn_stats_seq = None
         self.usage_meter.open_tally()
@@ -893,15 +902,21 @@ class Agent:
                         event = await anext(turn)
                     except StopAsyncIteration:
                         break
+                    # Capture terminal stats before yielding: the conversation
+                    # lease is already released, so a consumer can start a new
+                    # turn while handling the final usage events.
+                    stats = (
+                        self._finish_turn_stats(lease)
+                        if isinstance(event, Final | Error)
+                        else None
+                    )
                     # Usage precedes the event that followed its request, so
                     # it always arrives before the turn's terminal event; the
                     # turn's totals come last, immediately before its outcome.
                     for usage in self.usage_meter.drain():
                         yield UsageReported(usage)
-                    if isinstance(event, Final | Error):
-                        stats = self._finish_turn_stats()
-                        if stats is not None:
-                            yield TurnStatsReported(stats)
+                    if stats is not None:
+                        yield TurnStatsReported(stats)
                     yield event
         except asyncio.CancelledError:
             # Cancellation alone deliberately retains the checkpoint for the
@@ -931,9 +946,9 @@ class Agent:
                 try:
                     self._rollback_turn(lease, "abandoned")
                 except Exception:
-                    self._finish_turn_stats(persist=False)
+                    self._finish_turn_stats(lease, persist=False)
                 else:
-                    self._finish_turn_stats()
+                    self._finish_turn_stats(lease)
             raise
         except Exception as exc:
             notices = self._hooks.drain_notices()
@@ -946,11 +961,11 @@ class Agent:
                 message += (
                     f"; rollback failed: {type(rollback_exc).__name__}: {rollback_exc}"
                 )
+            stats = self._finish_turn_stats(lease, persist=rolled_back)
             for usage in self.usage_meter.drain():
                 yield UsageReported(usage)
             for notice in notices:
                 yield notice
-            stats = self._finish_turn_stats(persist=rolled_back)
             if stats is not None:
                 yield TurnStatsReported(stats)
             yield Error(message)

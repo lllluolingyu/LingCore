@@ -52,12 +52,16 @@ class _Metered:
     async def stream(self, messages, tools=None):
         turn = self.turns.pop(0)
         assert self.agent is not None
-        self.agent.usage_meter.record(TokenUsage("m", *turn["usage"]))
+        usage = TokenUsage("m", *turn["usage"])
+        if not turn.get("usage_at_end"):
+            self.agent.usage_meter.record(usage)
         if turn.get("hang"):
             yield LLMChunk(text_delta="partial")
             await asyncio.Event().wait()
         if turn.get("text"):
             yield LLMChunk(text_delta=turn["text"])
+        if turn.get("usage_at_end"):
+            self.agent.usage_meter.record(usage)
         yield LLMChunk(tool_calls=turn.get("tool_calls"), finish_reason="stop")
 
 
@@ -173,6 +177,42 @@ async def test_stopped_turn_keeps_its_billed_stats(tmp_path: Path) -> None:
         stats = store.turn_stats(sid)
         assert sorted(stats) == [0, 2]  # written after Stop's truncation
         assert stats[2].usage == (TokenUsage("m", 20, 2),)
+
+
+@pytest.mark.parametrize("pause_at", [UsageReported, TurnStatsReported, Final])
+async def test_closing_stale_stream_preserves_next_turn_stats(
+    tmp_path: Path, pause_at
+) -> None:
+    with SessionStore(tmp_path / "s.db") as store:
+        agent, _ = _build(
+            tmp_path,
+            store,
+            [
+                {"text": "first", "usage": (10, 1, 0), "usage_at_end": True},
+                {"tool_calls": [READ], "usage": (20, 2, 0)},
+                {"text": "second", "usage": (30, 3, 0)},
+            ],
+        )
+        async with agent:
+            old_stream = agent.run("one")
+            while not isinstance(await anext(old_stream), pause_at):
+                pass
+            sid = agent.memory.session_id  # type: ignore[attr-defined]
+            first_stats = store.turn_stats(sid)[0]
+
+            new_stream = agent.run("two")
+            first_event = await anext(new_stream)
+            assert isinstance(first_event, UsageReported)
+            await old_stream.aclose()
+
+            # Closing the old generator must not persist the live turn early.
+            assert store.turn_stats(sid) == {0: first_stats}
+            remaining = [event async for event in new_stream]
+            assert isinstance(remaining[-1], Final)
+            assert isinstance(remaining[-2], TurnStatsReported)
+            stats = remaining[-2].stats
+            assert stats.usage == (TokenUsage("m", 20, 2), TokenUsage("m", 30, 3))
+            assert store.turn_stats(sid) == {0: first_stats, 2: stats}
 
 
 def test_rewind_and_fork_follow_turn_stats(tmp_path: Path) -> None:
