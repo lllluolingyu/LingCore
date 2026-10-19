@@ -5,6 +5,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-19
+
 ### Added
 
 - The browser plugin can attach to an already running Chromium on loopback
@@ -15,6 +17,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
   proxy's address pinning or redirect-hop coverage.
 - `browser_snapshot` takes optional `ref` and `depth` arguments to return one
   element's subtree or only the top levels of the page.
+- Browser tool results report console warnings and errors, uncaught page errors,
+  failed requests, and HTTP error responses as bounded, deduplicated notes.
 - `browser_resize` changes the active tab's viewport during a session, within
   the startup viewport bounds, to check responsive layouts. It changes only the
   size and is refused for an attached browser.
@@ -40,6 +44,16 @@ Notable user-facing changes to LingCore are documented here. The project uses
   `/dev/null` as stdin instead of inheriting the frontend's terminal.
 - The CLI, LingChat and agentgui frame `process_start` confirmations as
   commands and never offer "always allow" for them.
+- File searches skip frontend build output and cache directories.
+- Update Playwright to `1.64.0`.
+
+### Fixed
+
+- `patch_file` anchors reads and writes to a validated directory descriptor so
+  symlink swaps cannot redirect them outside the workspace, and preserves CRLF
+  and CR line endings when applying LF-written patches.
+- The Bubblewrap sandbox places `HOME` under its temporary filesystem so package
+  manager caches and configuration do not accumulate in the workspace.
 
 ### Removed
 
@@ -373,7 +387,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 - Initial tagged preview of the config-driven async agent runtime.
 
-[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/lllluolingyu/LingCore/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/lllluolingyu/LingCore/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/lllluolingyu/LingCore/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/lllluolingyu/LingCore/compare/v0.2.0...v0.3.0
