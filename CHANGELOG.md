@@ -5,6 +5,18 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+### Fixed
+
+- Calendar listings keep unsupported recurring series visible even after their
+  original occurrence, with an explicit incomplete-coverage warning. Adding an
+  event also warns when those series prevent a complete overlap check.
+- Calendar events preserve explicitly chosen instants during the repeated hour
+  at the end of daylight saving, compare timed endpoints in UTC, and retain
+  elapsed durations across offset changes. Recurrences skip nonexistent local
+  times without consuming `COUNT`. A repeating event starting in the second
+  occurrence of an ambiguous time uses `EXDATE`/`RDATE` to preserve that instant
+  while keeping future occurrences at the same local time.
+
 ### Added
 
 - `calendar_remove` takes events off the calendar by the id that

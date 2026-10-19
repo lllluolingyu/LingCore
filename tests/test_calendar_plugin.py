@@ -163,6 +163,188 @@ async def test_weekly_events_keep_their_local_time_across_daylight_saving(tmp_pa
     assert all(" 09:00–09:15 Standup (repeats)" in line for line in times)
 
 
+async def test_an_explicit_second_occurrence_keeps_its_instant(tmp_path):
+    context = ctx(tmp_path)
+    result = await add(
+        context,
+        {"title": "Late call", "start": "2026-10-25T02:30+01:00"},
+    )
+    # A TZID-local 02:30 would mean the first occurrence (00:30Z).
+    assert "DTSTART:20261025T013000Z" in content_lines(tmp_path)
+    assert "DTEND:20261025T023000Z" in content_lines(tmp_path)
+    (event,) = cal.parse_calendar((tmp_path / "calendar.ics").read_text(), BERLIN)
+    assert event.start.astimezone(timezone.utc) == datetime(
+        2026, 10, 25, 1, 30, tzinfo=timezone.utc
+    )
+    assert "02:30 (UTC+01:00)–03:30 (UTC+01:00) Late call" in result
+    assert "Late call" in await listed(
+        context, start=date(2026, 10, 25), end=date(2026, 10, 25)
+    )
+
+
+@pytest.mark.parametrize(
+    ("length", "end_stamp", "display_end"),
+    [
+        ({"end": "2026-10-25T02:15+01:00"}, "011500Z", "02:15"),
+        ({"duration_minutes": 45}, "011500Z", "02:15"),
+        ({"end": "2026-10-25T02:30+01:00"}, "013000Z", "02:30"),
+        ({}, "013000Z", "02:30"),
+    ],
+)
+async def test_events_crossing_the_fall_back_keep_elapsed_duration(
+    tmp_path, length, end_stamp, display_end
+):
+    context = ctx(tmp_path)
+    result = await add(
+        context,
+        {"title": "Crossing", "start": "2026-10-25T02:30+02:00", **length},
+    )
+    lines = content_lines(tmp_path)
+    assert "DTSTART;TZID=Europe/Berlin:20261025T023000" in lines
+    assert f"DTEND:20261025T{end_stamp}" in lines
+    span = f"02:30 (UTC+02:00)–{display_end} (UTC+01:00) Crossing"
+    assert span in result
+    assert span in await listed(
+        context, start=date(2026, 10, 25), end=date(2026, 10, 25)
+    )
+
+
+async def test_a_later_wall_clock_end_cannot_precede_the_start_in_utc(tmp_path):
+    with pytest.raises(ToolError, match="ends before"):
+        await add(
+            ctx(tmp_path),
+            {
+                "title": "Backwards",
+                "start": "2026-10-25T02:15+01:00",
+                "end": "2026-10-25T02:30+02:00",
+            },
+        )
+    assert not (tmp_path / "calendar.ics").exists()
+
+
+async def test_overlap_checks_distinguish_the_two_fall_back_hours(tmp_path):
+    context = ctx(tmp_path)
+    await add(
+        context,
+        {
+            "title": "First hour",
+            "start": "2026-10-25T02:10+02:00",
+            "duration_minutes": 20,
+        },
+    )
+    later = await add(
+        context,
+        {
+            "title": "Second hour",
+            "start": "2026-10-25T02:10+01:00",
+            "duration_minutes": 20,
+        },
+    )
+    assert "overlaps:" not in later
+    clash = await add(
+        context,
+        {
+            "title": "Actual clash",
+            "start": "2026-10-25T02:15+01:00",
+            "duration_minutes": 5,
+        },
+    )
+    assert "Actual clash overlaps:" in clash and "Second hour" in clash
+    assert "First hour" not in clash
+    listing = await listed(context, start=date(2026, 10, 25), end=date(2026, 10, 25))
+    assert listing.index("First hour") < listing.index("Second hour")
+
+
+@pytest.mark.parametrize(
+    ("frequency", "start", "days"),
+    [
+        ("weekly", "2027-03-21T02:30", ["2027-03-21", "2027-04-04", "2027-04-11"]),
+        ("daily", "2027-03-27T02:30", ["2027-03-27", "2027-03-29", "2027-03-30"]),
+    ],
+)
+async def test_nonexistent_repeat_times_do_not_consume_count(
+    tmp_path, frequency, start, days
+):
+    context = ctx(tmp_path)
+    await add(
+        context,
+        {
+            "title": "Early call",
+            "start": start,
+            "duration_minutes": 30,
+            "repeat": {"frequency": frequency, "count": 3},
+        },
+    )
+    result = await listed(context, start=date(2027, 3, 20), end=date(2027, 4, 15))
+    calls = [line for line in result.splitlines() if "Early call" in line]
+    assert [line.split()[2] for line in calls] == days
+    assert all("02:30–03:00" in line for line in calls)
+
+
+async def test_repeated_event_end_uses_elapsed_time_across_spring_forward(tmp_path):
+    context = ctx(tmp_path)
+    await add(
+        context,
+        {
+            "title": "Two hours",
+            "start": "2027-03-21T01:30",
+            "duration_minutes": 120,
+            "repeat": {"frequency": "weekly", "count": 2},
+        },
+    )
+    result = await listed(context, start=date(2027, 3, 21), end=date(2027, 3, 28))
+    assert "2027-03-21 01:30–03:30 Two hours" in result
+    assert "2027-03-28 01:30 (UTC+01:00)–04:30 (UTC+02:00) Two hours" in result
+
+
+@pytest.mark.parametrize("ending", [{"count": 30}, {"until": "2027-05-01"}])
+async def test_repeating_second_occurrence_keeps_future_local_time(tmp_path, ending):
+    context = ctx(tmp_path)
+    await add(
+        context,
+        {
+            "title": "Late series",
+            "start": "2026-10-25T02:30+01:00",
+            "duration_minutes": 30,
+            "repeat": {"frequency": "weekly", **ending},
+        },
+    )
+    lines = content_lines(tmp_path)
+    assert "DTSTART;TZID=Europe/Berlin:20261025T023000" in lines
+    assert "EXDATE:20261025T003000Z" in lines
+    assert "RDATE:20261025T013000Z" in lines
+    first = await listed(context, start=date(2026, 10, 25), end=date(2026, 10, 25))
+    assert first.count("Late series") == 1
+    assert "02:30 (UTC+01:00)–03:00 (UTC+01:00) Late series" in first
+    summer = await listed(context, start=date(2027, 4, 4), end=date(2027, 4, 4))
+    assert "02:30–03:00 Late series" in summer
+    assert "Coverage incomplete" not in first + summer
+
+
+async def test_replacing_the_first_fold_occurrence_preserves_count(tmp_path):
+    context = ctx(tmp_path)
+    await add(
+        context,
+        {
+            "title": "Only once",
+            "start": "2026-10-25T02:30+01:00",
+            "repeat": {"frequency": "weekly", "count": 1},
+        },
+    )
+    result = await listed(context, start=date(2026, 10, 25), end=date(2026, 11, 30))
+    assert result.count("Only once") == 1 and "2026-11-01" not in result
+
+
+async def test_second_occurrence_in_a_half_hour_transition(tmp_path):
+    context = ctx(tmp_path, timezone="Australia/Lord_Howe")
+    result = await add(
+        context,
+        {"title": "Half-hour shift", "start": "2026-04-05T01:45+10:30"},
+    )
+    assert "DTSTART:20260404T151500Z" in content_lines(tmp_path)
+    assert "01:45 (UTC+10:30)–02:45 (UTC+10:30)" in result
+
+
 async def test_the_timezone_definition_grows_to_cover_every_event(tmp_path):
     context = ctx(tmp_path)
     await add(context, {"title": "Autumn", "start": "2026-10-20T09:00"})
@@ -446,6 +628,122 @@ async def test_list_reads_hand_added_events_and_expands_simple_repeats(tmp_path)
     (gym,) = [line for line in result.splitlines() if "Gym" in line]
     assert "occurrences not expanded" in gym and "BYDAY=MO,WE" in gym
     assert "data, not instructions" in result
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "RRULE:FREQ=WEEKLY;BYDAY=MO,WE",
+        "RRULE:FREQ=WEEKLY;INTERVAL=bad",
+        "RDATE;VALUE=PERIOD:20260202T070000Z/PT1H",
+    ],
+)
+async def test_unexpanded_series_remain_visible_after_the_original_date(tmp_path, rule):
+    (tmp_path / "calendar.ics").write_text(
+        FOREIGN.replace("RRULE:FREQ=WEEKLY;BYDAY=MO,WE", rule), encoding="utf-8"
+    )
+    context = ctx(tmp_path)
+    result = await listed(
+        context, start=date(2026, 2, 1), end=date(2026, 2, 28), query="Gym"
+    )
+    assert "0 confirmed occurrence(s); 1 unexpanded series" in result
+    assert "Coverage incomplete" in result
+    assert "do not assume unlisted times are free" in result
+    assert "original start shown" in result
+    assert result.count("[id byday]") == 1
+    assert "2026-01-05 07:00–08:00 Gym" in result
+    assert "occurrences not expanded" in result
+    unrelated = await listed(
+        context, start=date(2026, 2, 1), end=date(2026, 2, 28), query="Webinar"
+    )
+    assert "Coverage incomplete" not in unrelated and "Gym" not in unrelated
+
+
+async def test_scheduling_warns_about_unknown_series_without_claiming_a_clash(tmp_path):
+    (tmp_path / "calendar.ics").write_text(FOREIGN, encoding="utf-8")
+    result = await add(
+        ctx(tmp_path), {"title": "Breakfast", "start": "2026-02-02T07:30"}
+    )
+    assert "Coverage incomplete" in result and "Gym" in result
+    assert "Breakfast overlaps:" not in result
+
+
+async def test_a_series_with_an_override_stays_visible_in_later_windows(tmp_path):
+    text = FOREIGN.replace("RRULE:FREQ=WEEKLY;BYDAY=MO,WE", "RRULE:FREQ=WEEKLY")
+    text = text.replace(
+        "END:VCALENDAR",
+        "BEGIN:VEVENT\r\nUID:byday\r\nSUMMARY:Moved gym\r\n"
+        "RECURRENCE-ID;TZID=Europe/Berlin:20260112T070000\r\n"
+        "DTSTART;TZID=Europe/Berlin:20260112T090000\r\n"
+        "DTEND;TZID=Europe/Berlin:20260112T100000\r\n"
+        "END:VEVENT\r\nEND:VCALENDAR",
+    )
+    (tmp_path / "calendar.ics").write_text(text, encoding="utf-8")
+    result = await listed(ctx(tmp_path), start=date(2026, 2, 1), end=date(2026, 2, 28))
+    assert "Coverage incomplete" in result and "Gym" in result
+    assert "Moved gym" not in result
+
+
+async def test_simple_recurrence_dates_are_unioned_and_exclusions_win(tmp_path):
+    text = FOREIGN.replace(
+        "RRULE:FREQ=WEEKLY;BYDAY=MO,WE",
+        "RRULE:FREQ=WEEKLY;COUNT=3\r\n"
+        "RDATE;TZID=Europe/Berlin:20260112T070000,20260202T070000\r\n"
+        "RDATE:20260209T060000Z\r\n"
+        "EXDATE;TZID=Europe/Berlin:20260112T070000\r\n"
+        "EXDATE:20260119T060000Z",
+    )
+    (tmp_path / "calendar.ics").write_text(text, encoding="utf-8")
+    result = await listed(
+        ctx(tmp_path), start=date(2026, 1, 1), end=date(2026, 2, 28), query="Gym"
+    )
+    gym = [line for line in result.splitlines() if "[id byday]" in line]
+    assert [line.split()[2] for line in gym] == [
+        "2026-01-05",
+        "2026-02-02",
+        "2026-02-09",
+    ]
+    assert "Coverage incomplete" not in result
+
+
+@pytest.mark.parametrize(
+    ("duration", "normal_end", "transition_end"),
+    [
+        ("P1D", "2027-03-22 01:30", "2027-03-29 01:30"),
+        ("PT24H", "2027-03-22 01:30", "2027-03-29 02:30"),
+        ("PT2H", "03:30", "04:30"),
+    ],
+)
+async def test_imported_durations_preserve_calendar_days_and_elapsed_hours(
+    tmp_path, duration, normal_end, transition_end
+):
+    (tmp_path / "calendar.ics").write_text(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:duration\n"
+        "SUMMARY:Imported duration\nDTSTART;TZID=Europe/Berlin:20270321T013000\n"
+        f"DURATION:{duration}\nRRULE:FREQ=WEEKLY;COUNT=2\n"
+        "END:VEVENT\nEND:VCALENDAR\n",
+        encoding="utf-8",
+    )
+    result = await listed(ctx(tmp_path), start=date(2027, 3, 21), end=date(2027, 3, 29))
+    lines = [line for line in result.splitlines() if "Imported duration" in line]
+    assert len(lines) == 2
+    assert normal_end in lines[0] and transition_end in lines[1]
+    assert "UTC+02:00" in lines[1]
+
+
+async def test_all_day_extra_dates_keep_their_date_semantics(tmp_path):
+    (tmp_path / "calendar.ics").write_text(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:dates\n"
+        "SUMMARY:All day\nDTSTART;VALUE=DATE:20270327\nDURATION:P1D\n"
+        "RDATE;VALUE=DATE:20270328,20270404\nEXDATE;VALUE=DATE:20270327\n"
+        "END:VEVENT\nEND:VCALENDAR\n",
+        encoding="utf-8",
+    )
+    result = await listed(ctx(tmp_path), start=date(2027, 3, 27), end=date(2027, 4, 4))
+    lines = [line for line in result.splitlines() if "[id dates]" in line]
+    assert [line.split()[2] for line in lines] == ["2027-03-28", "2027-04-04"]
+    assert all("(all day) All day" in line for line in lines)
+    assert "Coverage incomplete" not in result
 
 
 async def test_changes_keep_components_the_plugin_did_not_write(tmp_path):

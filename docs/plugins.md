@@ -484,7 +484,13 @@ event, remove it and add the corrected one.
 - **Hand edits survive.** Components the plugin did not write (a `VTODO`, an
   event added in another app and saved back) and extra calendar properties
   such as `X-WR-CALNAME` are kept as they are.
-- **Daylight saving.** Timed events carry their IANA `TZID`. The file's
+- **Daylight saving.** Timed events normally carry their IANA `TZID`; an
+  explicitly chosen second occurrence of a repeated clock time is saved in
+  UTC to preserve its instant. For a recurring event, `EXDATE`/`RDATE` replace
+  that first occurrence while the rule keeps its local time. Comparisons and
+  timed event lengths use elapsed time, while imported `DURATION` values keep
+  their nominal calendar days or weeks. Displayed ambiguous times include
+  their UTC offsets. The file's
   `VTIMEZONE` for that zone is regenerated on every change to list the zone's
   offset changes over all of its events (each series at most ten years ahead),
   so a weekly 09:00 meeting stays at 09:00 after the clocks change, even in
@@ -494,11 +500,15 @@ event, remove it and add the corrected one.
 - **Listing.** `calendar_list` defaults to `list_days` from today; with a
   `query` (matched case-insensitively against titles, places and notes) and no
   `end` it searches ten years ahead. Repeats using only `FREQ`, `INTERVAL`,
-  `COUNT` and `UNTIL` are expanded (the 31st is skipped in shorter months, as
-  RFC 5545 says); other rules, and series with `RDATE`, `EXDATE` or overridden
-  occurrences, are listed once and marked as not expanded. Cancelled events
-  are omitted. At most 100 entries are shown. Titles and places are untrusted
-  file content, and the result says so.
+  `COUNT` and `UNTIL` are expanded, including date or date-time `RDATE` additions
+  and `EXDATE` exclusions. Invalid dates and nonexistent local times are skipped
+  without consuming `COUNT`, as RFC 5545 requires. Other rules, period-valued
+  `RDATE`s and series with overridden occurrences are listed separately, even
+  when their original start is outside the requested range. The result warns
+  that coverage is incomplete and unlisted times cannot be assumed free;
+  `calendar_add` gives the same warning when checking for overlaps. Cancelled
+  events are omitted. At most 100 entries are shown. Titles and places are
+  untrusted file content, and the result says so.
 - **Ids.** Events the plugin adds get a short `UID` such as
   `3f9a1c2b7d4e@lingcore`; listings show every event's `UID` as its id, which is
   what `calendar_remove` takes.
