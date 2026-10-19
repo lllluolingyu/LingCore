@@ -81,10 +81,10 @@ class FakeSender:
         self.callback_answers.append((callback_query_id, text, show_alert))
 
 
-def _setup(tmp_path: Path, monkeypatch, *, llm_factory=None):
+def _setup(tmp_path: Path, monkeypatch, *, llm_factory=None, profile_text=PROFILE):
     root = tmp_path / "profile"
     root.mkdir()
-    (root / "config.yaml").write_text(PROFILE, encoding="utf-8")
+    (root / "config.yaml").write_text(profile_text, encoding="utf-8")
     (root / "telegram.yaml").write_text(
         """
 token_env: TELEGRAM_TEST_TOKEN
@@ -163,6 +163,32 @@ async def test_two_users_are_isolated_in_state_profile_and_attachments(
     assert not (two.agent.tool_ctx.workspace / "attachments/notes.txt").exists()
     assert one.store.db_path != two.store.db_path
     assert profile.tool_options["memory"] == {"max_bytes": 1234}
+    await bridge.shutdown()
+
+
+async def test_each_user_keeps_their_own_calendar(tmp_path, monkeypatch):
+    profile_text = (
+        PROFILE.replace(
+            "tools: [memory]", "tools: [memory, calendar_add, calendar_list]"
+        )
+        + "  calendar:\n    timezone: Europe/Berlin\n"
+    )
+    profile, config, bridge = _setup(tmp_path, monkeypatch, profile_text=profile_text)
+    sender = FakeSender()
+    one = await bridge.runtime_for(11, 11, sender)
+    two = await bridge.runtime_for(22, 22, sender)
+    for user, runtime in ((11, one), (22, two)):
+        options = runtime.profile.tool_options["calendar"]
+        assert options["path"].endswith(f".lingcore/telegram/users/{user}/calendar.ics")
+        assert options["timezone"] == "Europe/Berlin"
+        assert "allow_absolute_path" not in options
+    assert profile.tool_options["calendar"] == {"timezone": "Europe/Berlin"}
+    add = one.agent.tools.get("calendar_add")
+    args = add.validate_args({"events": [{"title": "Private", "start": "2026-10-21"}]})
+    await add.run(args, one.agent.tool_ctx)
+    assert (config.state_path / "users/11/calendar.ics").is_file()
+    assert not (config.state_path / "users/22/calendar.ics").exists()
+    assert not (profile._source_dir / "calendar.ics").exists()
     await bridge.shutdown()
 
 

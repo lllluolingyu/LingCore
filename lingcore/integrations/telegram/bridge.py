@@ -42,6 +42,15 @@ _LOG = logging.getLogger(__name__)
 _UPDATE_CACHE_SIZE = 4_096
 _ALBUM_CACHE_SIZE = 1_024
 _ALBUM_TTL_SECONDS = 300.0
+# (tool_options key, per-user file name, tools that write it)
+_PER_USER_FILES = (
+    ("memory", "memory.md", frozenset({"memory"})),
+    (
+        "calendar",
+        "calendar.ics",
+        frozenset({"calendar_add", "calendar_list", "calendar_remove"}),
+    ),
+)
 
 LLMFactory = Callable[[int], Any]
 
@@ -720,20 +729,20 @@ class TelegramBridge:
         # mappings: future model changes must not alias mutable tenant options.
         scoped.tool_options = copy.deepcopy(scoped.tool_options)
         workspace = user_dir / "workspace"
-        memory_path = user_dir / "memory.md"
-        sessions_path = user_dir / "sessions.db"
         absolute_state = Path(self.config.state_dir).expanduser().is_absolute()
-        if absolute_state:
-            configured_memory_path = str(memory_path)
-            configured_sessions_path = str(sessions_path)
-        else:
-            source_dir = getattr(scoped, "_source_dir", None)
-            if source_dir is None:  # guarded by Telegram config loading
-                raise ConfigError("Telegram scoped profile has no source directory")
-            configured_memory_path = str(memory_path.relative_to(source_dir.resolve()))
-            configured_sessions_path = str(
-                sessions_path.relative_to(source_dir.resolve())
-            )
+        source_dir = getattr(scoped, "_source_dir", None)
+        if not absolute_state and source_dir is None:
+            # guarded by Telegram config loading
+            raise ConfigError("Telegram scoped profile has no source directory")
+
+        def configured(name: str) -> str:
+            path = user_dir / name
+            if absolute_state:
+                return str(path)
+            assert source_dir is not None
+            return str(path.relative_to(source_dir.resolve()))
+
+        configured_sessions_path = configured("sessions.db")
         scoped.workspace = str(workspace)
         session_updates: dict[str, Any] = {
             "enabled": True,
@@ -744,15 +753,19 @@ class TelegramBridge:
             # all derived absolute files inherit that consent.
             session_updates["allow_absolute_path"] = True
         scoped.sessions = scoped.sessions.model_copy(update=session_updates)
-        if "memory" in scoped.tools:
-            raw_memory = scoped.tool_options.get("memory", {})
-            if not isinstance(raw_memory, Mapping):
-                raise ConfigError("tool_options.memory must be a mapping")
-            memory_options = copy.deepcopy(dict(raw_memory))
-            memory_options["path"] = configured_memory_path
+        # Profile-scoped files each user writes get a per-user path, like the
+        # sessions database: the memory file and the calendar.
+        for key, filename, tools in _PER_USER_FILES:
+            if not tools & set(scoped.tools):
+                continue
+            raw_options = scoped.tool_options.get(key, {})
+            if not isinstance(raw_options, Mapping):
+                raise ConfigError(f"tool_options.{key} must be a mapping")
+            options = copy.deepcopy(dict(raw_options))
+            options["path"] = configured(filename)
             if absolute_state:
-                memory_options["allow_absolute_path"] = True
-            scoped.tool_options["memory"] = memory_options
+                options["allow_absolute_path"] = True
+            scoped.tool_options[key] = options
 
         async def confirm(command: str) -> bool:
             sender = self._senders.get(user_id)

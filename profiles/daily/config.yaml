@@ -3,7 +3,7 @@
 # Copy .env.example to .env for local configuration.
 #
 # A general-purpose everyday assistant: research, planning, note-taking, saving
-# events to calendar files, and remembering your preferences across sessions.
+# keeping your calendar, and remembering your preferences across sessions.
 # It does NOT run shell commands. Slash commands live in ./commands
 # (/plan, /brief, /compare, /summarize, /event).
 
@@ -46,6 +46,7 @@ tools:
   - memory
   - calendar_add
   - calendar_list
+  - calendar_remove
 
 # Everyday tools are available immediately, including search over saved notes.
 # clock tells the model the current date and time with each message (its hook
@@ -58,10 +59,13 @@ tool_options:
     # timezone. The calendar uses the same zone unless calendar.timezone is set.
     timezone: ${LINGCORE_TIMEZONE:-}
   calendar:
-    # New .ics files land here, inside the workspace; open or import them in
-    # any calendar app. Nothing is sent to an online calendar.
-    directory: calendar
+    # One calendar for the profile, shared by every session (resolves against
+    # this dir, like memory). Import it into any calendar app; nothing is sent
+    # to an online calendar.
+    path: calendar.ics
     default_duration_minutes: 60
+    # calendar_list's default window, in days.
+    list_days: 90
   search_web:
     # SearXNG needs a JSON-enabled instance (SEARXNG_URL in this profile's .env).
     # Optional providers: exa (EXA_API_KEY), deepseek (DEEPSEEK_API_KEY).

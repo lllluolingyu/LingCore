@@ -431,26 +431,30 @@ tool_options:
 
 ## Bundled calendar plugin
 
-`calendar` saves events as standard iCalendar (`.ics`, RFC 5545) files in the
-workspace and reads them back. It works offline: the user adds events to any
-calendar app (Apple Calendar, Google Calendar, Outlook, Thunderbird) by opening
-or importing the file, and nothing is sent to an online calendar. Authorizing
-its tools engages it; it has no hooks.
+`calendar` keeps the profile's calendar: one standard iCalendar (`.ics`,
+RFC 5545) file that every session of the profile shares, so the agent can
+check it for upcoming and long-term arrangements before it plans or schedules
+anything. It works offline: nothing is sent to an online calendar, and the
+user can import the file into any calendar app (Apple Calendar, Google
+Calendar, Outlook, Thunderbird). Authorizing its tools engages it; it has no
+hooks.
 
 ```yaml
-tools: [calendar_add, calendar_list]
+tools: [calendar_add, calendar_list, calendar_remove]
 tool_options:
   calendar:
-    directory: calendar          # inside the workspace
+    path: calendar.ics           # relative to the profile directory, like memory.md
+    # allow_absolute_path: true  # required for an absolute path
     # timezone: Europe/Berlin    # default: tool_options.clock.timezone, then the host's
     default_duration_minutes: 60
-    list_days: 30                # calendar_list's default window
+    list_days: 90                # calendar_list's default window
 ```
 
 | Tool | Arguments | Result |
 | --- | --- | --- |
-| `calendar_add` | `events` (1-20), optional file `name` | the new file's path, each event as saved, the timezone |
-| `calendar_list` | optional `start`, `end` (dates, inclusive), `path` (one `.ics` file) | events overlapping the window, sorted, with their source files |
+| `calendar_add` | `events` (1-20) | each event as saved with its id, saved events it overlaps, the timezone |
+| `calendar_list` | optional `start`, `end` (dates, inclusive), `query` | events overlapping the window, sorted, with their ids |
+| `calendar_remove` | `ids` (1-20) | the removed events; a repeating event goes as a whole series |
 
 Each event has a `title` and a `start`: `YYYY-MM-DD` for an all-day event, or
 a local `YYYY-MM-DDTHH:MM` in the calendar's timezone (an explicit offset is
@@ -462,32 +466,46 @@ converted). It may also have
   `count` or `until`.
 
 A time skipped by a daylight-saving change, an end before the start, and a mix
-of all-day and timed values are refused instead of being guessed.
+of all-day and timed values are refused instead of being guessed. To change an
+event, remove it and add the corrected one.
 
-- **Never overwrites.** Each `calendar_add` call creates a new file named
-  after the first event's date and title (`2026-10-21-dentist.ics`, then
-  `-2`, `-3`, ...), using an exclusive, no-follow create inside the confined
-  workspace directory. A mistaken call cannot change an earlier file. Editing
-  or deleting events is left to the user's calendar app.
-- **Daylight saving.** Timed events carry their IANA `TZID` and a `VTIMEZONE`
-  listing the zone's offset changes over the events' span (at most ten
-  years), so a weekly 09:00 meeting stays at 09:00 after the clocks change,
-  even in clients that do not know the zone name. `UNTIL` is written in UTC
-  as the RFC requires. Without an IANA zone, times are saved as UTC instants
-  and the result says so.
-- **Listing.** `calendar_list` reads every `.ics` in the calendar directory
-  (at most 50 files of 2 MiB each), so files the user drops there count too,
-  or one `path` such as an attached export under `attachments/`. Symlinked
-  files are skipped. Repeats using only `FREQ`, `INTERVAL`, `COUNT` and
-  `UNTIL` are expanded (the 31st is skipped in shorter months, as RFC 5545
-  says); other rules, and series with `RDATE`, `EXDATE` or overridden
+- **One file, profile-scoped.** The path resolves against the profile
+  directory and is confined like the memory file: a relative path may not
+  escape it, an absolute path needs `allow_absolute_path: true`, and a path
+  inside the installed package is refused. A symlinked calendar file is
+  refused. The Telegram channel gives each allowed user their own
+  `calendar.ics` beside their memory file.
+- **Safe changes.** Each add or remove rereads the whole file under a
+  persistent advisory lock (`calendar.ics.lock` beside it) and publishes it
+  with an atomic replace, so parallel tool calls and concurrent sessions (a CLI
+  and a browser tab on one profile) never lose each other's events. A file that
+  is not a single UTF-8 `VCALENDAR` is left unchanged and the tool says so; the
+  file is capped at 2 MiB.
+- **Hand edits survive.** Components the plugin did not write (a `VTODO`, an
+  event added in another app and saved back) and extra calendar properties
+  such as `X-WR-CALNAME` are kept as they are.
+- **Daylight saving.** Timed events carry their IANA `TZID`. The file's
+  `VTIMEZONE` for that zone is regenerated on every change to list the zone's
+  offset changes over all of its events (each series at most ten years ahead),
+  so a weekly 09:00 meeting stays at 09:00 after the clocks change, even in
+  clients that do not know the zone name. `UNTIL` is written in UTC as the RFC
+  requires. Without an IANA zone, times are saved as UTC instants and the
+  result says so.
+- **Listing.** `calendar_list` defaults to `list_days` from today; with a
+  `query` (matched case-insensitively against titles, places and notes) and no
+  `end` it searches ten years ahead. Repeats using only `FREQ`, `INTERVAL`,
+  `COUNT` and `UNTIL` are expanded (the 31st is skipped in shorter months, as
+  RFC 5545 says); other rules, and series with `RDATE`, `EXDATE` or overridden
   occurrences, are listed once and marked as not expanded. Cancelled events
   are omitted. At most 100 entries are shown. Titles and places are untrusted
   file content, and the result says so.
+- **Ids.** Events the plugin adds get a short `UID` such as
+  `3f9a1c2b7d4e@lingcore`; listings show every event's `UID` as its id, which is
+  what `calendar_remove` takes.
 
 The daily profile enables both plugins. Its `/event` command turns a
-plain-language description into a `calendar_add` call, and `/plan` checks
-`calendar_list` before planning.
+plain-language description into a `calendar_add` call, whose result reports any
+overlap, and `/plan` checks `calendar_list` before planning.
 
 ## Bundled process plugin
 

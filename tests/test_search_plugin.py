@@ -434,6 +434,7 @@ async def test_daily_has_search_immediately_without_code_review(tmp_path, monkey
         "fetch_url",
         "calendar_add",
         "calendar_list",
+        "calendar_remove",
     } <= profile.initial_tool_set()
     async with Agent.from_profile(
         profile, llm=FakeLLMClient([ScriptedTurn(text="hello")])

@@ -1,11 +1,13 @@
 name: calendar
 version: 1.0.0
 api: 1
-description: Save events as iCalendar (.ics) files in the workspace and list saved
-  events. Works offline; nothing is sent to an online calendar.
+description: Keep the profile's calendar, one iCalendar (.ics) file shared by every
+  session, and list, add or remove its events. Works offline; nothing is sent to an
+  online calendar.
 module: calendar_tools.py
 provides:
 - calendar_add
 - calendar_list
+- calendar_remove
 skills: null
 commands: null

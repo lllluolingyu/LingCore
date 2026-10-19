@@ -316,14 +316,15 @@ four examples (`lingcore profile list` shows the installed set):
 - `profiles/coding/` — default profile, targets a keyed provider via env vars.
 - `profiles/frontend/` — the coding agent plus the `browser` and `process` plugins for running dev servers and checking web UIs (needs the `lingcore[browser]` extra; see [Frontend development](#frontend-development)).
 - `profiles/daily/` — everyday assistant (web research, local notes, persistent
-  memory, calendar files; no shell or coding-skill activation). Web search uses
+  memory, a calendar; no shell or coding-skill activation). Web search uses
   the bundled [`search` plugin](docs/plugins.md#bundled-search-plugin): set
   `SEARXNG_URL` for a JSON-enabled SearXNG instance, or select Exa / DeepSeek in
   the profile's `.env.example` configuration. The
   [`clock` plugin](docs/plugins.md#bundled-clock-plugin) tells the model the
   current date and time (set `LINGCORE_TIMEZONE`, or leave it blank for the
   host's zone), the [`calendar` plugin](docs/plugins.md#bundled-calendar-plugin)
-  saves events as `.ics` files under `workspace/calendar/`, and the
+  keeps one `calendar.ics` in the profile directory that every session adds
+  to, lists and removes from, and the
   `/plan`, `/brief`, `/compare`, `/summarize` and `/event` commands are
   profile-local prompt templates in `profiles/daily/commands/`.
 - `profiles/teaching/` — teaching assistant built on the Canvas skill (courses, due dates, file sync).

@@ -5,6 +5,38 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+### Added
+
+- `calendar_remove` takes events off the calendar by the id that
+  `calendar_list` and `calendar_add` now show; a repeating event is removed as
+  a whole series.
+- `calendar_add` reports saved events that a new event overlaps, and
+  `calendar_list` takes a `query` that finds an arrangement by its title, place
+  or notes, searching ten years ahead when no `end` is given.
+
+### Changed
+
+- The `calendar` plugin keeps **one** calendar per profile instead of a new
+  `.ics` file per call: `tool_options.calendar.path` (default `calendar.ics`)
+  resolves against the profile directory and is confined like `memory.md` (no
+  escape, an absolute path needs `allow_absolute_path: true`, never inside the
+  installed package), so every session, whatever its workspace, reads and adds
+  to the same arrangements. Each change rereads the file under a persistent
+  lock beside it and replaces it atomically, so concurrent sessions never lose
+  events. Components other apps wrote (to-dos, hand-added events, calendar
+  properties) are kept, and a file that is not one UTF-8 `VCALENDAR` is left
+  unchanged with an error. The zone's `VTIMEZONE` is regenerated to cover all
+  of its events.
+- `tool_options.calendar.directory` and `calendar_list`'s `path` argument are
+  removed; a profile that still sets `directory` gets an error naming it. Files
+  0.5.0 saved under `workspace/calendar/` stay there and are no longer read;
+  open them in a calendar app to keep their events. `list_days` defaults to 90.
+- The Telegram channel gives each allowed user their own `calendar.ics` beside
+  their memory file.
+- The `daily` profile adds `calendar_remove` and tells the model to check the
+  calendar before planning or suggesting a time, and to look up long-term
+  arrangements there.
+
 ## [0.5.0] - 2026-10-19
 
 ### Added
