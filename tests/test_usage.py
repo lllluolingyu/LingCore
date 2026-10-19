@@ -13,7 +13,13 @@ from lingcore.agent import Agent
 from lingcore.composer import StaticComposer
 from lingcore.config import AgentProfile
 from lingcore.errors import LLMStreamError
-from lingcore.events import Final, TextDelta, ToolResultEvent, UsageReported
+from lingcore.events import (
+    Final,
+    TextDelta,
+    ToolResultEvent,
+    TurnStatsReported,
+    UsageReported,
+)
 from lingcore.llm import LLMChunk, LLMClient
 from lingcore.memory import WindowMemory
 from lingcore.message import ToolCall
@@ -296,8 +302,11 @@ async def test_loop_emits_usage_per_request_before_terminal_event(tmp_path) -> N
     usage = [e.usage for e in events if isinstance(e, UsageReported)]
     assert usage == [TokenUsage("m", 10, 1), TokenUsage("m", 20, 2)]
     assert kinds.index("UsageReported") < kinds.index("ToolCallStarted")
+    # The last request's usage, then the turn's totals, then the outcome.
     assert isinstance(events[-1], Final)
-    assert isinstance(events[-2], UsageReported)
+    assert isinstance(events[-2], TurnStatsReported)
+    assert events[-2].stats.usage == tuple(usage)
+    assert isinstance(events[-3], UsageReported)
     assert any(isinstance(e, ToolResultEvent) for e in events)
 
 

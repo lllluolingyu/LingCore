@@ -66,6 +66,7 @@ from lingcore.events import (
     ToolCallStarted,
     ToolResultEvent,
     TurnCancelled,
+    TurnStatsReported,
     UsageReported,
 )
 from lingcore.media import attachment_from_path
@@ -78,7 +79,7 @@ from lingcore.message import Attachment, ToolCall, ToolResult, UserInput
 from lingcore.plugins.commands import CommandCatalog
 from lingcore.todos import TodoItem
 from lingcore.tools.builtin.shell import allowlist_pattern_for
-from lingcore.usage import TokenUsage
+from lingcore.usage import TokenUsage, TurnStats
 
 if TYPE_CHECKING:
     from lingcore.message import Message
@@ -281,6 +282,17 @@ class _UsageTotals:
             f"{self.requests} {noun} · in {_tokens(self.input_tokens)}{cached} · "
             f"out {_tokens(self.output_tokens)}"
         )
+
+
+def _rate(stats: TurnStats | None) -> str:
+    """Output tokens per second of generation time, as LingCore measured it."""
+    if stats is None or not stats.model_ms:
+        return ""
+    output = sum(usage.output_tokens for usage in stats.usage)
+    if not output:
+        return ""
+    rate = output / (stats.model_ms / 1000)
+    return f"{rate:.0f} tok/s" if rate >= 10 else f"{rate:.1f} tok/s"
 
 
 @dataclass(frozen=True, slots=True)
@@ -687,6 +699,7 @@ class CLIFrontend:
         self._stale_input: asyncio.Future[str] | None = None
         self._turn_usage = _UsageTotals()
         self._session_usage = _UsageTotals()
+        self._turn_stats: TurnStats | None = None
         self._session_switch: SessionSwitch | None = None
         # The running turn's stop request while interrupt_scope is active (the
         # prompt_toolkit confirm prompt sees Ctrl-C as a key, not a signal).
@@ -714,6 +727,7 @@ class CLIFrontend:
             self.set_commands(commands)
         self._turn_usage = _UsageTotals()
         self._session_usage = _UsageTotals()
+        self._turn_stats = None
         self._context_tokens = 0
         # Rebuilt lazily with an empty in-memory history on the next prompt.
         self._main_prompt = self._confirm_prompt = None
@@ -1172,6 +1186,8 @@ class CLIFrontend:
                 self._turn_usage.add(usage)
                 self._session_usage.add(usage)
                 self._context_tokens = usage.input_tokens + usage.output_tokens
+            case TurnStatsReported(stats):
+                self._turn_stats = stats
             case Final(_):
                 self._flush()
                 self._end_turn()
@@ -1188,10 +1204,14 @@ class CLIFrontend:
             parts.append(_duration(time.monotonic() - self._turn_started))
         if self._turn_usage.requests:
             parts.append(self._turn_usage.describe())
+        rate = _rate(self._turn_stats)
+        if rate:
+            parts.append(rate)
         if parts:
             self.console.print(f"[dim]  ↳ {' · '.join(parts)}[/]")
         self._turn_usage = _UsageTotals()
         self._turn_started = None
+        self._turn_stats = None
 
     def _tool_gap(self) -> None:
         """Separate a tool run from the user's message or reply text before it."""

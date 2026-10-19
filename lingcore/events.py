@@ -12,7 +12,7 @@ from typing import Literal
 
 from lingcore.message import ToolCall, ToolResult
 from lingcore.todos import TodoItem
-from lingcore.usage import TokenUsage
+from lingcore.usage import TokenUsage, TurnStats
 
 
 @dataclass(slots=True)
@@ -116,6 +116,19 @@ class UsageReported:
 
 
 @dataclass(slots=True)
+class TurnStatsReported:
+    """The turn's total usage and generation time, just before its outcome.
+
+    Emitted after the turn's last ``UsageReported`` and immediately before
+    its ``Final`` or ``Error``. A stopped turn yields none (its stream ends at
+    the cancellation), but its stats are still persisted with the session.
+    Frontends that do not show per-reply usage can ignore it.
+    """
+
+    stats: TurnStats
+
+
+@dataclass(slots=True)
 class TodoUpdated:
     """The model rewrote its task checklist (``todo_write``).
 
@@ -147,6 +160,7 @@ AgentEvent = (
     | Compacted
     | TurnCancelled
     | UsageReported
+    | TurnStatsReported
     | TodoUpdated
     | PluginNotice
 )

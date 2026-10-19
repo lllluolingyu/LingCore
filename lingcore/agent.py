@@ -17,7 +17,7 @@ import asyncio
 import random
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
-from contextlib import aclosing
+from contextlib import AbstractContextManager, aclosing, nullcontext
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from lingcore.composer import ComposeContext, PromptComposer, StaticComposer
@@ -34,6 +34,7 @@ from lingcore.events import (
     ToolCallStarted,
     ToolResultEvent,
     TurnCancelled,
+    TurnStatsReported,
     UsageReported,
 )
 from lingcore.guardrails import Guardrail, NoopGuardrail, build_guardrail
@@ -56,7 +57,7 @@ from lingcore.plugins.commands import CommandCatalog
 from lingcore.plugins.hooks import HookRunner, TurnRolledBackEvent
 from lingcore.todos import TodoItem, TodoState
 from lingcore.tools import Tool, ToolContext, ToolOutput, ToolRegistry
-from lingcore.usage import UsageMeter
+from lingcore.usage import TurnClock, TurnStats, UsageMeter
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -219,6 +220,12 @@ class Agent:
         # later turn may append behind that uncommitted branch. Retried at the
         # start of every subsequent run until the store is reconciled.
         self._pending_turn_message_seq: int | None = None
+        # The turn's TurnStats in the making. Unlike the checkpoint fields these
+        # outlive _clear_turn_state, which runs before the terminal event that
+        # reports them; _finish_turn_stats consumes them exactly once.
+        self._turn_clock: TurnClock | None = None
+        self._turn_stats_committed = False  # the user message reached memory
+        self._turn_stats_seq: int | None = None  # ... and this durable row
 
     # ------------------------------------------------------------------
     # Convenience accessor kept for tests that still read .system_prompt
@@ -683,6 +690,7 @@ class Agent:
         if committed is not None:
             self._hooks.drain_notices()
             self._clear_turn_state()
+            self._finish_turn_stats()
             return committed
         try:
             self._rollback_turn()
@@ -690,9 +698,12 @@ class Agent:
             # In-memory state and the running lease are already repaired. A
             # failed durable truncate is recorded for retry before the next
             # turn; surface it as an event instead of crashing Stop handling.
+            # The retry would delete stats anchored to the turn, so skip them.
+            self._finish_turn_stats(persist=False)
             return Error(
                 f"turn cancelled, but rollback is pending: {type(exc).__name__}: {exc}"
             )
+        self._finish_turn_stats()
         return TurnCancelled(reason=reason)
 
     def _rollback_turn(
@@ -746,6 +757,39 @@ class Agent:
                 TurnRolledBackEvent(reason, self._turn_started_at)
             )
             self._clear_turn_state(lease)
+
+    def _turn_waiting(self) -> AbstractContextManager[None]:
+        """Exclude the enclosed span from the turn's generation time."""
+        clock = self._turn_clock
+        return clock.waiting() if clock is not None else nullcontext()
+
+    def _finish_turn_stats(self, *, persist: bool = True) -> TurnStats | None:
+        """Close the turn's clock and usage tally; persist and return its stats.
+
+        Only a turn whose user message was committed has stats: blocked input
+        never became a turn. They are anchored to that user row after any
+        rollback has run, so a stopped or failed turn's billed requests stay
+        on record. Persisting is display data, so a store failure is ignored.
+        """
+        clock, self._turn_clock = self._turn_clock, None
+        if clock is None:
+            return None
+        stats = clock.finish(self.usage_meter.close_tally())
+        committed, self._turn_stats_committed = self._turn_stats_committed, False
+        seq, self._turn_stats_seq = self._turn_stats_seq, None
+        if not committed:
+            return None
+        if (
+            persist
+            and seq is not None
+            and self._session_store is not None
+            and self._session_id is not None
+        ):
+            try:
+                self._session_store.save_turn_stats(self._session_id, seq, stats)
+            except Exception:
+                pass
+        return stats
 
     def _clear_turn_state(self, lease: object | None = None) -> None:
         """Release turn state only when ``lease`` still owns it."""
@@ -827,6 +871,10 @@ class Agent:
         self._turn_message_seq = None
         self._turn_cancel_requested = False
         self._turn_committed = None
+        self._turn_clock = TurnClock()
+        self._turn_stats_committed = False
+        self._turn_stats_seq = None
+        self.usage_meter.open_tally()
 
         turn = self._run_turn(user_input, lease)
         try:
@@ -846,9 +894,14 @@ class Agent:
                     except StopAsyncIteration:
                         break
                     # Usage precedes the event that followed its request, so
-                    # it always arrives before the turn's terminal event.
+                    # it always arrives before the turn's terminal event; the
+                    # turn's totals come last, immediately before its outcome.
                     for usage in self.usage_meter.drain():
                         yield UsageReported(usage)
+                    if isinstance(event, Final | Error):
+                        stats = self._finish_turn_stats()
+                        if stats is not None:
+                            yield TurnStatsReported(stats)
                     yield event
         except asyncio.CancelledError:
             # Cancellation alone deliberately retains the checkpoint for the
@@ -878,14 +931,18 @@ class Agent:
                 try:
                     self._rollback_turn(lease, "abandoned")
                 except Exception:
-                    pass
+                    self._finish_turn_stats(persist=False)
+                else:
+                    self._finish_turn_stats()
             raise
         except Exception as exc:
             notices = self._hooks.drain_notices()
             message = f"agent turn failed: {type(exc).__name__}: {exc}"
+            rolled_back = True
             try:
                 self._rollback_turn(lease, "failed")
             except Exception as rollback_exc:
+                rolled_back = False
                 message += (
                     f"; rollback failed: {type(rollback_exc).__name__}: {rollback_exc}"
                 )
@@ -893,6 +950,9 @@ class Agent:
                 yield UsageReported(usage)
             for notice in notices:
                 yield notice
+            stats = self._finish_turn_stats(persist=rolled_back)
+            if stats is not None:
+                yield TurnStatsReported(stats)
             yield Error(message)
         except BaseException:
             # Do not turn process-level exits into ordinary agent events, but
@@ -937,15 +997,17 @@ class Agent:
                 # Compute text fallbacks once, before the message is committed —
                 # stream retries re-render but never re-pay a conversion.
                 attachments = await self.media_adapter.prepare(attachments)
-        decision = await self._hooks.user_message(
-            UserMessageEvent(
-                text=text,
-                input_text=input_text,
-                attachments=tuple(
-                    AttachmentView.from_attachment(a) for a in attachments
-                ),
+        # A hook may ask the user here; that wait is not generation time.
+        with self._turn_waiting():
+            decision = await self._hooks.user_message(
+                UserMessageEvent(
+                    text=text,
+                    input_text=input_text,
+                    attachments=tuple(
+                        AttachmentView.from_attachment(a) for a in attachments
+                    ),
+                )
             )
-        )
         for notice in self._hooks.drain_notices():
             yield notice
         if decision is not None:
@@ -962,6 +1024,7 @@ class Agent:
         )
         self.memory.add(user_message)
         self._turn_user_message = user_message
+        self._turn_stats_committed = True
         if self._session_store is not None and self._session_id is not None:
             # SessionMemory captures the sequence returned by the same SQLite
             # transaction that appended this exact row. A pre-append MAX(seq)
@@ -970,6 +1033,7 @@ class Agent:
             message_seq = getattr(self.memory, "last_sequence", None)
             if isinstance(message_seq, int) and not isinstance(message_seq, bool):
                 self._turn_message_seq = message_seq
+                self._turn_stats_seq = message_seq
             else:  # guarded at construction; fail closed if a wrapper misbehaves
                 raise RuntimeError(
                     "session-backed memory did not report the committed user sequence"
@@ -1074,7 +1138,8 @@ class Agent:
                         reason=str(e),
                         discarded_chars=sum(len(p) for p in content_parts),
                     )
-                    await asyncio.sleep(_backoff_seconds(attempt))
+                    with self._turn_waiting():
+                        await asyncio.sleep(_backoff_seconds(attempt))
                 except Exception as e:
                     # A duck-typed backend may raise anything; without a
                     # retryable classification, surface it and end the turn.
@@ -1121,7 +1186,10 @@ class Agent:
                 dict(self.skill_state.approved_high_risk) if self.skill_state else {}
             )
             before_todos = self.todo_state.items if self.todo_state else None
-            results = await self._dispatch(assistant.tool_calls)
+            # Tool runs (and the approvals inside them) are the turn waiting
+            # on the world, not generating.
+            with self._turn_waiting():
+                results = await self._dispatch(assistant.tool_calls)
             for notice in self._hooks.drain_notices():
                 yield notice
             for result in results:

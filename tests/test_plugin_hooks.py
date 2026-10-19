@@ -10,7 +10,14 @@ from pydantic import BaseModel
 
 import lingcore.tools.builtin  # noqa: F401
 from lingcore.agent import Agent
-from lingcore.events import Error, Final, PluginNotice, ToolResultEvent, TurnCancelled
+from lingcore.events import (
+    Error,
+    Final,
+    PluginNotice,
+    ToolResultEvent,
+    TurnCancelled,
+    TurnStatsReported,
+)
 from lingcore.memory import WindowMemory
 from lingcore.message import ToolCall, UserInput
 from lingcore.plugins import (
@@ -107,6 +114,8 @@ async def test_user_block_leaves_no_memory_or_session(tmp_path):
         assert isinstance(events[-2], PluginNotice)
         assert events[-2].action == "blocked"
         assert isinstance(events[-1], Error)
+        # Blocked input never became a turn, so it has no stats either.
+        assert not any(isinstance(e, TurnStatsReported) for e in events)
 
 
 async def test_context_and_display_text_survive_session_roundtrip(tmp_path):
@@ -363,8 +372,10 @@ async def test_turn_end_failure_notice_precedes_model_error(tmp_path):
 
     agent, _ = build(tmp_path, [End], turns=[StreamFailure(retryable=False)])
     events = await drain(agent)
-    assert isinstance(events[-2], PluginNotice)
-    assert events[-2].hook == "turn_end"
+    # Only the turn's own stats sit between the notice and the outcome.
+    assert isinstance(events[-3], PluginNotice)
+    assert events[-3].hook == "turn_end"
+    assert isinstance(events[-2], TurnStatsReported)
     assert isinstance(events[-1], Error)
 
 

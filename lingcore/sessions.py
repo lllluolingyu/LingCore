@@ -56,6 +56,7 @@ from lingcore.errors import ConfigError, SessionError
 from lingcore.events import Compacted
 from lingcore.message import Message
 from lingcore.todos import TodoItem, todos_from_payload, todos_payload
+from lingcore.usage import TurnStats, turn_stats_from_payload, turn_stats_payload
 
 if TYPE_CHECKING:
     from lingcore.config import AgentProfile
@@ -68,7 +69,9 @@ _SCHEMA_VERSION = 2
 _TITLE_LIMIT = 60
 _ID_RE = re.compile(r"[0-9a-f]{32}")
 _PREFIX_RE = re.compile(r"[0-9a-f]{1,32}")
-_SESSION_EVENT_KINDS = frozenset({"compaction", "skill_state", "todo_state"})
+_SESSION_EVENT_KINDS = frozenset(
+    {"compaction", "skill_state", "todo_state", "turn_stats"}
+)
 
 _DDL = [
     """
@@ -694,6 +697,42 @@ class SessionStore:
             payload=todos_payload(todos),
         )
 
+    def save_turn_stats(
+        self, session_id: str, message_seq: int, stats: TurnStats
+    ) -> SessionEvent:
+        """Persist one turn's usage and timing, anchored to its user message.
+
+        The anchor is the user row the turn kept, so Stop's truncation (which
+        runs first) leaves it in place, while Edit removes it with the row.
+        """
+        return self.append_event(
+            session_id,
+            message_seq=message_seq,
+            kind="turn_stats",
+            payload=turn_stats_payload(stats),
+        )
+
+    def turn_stats(self, session_id: str) -> dict[int, TurnStats]:
+        """Valid persisted turn stats by user-message sequence (newest wins)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT e.message_seq, e.payload FROM session_events e "
+                "WHERE e.session_id = ? AND e.kind = 'turn_stats' "
+                "AND EXISTS(SELECT 1 FROM messages m "
+                "WHERE m.session_id = e.session_id AND m.seq = e.message_seq) "
+                "ORDER BY e.event_seq",
+                (session_id,),
+            ).fetchall()
+        out: dict[int, TurnStats] = {}
+        for message_seq, payload_json in rows:
+            try:
+                stats = turn_stats_from_payload(json.loads(payload_json))
+            except ValueError:
+                continue
+            if stats is not None:
+                out[int(message_seq)] = stats
+        return out
+
     def latest_todos(self, session_id: str) -> tuple[TodoItem, ...]:
         """Newest persisted todo checklist; empty when absent or corrupt.
 
@@ -947,6 +986,11 @@ class SessionStore:
                                 if todos is None:
                                     raise ValueError("invalid todo-state payload")
                                 event.payload = todos_payload(todos)
+                            elif event.kind == "turn_stats":
+                                stats = turn_stats_from_payload(event.payload)
+                                if stats is None:
+                                    raise ValueError("invalid turn-stats payload")
+                                event.payload = turn_stats_payload(stats)
                             else:
                                 normalized = _normalized_skill_event_payload(
                                     event.payload

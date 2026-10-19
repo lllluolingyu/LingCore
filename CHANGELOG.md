@@ -11,6 +11,13 @@ Notable user-facing changes to LingCore are documented here. The project uses
   and DeepSeek's Search API. It returns bounded source links and snippets,
   shares the public-web network policy, and resolves API keys per profile.
 
+- Per-turn usage and timing. After a turn's last `UsageReported` and right
+  before its outcome, the loop yields `TurnStatsReported` with every request
+  the turn billed and its generation time (wall time less tool runs, approvals
+  and retry backoff). Session stores keep it as a `turn_stats` event on the
+  turn's user message, so Stop, Edit and Fork treat it like other turn state.
+  The CLI footer adds the turn's tok/s.
+
 ### Changed
 
 - The daily profile offers web search and local note search directly, without
