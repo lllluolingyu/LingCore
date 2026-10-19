@@ -5,6 +5,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-19
+
 ### Added
 
 - A bundled `search` plugin with `search_web` for SearXNG (no API key), Exa,
@@ -415,7 +417,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 - Initial tagged preview of the config-driven async agent runtime.
 
-[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/lllluolingyu/LingCore/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/lllluolingyu/LingCore/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/lllluolingyu/LingCore/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/lllluolingyu/LingCore/compare/v0.3.0...v0.3.1
