@@ -433,6 +433,7 @@ async def test_daily_has_search_immediately_without_code_review(tmp_path, monkey
         "search_web",
         "fetch_url",
         "calendar_add",
+        "calendar_update",
         "calendar_list",
         "calendar_remove",
     } <= profile.initial_tool_set()

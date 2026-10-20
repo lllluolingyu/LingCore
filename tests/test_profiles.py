@@ -55,15 +55,106 @@ async def test_daily_ships_its_slash_commands(tmp_path, monkeypatch):
         "event.md",
         "plan.md",
         "summarize.md",
+        "today.md",
     ]
     profile = AgentProfile.load(destination)
     async with Agent.from_profile(profile, llm=FakeLLMClient([])) as agent:
         names = {command.qualified_name for command in agent.commands.commands}
-        assert names == {"/brief", "/compare", "/event", "/plan", "/summarize"}
+        assert names == {
+            "/brief",
+            "/compare",
+            "/event",
+            "/plan",
+            "/summarize",
+            "/today",
+        }
         expanded = agent.commands.resolve("/event dentist friday 3pm", reserved=())
+        agenda = agent.commands.resolve("/today trip preparation", reserved=())
     assert expanded is not None
     assert "Add to my calendar: dentist friday 3pm" in expanded.text
     assert expanded.display_text == "/event dentist friday 3pm"
+    assert agenda is not None
+    assert "Optional focus: trip preparation" in agenda.text
+    assert agenda.display_text == "/today trip preparation"
+
+
+async def test_today_reads_the_requested_day_and_memory_through_the_agent(
+    tmp_path, monkeypatch
+):
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from lingcore.agent import Agent
+    from lingcore.events import Final
+    from lingcore.io.cli import CLIFrontend
+    from lingcore.message import ToolCall
+    from tests.fakes import FakeLLMClient, ScriptedTurn
+
+    monkeypatch.setenv("LINGCORE_TIMEZONE", "Europe/Berlin")
+    destination = initialize_profile("daily", destination=tmp_path / "daily")
+    profile = AgentProfile.load(destination)
+    today = datetime.now(ZoneInfo("Europe/Berlin")).date()
+    tomorrow = today + timedelta(days=1)
+    llm = FakeLLMClient(
+        [
+            ScriptedTurn(
+                tool_calls=[
+                    ToolCall(
+                        id="calendar",
+                        name="calendar_list",
+                        arguments={
+                            "start": today.isoformat(),
+                            "end": today.isoformat(),
+                        },
+                    ),
+                    ToolCall(
+                        id="preferences", name="memory", arguments={"action": "read"}
+                    ),
+                ]
+            ),
+            ScriptedTurn(text="Here is today's agenda."),
+        ]
+    )
+    async with Agent.from_profile(profile, llm=llm) as agent:
+        add = agent.tools.get("calendar_add")
+        await add.run(
+            add.validate_args(
+                {
+                    "events": [
+                        {"title": "Today appointment", "start": today.isoformat()},
+                        {
+                            "title": "Tomorrow appointment",
+                            "start": tomorrow.isoformat(),
+                        },
+                    ]
+                }
+            ),
+            agent.tool_ctx,
+        )
+        memory_path = destination / "memory.md"
+        memory_path.write_text(
+            "## preferences\nLeave time for lunch.\n", encoding="utf-8"
+        )
+        calendar_before = (destination / "calendar.ics").read_bytes()
+        memory_before = memory_path.read_bytes()
+        frontend = CLIFrontend()
+        frontend.set_commands(agent.commands)
+
+        async def typed_command():
+            return "/today"
+
+        monkeypatch.setattr(frontend, "_read_message", typed_command)
+        incoming = await frontend.read_input()
+        assert incoming is not None and incoming.display_text == "/today"
+        events = [event async for event in agent.run(incoming)]
+        assert isinstance(events[-1], Final)
+        assert "Show me today's agenda" in llm.calls[0][-1].content
+        assert "[clock] Now:" in llm.calls[0][-1].content
+        results = "\n".join(m.content for m in llm.calls[-1] if m.role == "tool")
+        assert "Today appointment" in results and "Tomorrow appointment" not in results
+        assert "Leave time for lunch" in results
+        assert (destination / "calendar.ics").read_bytes() == calendar_before
+        assert memory_path.read_bytes() == memory_before
 
 
 def test_initialize_profile_never_overwrites_existing_directory(tmp_path):

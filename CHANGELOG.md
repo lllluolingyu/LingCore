@@ -19,6 +19,13 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ### Added
 
+- `calendar_update` patches saved events atomically by id, retaining omitted
+  details, imported properties and alarms. Repeating events require an explicit
+  whole-series or single-occurrence scope; a moved occurrence retains its
+  original start as its selector and other occurrences remain visible.
+- The daily profile enables `calendar_update` and adds `/today`, a short agenda
+  using the clock's date, that day's calendar and saved preferences, without
+  writing new events or promising reminder delivery.
 - `calendar_remove` takes events off the calendar by the id that
   `calendar_list` and `calendar_add` now show; a repeating event is removed as
   a whole series.

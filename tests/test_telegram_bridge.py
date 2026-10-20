@@ -169,7 +169,8 @@ async def test_two_users_are_isolated_in_state_profile_and_attachments(
 async def test_each_user_keeps_their_own_calendar(tmp_path, monkeypatch):
     profile_text = (
         PROFILE.replace(
-            "tools: [memory]", "tools: [memory, calendar_add, calendar_list]"
+            "tools: [memory]",
+            "tools: [memory, calendar_add, calendar_update, calendar_list]",
         )
         + "  calendar:\n    timezone: Europe/Berlin\n"
     )
@@ -186,8 +187,53 @@ async def test_each_user_keeps_their_own_calendar(tmp_path, monkeypatch):
     add = one.agent.tools.get("calendar_add")
     args = add.validate_args({"events": [{"title": "Private", "start": "2026-10-21"}]})
     await add.run(args, one.agent.tool_ctx)
+    saved = (config.state_path / "users/11/calendar.ics").read_text()
+    uid = next(
+        line.removeprefix("UID:")
+        for line in saved.splitlines()
+        if line.startswith("UID:")
+    )
+    update = one.agent.tools.get("calendar_update")
+    await update.run(
+        update.validate_args({"id": uid, "changes": {"title": "Updated private"}}),
+        one.agent.tool_ctx,
+    )
+    assert (
+        "SUMMARY:Updated private"
+        in (config.state_path / "users/11/calendar.ics").read_text()
+    )
     assert (config.state_path / "users/11/calendar.ics").is_file()
     assert not (config.state_path / "users/22/calendar.ics").exists()
+    assert not (profile._source_dir / "calendar.ics").exists()
+    await bridge.shutdown()
+
+
+async def test_update_only_profiles_still_use_each_users_calendar(
+    tmp_path, monkeypatch
+):
+    profile_text = PROFILE.replace("tools: [memory]", "tools: [calendar_update]")
+    profile, config, bridge = _setup(tmp_path, monkeypatch, profile_text=profile_text)
+    sender = FakeSender()
+    one = await bridge.runtime_for(11, 11, sender)
+    await bridge.runtime_for(22, 22, sender)
+    original = (
+        "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:shared-id\n"
+        "SUMMARY:Private\nDTSTART;VALUE=DATE:20261021\nEND:VEVENT\nEND:VCALENDAR\n"
+    )
+    first = config.state_path / "users/11/calendar.ics"
+    second = config.state_path / "users/22/calendar.ics"
+    first.write_text(original)
+    second.write_text(original)
+    second_before = second.read_bytes()
+    tool = one.agent.tools.get("calendar_update")
+    await tool.run(
+        tool.validate_args(
+            {"id": "shared-id", "changes": {"title": "Updated for one"}}
+        ),
+        one.agent.tool_ctx,
+    )
+    assert "SUMMARY:Updated for one" in first.read_text()
+    assert second.read_bytes() == second_before
     assert not (profile._source_dir / "calendar.ics").exists()
     await bridge.shutdown()
 

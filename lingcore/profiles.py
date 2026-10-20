@@ -44,6 +44,7 @@ PROFILE_TEMPLATE_FILES: dict[str, tuple[str, ...]] = {
         "commands/event.md",
         "commands/plan.md",
         "commands/summarize.md",
+        "commands/today.md",
     ),
     "teaching": (
         ".env.example",

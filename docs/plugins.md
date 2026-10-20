@@ -440,7 +440,7 @@ Calendar, Outlook, Thunderbird). Authorizing its tools engages it; it has no
 hooks.
 
 ```yaml
-tools: [calendar_add, calendar_list, calendar_remove]
+tools: [calendar_add, calendar_update, calendar_list, calendar_remove]
 tool_options:
   calendar:
     path: calendar.ics           # relative to the profile directory, like memory.md
@@ -453,6 +453,7 @@ tool_options:
 | Tool | Arguments | Result |
 | --- | --- | --- |
 | `calendar_add` | `events` (1-20) | each event as saved with its id, saved events it overlaps, the timezone |
+| `calendar_update` | `id`, `changes`, optional `scope`, `occurrence` | the updated event or occurrence with the same id, plus overlaps and incomplete-coverage warnings |
 | `calendar_list` | optional `start`, `end` (dates, inclusive), `query` | events overlapping the window, sorted, with their ids |
 | `calendar_remove` | `ids` (1-20) | the removed events; a repeating event goes as a whole series |
 
@@ -466,8 +467,36 @@ converted). It may also have
   `count` or `until`.
 
 A time skipped by a daylight-saving change, an end before the start, and a mix
-of all-day and timed values are refused instead of being guessed. To change an
-event, remove it and add the corrected one.
+of all-day and timed values are refused instead of being guessed.
+
+`calendar_update` takes only the fields to change. For example, moving a
+45-minute appointment keeps its duration, notes, location and alarms:
+
+```json
+{"id": "3f9a1c2b7d4e@lingcore", "changes": {"start": "2026-10-22T10:00"}}
+```
+
+An explicit `end` or `duration_minutes` replaces the length. `location`,
+`description` and `repeat` may be set to `null` to clear them, and
+`reminders: []` clears alarms; omitted fields retain their saved values.
+Imported properties and nested components are kept unless explicitly replaced.
+Updates retain `UID`, increment `SEQUENCE` and record `LAST-MODIFIED`.
+
+For a repeating event, `scope` is required: `series` updates the whole series;
+`occurrence` also needs that instance's **original** start. An individual move
+uses a `RECURRENCE-ID` override; listings show its original start so later edits
+can select the same instance without creating duplicates:
+
+```json
+{"id": "3f9a1c2b7d4e@lingcore", "scope": "occurrence", "occurrence": "2026-10-27T09:00", "changes": {"start": "2026-10-28T11:00"}}
+```
+
+Simple series support individual occurrence updates, retaining the series'
+all-day or timed form. For unsupported rules,
+range overrides, or whole-series timing/recurrence changes when exceptions
+already exist, the tool refuses the change and keeps the file intact; use an
+individual update where supported or edit the calendar in another app. Metadata
+updates such as title and location can still apply to the whole series.
 
 - **One file, profile-scoped.** The path resolves against the profile
   directory and is confined like the memory file: a relative path may not
@@ -475,7 +504,7 @@ event, remove it and add the corrected one.
   inside the installed package is refused. A symlinked calendar file is
   refused. The Telegram channel gives each allowed user their own
   `calendar.ics` beside their memory file.
-- **Safe changes.** Each add or remove rereads the whole file under a
+- **Safe changes.** Each add, update or remove rereads the whole file under a
   persistent advisory lock (`calendar.ics.lock` beside it) and publishes it
   with an atomic replace, so parallel tool calls and concurrent sessions (a CLI
   and a browser tab on one profile) never lose each other's events. A file that
@@ -502,12 +531,13 @@ event, remove it and add the corrected one.
   `end` it searches ten years ahead. Repeats using only `FREQ`, `INTERVAL`,
   `COUNT` and `UNTIL` are expanded, including date or date-time `RDATE` additions
   and `EXDATE` exclusions. Invalid dates and nonexistent local times are skipped
-  without consuming `COUNT`, as RFC 5545 requires. Other rules, period-valued
-  `RDATE`s and series with overridden occurrences are listed separately, even
-  when their original start is outside the requested range. The result warns
+  without consuming `COUNT`, as RFC 5545 requires. Individual overrides replace
+  their original occurrences without hiding the rest of a simple series.
+  Other rules, period-valued `RDATE`s and series with range overrides are listed
+  separately, even when their original start is outside the requested range. The result warns
   that coverage is incomplete and unlisted times cannot be assumed free;
-  `calendar_add` gives the same warning when checking for overlaps. Cancelled
-  events are omitted. At most 100 entries are shown. Titles and places are
+  `calendar_add` and `calendar_update` give the same warning when checking for
+  overlaps. Cancelled events are omitted. At most 100 entries are shown. Titles and places are
   untrusted file content, and the result says so.
 - **Ids.** Events the plugin adds get a short `UID` such as
   `3f9a1c2b7d4e@lingcore`; listings show every event's `UID` as its id, which is
@@ -515,7 +545,12 @@ event, remove it and add the corrected one.
 
 The daily profile enables both plugins. Its `/event` command turns a
 plain-language description into a `calendar_add` call, whose result reports any
-overlap, and `/plan` checks `calendar_list` before planning.
+overlap, and `/plan` checks `calendar_list` before planning. `/today` explicitly
+reads the clock's local date as a one-day range and combines appointments with
+relevant saved preferences and commitments. It distinguishes elapsed from
+upcoming appointments, flags conflicts or incomplete coverage, and keeps any
+suggested priorities separate from scheduled events. Producing an agenda does
+not create events or enable background reminder delivery.
 
 ## Bundled process plugin
 

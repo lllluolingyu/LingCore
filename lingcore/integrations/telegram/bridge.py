@@ -48,7 +48,9 @@ _PER_USER_FILES = (
     (
         "calendar",
         "calendar.ics",
-        frozenset({"calendar_add", "calendar_list", "calendar_remove"}),
+        frozenset(
+            {"calendar_add", "calendar_update", "calendar_list", "calendar_remove"}
+        ),
     ),
 )
 

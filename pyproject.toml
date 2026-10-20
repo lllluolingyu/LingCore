@@ -91,6 +91,7 @@ packages = ["lingcore"]
 "profiles/daily/commands/event.md" = "lingcore/profile_templates/daily/commands/event.md"
 "profiles/daily/commands/plan.md" = "lingcore/profile_templates/daily/commands/plan.md"
 "profiles/daily/commands/summarize.md" = "lingcore/profile_templates/daily/commands/summarize.md"
+"profiles/daily/commands/today.md" = "lingcore/profile_templates/daily/commands/today.md"
 "profiles/teaching/.env.example" = "lingcore/profile_templates/teaching/.env.example"
 "profiles/teaching/config.yaml" = "lingcore/profile_templates/teaching/config.yaml"
 "profiles/teaching/role.md" = "lingcore/profile_templates/teaching/role.md"

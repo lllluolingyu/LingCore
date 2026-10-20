@@ -5,7 +5,7 @@
 # A general-purpose everyday assistant: research, planning, note-taking, saving
 # keeping your calendar, and remembering your preferences across sessions.
 # It does NOT run shell commands. Slash commands live in ./commands
-# (/plan, /brief, /compare, /summarize, /event).
+# (/today, /plan, /brief, /compare, /summarize, /event).
 
 name: daily
 # Notes and saved files land in ./workspace inside this profile dir by
@@ -45,6 +45,7 @@ tools:
   - fetch_url
   - memory
   - calendar_add
+  - calendar_update
   - calendar_list
   - calendar_remove
 

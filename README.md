@@ -325,7 +325,7 @@ four examples (`lingcore profile list` shows the installed set):
   host's zone), the [`calendar` plugin](docs/plugins.md#bundled-calendar-plugin)
   keeps one `calendar.ics` in the profile directory that every session adds
   to, lists and removes from, and the
-  `/plan`, `/brief`, `/compare`, `/summarize` and `/event` commands are
+  `/today`, `/plan`, `/brief`, `/compare`, `/summarize` and `/event` commands are
   profile-local prompt templates in `profiles/daily/commands/`.
 - `profiles/teaching/` — teaching assistant built on the Canvas skill (courses, due dates, file sync).
 
@@ -808,7 +808,7 @@ commitments.
      current date, time and timezone with every message, outside the cached
      system prompt), the bundled `calendar` plugin (offline `.ics` event files
      with reminders and DST-correct repeats, plus listing saved events), and
-     the `/plan`, `/brief`, `/compare`, `/summarize` and `/event` commands.
+     the `/today`, `/plan`, `/brief`, `/compare`, `/summarize` and `/event` commands.
    - Later for daily: a documented Telegram setup and `knowledge` over saved
      notes.
 
