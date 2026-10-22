@@ -209,7 +209,8 @@ closing. Before finalization, capture `agent.drain_plugin_notices()` and render
 those notices with drained usage before the returned cancellation event.
 Rollback discards undrained notices so an abandoned stream cannot announce them
 on a later turn. CLI switches/exits, Telegram runtime replacement/shutdown and LingChat
-disconnect/rebuild perform this lifecycle automatically.
+server shutdown/session deletion/Agent rebuild perform this lifecycle automatically.
+Closing a LingChat tab only detaches its viewer; the server retains the Agent.
 
 ## Bundled browser plugin
 
@@ -578,6 +579,50 @@ not create events or enable background reminder delivery.
 
 ## Bundled process plugin
 
+`process_monitor` adds event-driven watches to the same process registry. It
+starts a sandboxed command, returns immediately, and forwards each normalized
+output line to the Agent. A monitor turn starts when the current turn finishes,
+or wakes an idle session. No model request is needed while the watch is quiet.
+The `frontend` profile enables it; custom profiles need `plugins: [process]`
+and `process_monitor`, `process_logs`, `process_list`, and `process_stop` in
+their `tools:` ceiling (and in their active skill, if tools are skill-gated).
+
+```json
+{"command": "python -u watch_build.py", "name": "build-watch", "timeout": 300}
+```
+
+Write the script to print only meaningful changes and flush each line. The
+process runner combines stdout and stderr, so redirect noisy diagnostics if
+needed. This supports log tails, file changes and scripts polling external
+status using the configured sandbox's network permissions. The tool has no
+separate WebSocket transport; a script can consume a feed using its installed
+libraries. Commands use the same approval, sandbox and process-count limits
+as `process_start`.
+
+Watches default to 300 seconds, accept at most 1800 seconds, and are also
+capped by `process.max_lifetime`. Normal exit or deadline produces one end
+notice. `process_stop` of a running watch, rollback of the starting turn,
+Agent replacement, and shutdown cancel the watch and discard its queued events;
+stopping a watch that already exited keeps its last lines and end notice
+queued. Rollback also discards pending events from watches whose exited records
+were already removed or pruned. Web tab closure keeps it running. After the user
+stops a turn, the CLI pauses monitor wakeups until the user's next message:
+events keep queuing (within the bounds below) but cannot start a turn before
+the user can type. Delivery is supported by LingChat, AgentGUI's LingCore
+backend, and the interactive CLI; the CLI preserves an unsent draft when an
+event arrives. Unsupported frontends (including piped CLI input) refuse the
+monitor before approval or launch. Telegram retains its background-process
+restriction.
+
+The session inbox holds at most 64 pending events, caps each event at 2000
+characters, and delivers up to 16 lines together. Overflow drops oldest lines
+and reports the count; full output remains subject to the existing bounded
+`process_logs` retention. Web delivery batches short bursts. Monitor turns are
+marked `monitor` in stored history, display separately from user messages, and
+treat output as untrusted data with no new authorization. Existing confirmations
+still apply to any follow-up tool calls. Watches and pending events live only
+for the current server/Agent lifetime.
+
 `process` runs long-lived commands (dev servers such as `npm run dev`, `vite`
 or `next dev`, and watchers such as `tsc --watch`) in the background, in the
 `run_shell` sandbox, and lets the agent's browser reach a declared server port.
@@ -590,7 +635,7 @@ enabled as `process`:
 ```yaml
 plugins: [process]
 skills: [process]               # always-on guidance for the tools
-tools: [process_start, process_logs, process_stop, process_list]
+tools: [process_start, process_monitor, process_logs, process_stop, process_list]
 tool_options:
   run_shell:
     sandbox: {backend: bubblewrap}   # required: Bubblewrap or OCI
@@ -605,11 +650,12 @@ tool_options:
 | Tool | Arguments | Result |
 | --- | --- | --- |
 | `process_start` | `command`, optional `name`, `port`, `ready_pattern` (regex), `ready_timeout` (s) | id, runner, state (`ready`/`running`/`exited`), the browser URL for `port`, the first log lines |
+| `process_monitor` | `command`, optional `name`, `timeout` (s) | watch id; output lines and one end notice delivered to the Agent |
 | `process_logs` | `id`, optional `since` (line cursor), `tail`, `grep` | log lines plus the next cursor; large output is offloaded like `run_shell`'s |
 | `process_stop` | `id` | exit status and the last log lines; removes the entry |
 | `process_list` | none | id, name, command, state, uptime, time left, exit code, port |
 
-- `process_start` is `@tool(high_risk=True)`. It asks for confirmation unless
+- `process_start` and `process_monitor` are `@tool(high_risk=True)`. Each asks for confirmation unless
   its own `allow_patterns` match (same exact-or-prefix rules as `run_shell`).
   The list is separate on purpose: a pattern approving `npm run build` for
   `run_shell` never approves a long-lived server.
@@ -635,7 +681,7 @@ like the browser's, so a typo is reported in the first tool result:
 | `ready_timeout` | 60 s | default wait, clamped to `max_ready_timeout` (300 s) |
 | `max_lifetime` | 3600 s | a process is stopped when it reaches this age |
 | `require_confirmation` | `true` | ask before every start not matched by `allow_patterns` |
-| `allow_patterns` | `[]` | auto-approved `process_start` commands |
+| `allow_patterns` | `[]` | auto-approved `process_start`/`process_monitor` commands |
 | `offload_over_chars` | 8000 | larger `process_logs` output is staged to a workspace file |
 | `sandbox` | `run_shell`'s | a separate sandbox configuration for processes |
 
@@ -687,9 +733,11 @@ mirror problem (the process is gone, the conversation forgets the stop);
 re-launching is not safe, so `process_list` simply shows the truth.
 
 Every Agent replacement closes the old Agent and so stops all its processes:
-CLI `/new`, `/resume` and exit, LingChat session switches, tab close and
-**Edit** (which rebuilds the Agent, so it also stops processes from turns the
-edit keeps), and Telegram runtime eviction. Handing a live registry to a
+CLI `/new`, `/resume` and exit, LingChat **Edit** (which rebuilds the Agent,
+so it also stops processes from turns the edit keeps), and Telegram runtime
+eviction. LingChat and AgentGUI retain their Agents across tab closes and
+session switches; commands keep running until stopped, their lifetime limit,
+session deletion, or backend shutdown. Handing a live registry to a
 rebuilt Agent would need a cross-Agent ownership model. Processes are not
 persisted: logs reach `sessions.db` only through tool results the model read,
 and a resumed session's old ids fail with an explanation.

@@ -297,6 +297,35 @@ def test_cli_resume_labels_compaction_summary_as_derived_state():
     assert "you › earlier facts" not in out
 
 
+def test_cli_resume_shows_monitor_events_apart_from_user_prompts():
+    from datetime import datetime, timezone
+
+    from rich.console import Console
+
+    from lingcore.message import Message
+    from lingcore.sessions import SessionMeta
+
+    cli = CLIFrontend(agent_name="t")
+    cli.console = Console(record=True, width=240)
+    now = datetime.now(timezone.utc)
+    meta = SessionMeta(id="abcd1234", title="t", created_at=now, updated_at=now)
+
+    cli.show_resume(
+        meta,
+        [
+            Message(
+                role="user",
+                name="monitor",
+                content='Monitor events preamble\n[{"output": "build passed"}]',
+            )
+        ],
+    )
+
+    out = cli.console.export_text()
+    assert "monitor events ›" in out and "build passed" in out
+    assert "❯" not in out and "preamble" not in out
+
+
 @pytest.mark.parametrize(
     "detail", [None, "Thinking exhausted max_tokens; reduce the thinking budget."]
 )

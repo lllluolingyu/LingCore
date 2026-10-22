@@ -14,6 +14,7 @@ from contextlib import AbstractContextManager, aclosing, nullcontext
 from typing import Protocol
 
 from lingcore.agent import Agent
+from lingcore.background import BackgroundInput
 from lingcore.events import AgentEvent, PluginNotice
 from lingcore.message import UserInput
 
@@ -63,8 +64,10 @@ async def run_session(agent: Agent, frontend: Frontend) -> None:
     ``AgentEvent``. A web server would call ``agent.run`` per request instead,
     but reuse the exact same agent and events.
     """
+    background = agent.background
+    background.enabled = bool(getattr(frontend, "supports_background", False))
     while True:
-        user_input = await frontend.read_input()
+        user_input = await _read_next(agent, frontend)
         if user_input is None:
             return
         incoming = (
@@ -74,6 +77,8 @@ async def run_session(agent: Agent, frontend: Frontend) -> None:
         )
         if not incoming.text.strip() and not incoming.attachments:
             continue
+        if not isinstance(incoming, BackgroundInput):
+            background.paused = False  # the user is back in control
         # The turn runs in its own task so a frontend-requested stop cancels
         # only the turn, never the session loop.
         task = asyncio.create_task(_drive(agent, incoming, frontend))
@@ -101,3 +106,43 @@ async def run_session(agent: Agent, frontend: Frontend) -> None:
                 for notice in notices:
                     frontend.render(notice)
                 frontend.render(terminal)
+            # A Stop hands control back to the user: queued or later monitor
+            # events must not start the next turn before they can type.
+            if background.enabled and not background.closed:
+                background.paused = True
+                paused = getattr(frontend, "background_paused", None)
+                if paused is not None and background.busy:
+                    paused()
+
+
+async def _read_next(agent: Agent, frontend: Frontend) -> str | UserInput | None:
+    """Let an event wake a cancellable editor; never race a blocking stdin read."""
+    inbox = agent.background
+    if not inbox.enabled or inbox.paused:
+        return await frontend.read_input()
+    while True:
+        reader = asyncio.create_task(frontend.read_input())
+        wake = asyncio.create_task(inbox.wait())
+        try:
+            await asyncio.wait({reader, wake}, return_when=asyncio.FIRST_COMPLETED)
+            if reader.done():  # user input wins a simultaneous arrival
+                return reader.result()
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
+            if not reader.cancelled():  # it finished before the cancel landed
+                return reader.result()
+            if inbox.closed:
+                return None
+            incoming = inbox.take()
+            if incoming is not None:
+                received = getattr(frontend, "background_received", None)
+                if received is not None:
+                    received(incoming)
+                return incoming
+            # The source may have been stopped after waking this reader. Keep
+            # listening to later events instead of falling back to stdin alone.
+        finally:
+            for task in (reader, wake):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(reader, wake, return_exceptions=True)

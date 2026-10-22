@@ -28,6 +28,7 @@ from typing import (
 
 from pydantic import BaseModel
 
+from lingcore.background import BackgroundInbox
 from lingcore.errors import ConfigError, ToolError
 from lingcore.message import Attachment
 
@@ -57,6 +58,7 @@ class ToolContext:
     # use this to avoid leaking context between otherwise independent chats.
     session_id: str | None = None
     plugins: Mapping[str, PluginHooks] = field(default_factory=dict, repr=False)
+    background: BackgroundInbox = field(default_factory=BackgroundInbox, repr=False)
 
     def getenv(self, name: str, default: str | None = None) -> str | None:
         """Resolve this profile's ``.env``, then the process environment.

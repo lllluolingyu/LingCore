@@ -20,6 +20,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import AbstractContextManager, aclosing, nullcontext
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from lingcore.background import BackgroundInbox, BackgroundInput
 from lingcore.composer import ComposeContext, PromptComposer, StaticComposer
 from lingcore.errors import (
     INCOMPLETE_FINISH_REASONS,
@@ -264,6 +265,10 @@ class Agent:
             and self._turn_cancel_requested
             and driver_stopped
         )
+
+    @property
+    def background(self) -> BackgroundInbox:
+        return self.tool_ctx.background
 
     @classmethod
     def from_profile(
@@ -638,6 +643,7 @@ class Agent:
         Closing never invokes turn_end; Stop remains a synchronous rollback.
         """
         self._closed = True
+        self.background.close()
         await self._hooks.aclose()
 
     def drain_usage(self) -> list[UsageReported]:
@@ -1039,9 +1045,15 @@ class Agent:
                 return
             if decision.context:
                 text = f"{text}\n{decision.context}" if text else decision.context
+        background = isinstance(incoming, BackgroundInput)
         user_message = Message.user(
-            text, attachments=attachments, input_text=input_text
+            text,
+            attachments=attachments,
+            # Monitor output is not user-authored; keep it out of input_text.
+            input_text=None if background else input_text,
         )
+        if background:
+            user_message.name = "monitor"
         self.memory.add(user_message)
         self._turn_user_message = user_message
         self._turn_stats_committed = True

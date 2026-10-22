@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import get_app
+from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import ANSI, StyleAndTextTuples
@@ -355,7 +356,7 @@ def _brief(value: object, limit: int = 40) -> str:
 
 # Tools whose headline argument is a shell command: shown as "$ command", and
 # their confirmations get command framing.
-COMMAND_TOOLS = frozenset({"run_shell", "process_start"})
+COMMAND_TOOLS = frozenset({"run_shell", "process_start", "process_monitor"})
 
 
 def _call_text(call: ToolCall) -> Text:
@@ -709,6 +710,11 @@ class CLIFrontend:
         self._tty = sys.stdin.isatty() and sys.stdout.isatty()
         self._main_prompt: PromptSession[str] | None = None
         self._confirm_prompt: PromptSession[str] | None = None
+        self._input_draft = Document()
+        # Text the editor accepted in this prompt, and an accepted message a
+        # monitor wakeup cancelled before prompt_async could return it.
+        self._accepted: str | None = None
+        self._pending_submit: str | None = None
 
     def set_commands(self, commands: CommandCatalog) -> None:
         """Rebind command help/completion for the active Agent."""
@@ -766,9 +772,20 @@ class CLIFrontend:
                 prompt_continuation=_continuation,
                 style=_PROMPT_STYLE,
             )
+            self._track_accept(self._main_prompt)
             # Separate history: confirmation answers are not messages.
             self._confirm_prompt = PromptSession(style=_PROMPT_STYLE)
         return self._main_prompt, self._confirm_prompt
+
+    def _track_accept(self, session: PromptSession[str]) -> None:
+        """Record each accepted message before prompt_async returns it."""
+        accept = session.default_buffer.accept_handler
+
+        def handler(buffer: Buffer) -> bool:
+            self._accepted = buffer.text
+            return accept(buffer) if accept is not None else False
+
+        session.default_buffer.accept_handler = handler
 
     def _prompt_message(self) -> StyleAndTextTuples:
         width = get_app().output.get_size().columns
@@ -829,8 +846,41 @@ class CLIFrontend:
                 line = line[:-1] + "\n" + await self._input(_CONTINUATION_PROMPT)
             return line
         self._stop_live()
+        if self._pending_submit is not None:
+            line, self._pending_submit = self._pending_submit, None
+            self.console.print(Text("❯ " + line, style="dim"))
+            return line
         main, _ = self._sessions()
-        return await main.prompt_async(handle_sigint=False)
+        draft, self._input_draft = self._input_draft, Document()
+        self._accepted = None
+        try:
+            return await main.prompt_async(default=draft, handle_sigint=False)
+        except asyncio.CancelledError:
+            if self._accepted is not None:
+                # Enter landed just before the wakeup cancelled the editor:
+                # send that message after the automatic turn, don't redraft it.
+                self._pending_submit = self._accepted
+            else:
+                # A monitor wakes the Agent while the editor is open. Restore
+                # the unsent text and cursor after the automatic turn finishes.
+                self._input_draft = main.default_buffer.document
+            raise
+        finally:
+            self._accepted = None
+
+    @property
+    def supports_background(self) -> bool:
+        return self._rich_prompt
+
+    def background_received(self, incoming: UserInput) -> None:
+        self.console.print(Text("Monitor: " + incoming.text, style="dim"))
+        self._start_turn()
+
+    def background_paused(self) -> None:
+        self.console.print(
+            "[dim]monitor events paused until your next message "
+            "(ask to process_stop a watch to end it)[/]"
+        )
 
     async def _input(self, prompt: str) -> str:
         """``console.input`` in a worker thread, safe against cancellation."""
@@ -1140,7 +1190,7 @@ class CLIFrontend:
                 if isinstance(command, str):
                     if call.name == "run_shell":
                         self._shell_commands.add(command)
-                    elif call.name == "process_start":
+                    elif call.name in {"process_start", "process_monitor"}:
                         self._process_commands.add(command)
                 self._flush()
                 self._segment_text = ""
@@ -1350,6 +1400,9 @@ class CLIFrontend:
                     self._replay(f"  ↥ media{summary}")
                 elif m.name == "summary":
                     self._replay(f"  ≋ earlier summary › {_short(m.content)}")
+                elif m.name == "monitor":
+                    events = m.content.split("\n", 1)[-1]  # skip the fixed preamble
+                    self._replay(f"  ◇ monitor events › {_short(events)}")
                 else:
                     text = m.input_text if m.input_text is not None else m.content
                     self._replay(f"  ❯ {_short(text)}{summary}", style="cyan")

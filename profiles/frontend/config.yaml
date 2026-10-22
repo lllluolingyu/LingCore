@@ -82,6 +82,7 @@ tools:
   - process_logs
   - process_stop
   - process_list
+  - process_monitor
 
 tool_options:
   activate_skill:

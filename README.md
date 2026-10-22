@@ -813,6 +813,11 @@ commitments.
    - Implemented: the port bridge also works in Linux OCI containers (Docker,
      Podman) on a Linux host, through a single-use socket mounted into the
      container.
+   - Implemented: `process_monitor` runs a bounded watch and delivers output
+     lines as events, waking the Agent when idle or waiting for its current
+     turn. LingChat/AgentGUI keep watches alive across tab closure; the
+     interactive CLI preserves drafts when an event arrives. See
+     [the process plugin](docs/plugins.md#bundled-process-plugin).
    - Implemented: the `daily` profile gains the bundled `clock` plugin (the
      current date, time and timezone with every message, outside the cached
      system prompt), the bundled `calendar` plugin (offline `.ics` event files
@@ -829,8 +834,12 @@ commitments.
      quality checks, latency/cost reporting and regression comparisons.
 
 6. **Later — Durable workflows**
-   - Build a detached turn runner so an in-flight task can survive a browser
-     disconnect, with ownership, leases, progress and reconnect attachment.
+   - Implemented in LingChat/AgentGUI: server-owned sessions keep turns and
+     background processes alive across browser disconnects. Reconnect restores
+     progress and pending approvals; backend shutdown interrupts all runtimes
+     and reaps their processes before closing stores.
+   - Next: durable job checkpoints and cross-process leases so work can recover
+     across backend restarts, beyond the current process-lifetime ownership.
    - Extend edit/fork flows with regenerate-without-edit and merge/export controls.
    - Add schema-validated results and an optional Responses API backend behind
      the existing LLM seam.

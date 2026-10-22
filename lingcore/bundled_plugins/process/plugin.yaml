@@ -9,6 +9,7 @@ provides:
 - process_logs
 - process_stop
 - process_list
+- process_monitor
 hooks: ProcessHooks
 # Closing stops every process; an OCI removal can take a while.
 hook_timeout: 60

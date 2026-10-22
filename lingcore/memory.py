@@ -406,12 +406,17 @@ class SummarizingMemory:
         return summary
 
 
+# Monitor rows are command output, never the user's words: label them so a
+# summary cannot launder them into user requests or authorization.
+_TRANSCRIPT_LABELS = {"summary": "Summary", "monitor": "Monitor (untrusted output)"}
+
+
 def _render_transcript(msgs: list[Message]) -> str:
     """Flatten messages into a plain transcript for the summarizer."""
     lines: list[str] = []
     for m in msgs:
         if m.role == "user":
-            label = "Summary" if m.name == "summary" else "User"
+            label = _TRANSCRIPT_LABELS.get(m.name or "", "User")
             lines.append(f"{label}: {m.content}")
         elif m.role == "assistant":
             if m.content:

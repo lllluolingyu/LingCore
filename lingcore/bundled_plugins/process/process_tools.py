@@ -40,6 +40,7 @@ import socket
 import sys
 import tempfile
 import time
+import weakref
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
@@ -50,6 +51,7 @@ from typing import Literal
 import regex
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from lingcore.background import EventSource
 from lingcore.errors import ToolError
 from lingcore.plugins import PluginContext, PluginHooks, TurnRolledBackEvent
 from lingcore.sandbox import (
@@ -169,7 +171,12 @@ class LogBuffer:
     their numbers are never reused.
     """
 
-    def __init__(self, max_bytes: int, max_line_chars: int) -> None:
+    def __init__(
+        self,
+        max_bytes: int,
+        max_line_chars: int,
+        on_line: Callable[[str], None] | None = None,
+    ) -> None:
         self._max_bytes = max_bytes
         self._max_line_chars = max_line_chars
         # Raw text kept per line before stripping: escapes inflate it.
@@ -185,6 +192,7 @@ class LogBuffer:
         self._overlong = False
         self._after_cr = False
         self._closed = False
+        self._on_line = on_line
 
     @property
     def total(self) -> int:
@@ -251,6 +259,8 @@ class LogBuffer:
         self._sizes.append(size)
         self._bytes += size
         self.next += 1
+        if self._on_line is not None:
+            self._on_line(line)
         while self._bytes > self._max_bytes and len(self._lines) > 1:
             self._lines.popleft()
             self._bytes -= self._sizes.popleft()
@@ -425,6 +435,7 @@ class Process:
     note: str | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     supervisor: asyncio.Task[None] | None = None
+    source: EventSource | None = None
 
     def state_text(self) -> str:
         if self.state == "running":
@@ -444,6 +455,11 @@ class ProcessHooks(PluginHooks):
     def __init__(self, ctx: PluginContext) -> None:
         super().__init__(ctx)
         self._processes: dict[str, Process] = {}  # insertion order = start order
+        # Pending events can outlive a removed/pruned process record. Keep its
+        # rollback ownership without retaining finished sources after delivery.
+        self._monitor_sources: weakref.WeakKeyDictionary[EventSource, float] = (
+            weakref.WeakKeyDictionary()
+        )
         self._used_ids: set[str] = set()
         self._lock = asyncio.Lock()
         self._reaping: set[asyncio.Task[None]] = set()
@@ -526,6 +542,7 @@ class ProcessHooks(PluginHooks):
         *,
         name: str | None,
         port: int | None,
+        monitor_timeout: float | None = None,
     ) -> Process:
         """Start the command and register it. Callers hold the lock."""
         bridge: Bridge | None = None
@@ -572,18 +589,29 @@ class ProcessHooks(PluginHooks):
             finally:
                 guest_end.close()
             bridge = Bridge(host_end, port)
+        ident = self._new_id()
+        source = EventSource(ctx.background, ident) if monitor_timeout else None
         proc = Process(
-            id=self._new_id(),
+            id=ident,
             name=name,
             command=command,
             runner=execution.runner,
             port=port,
             execution=execution,
-            log=LogBuffer(options.max_log_bytes, options.max_line_chars),
+            log=LogBuffer(
+                options.max_log_bytes,
+                options.max_line_chars,
+                source.publish if source else None,
+            ),
             started=time.monotonic(),
-            lifetime=options.max_lifetime,
+            lifetime=min(monitor_timeout, options.max_lifetime)
+            if monitor_timeout is not None
+            else options.max_lifetime,
             bridge=bridge,
+            source=source,
         )
+        if source is not None:
+            self._monitor_sources[source] = proc.started
         self._processes[proc.id] = proc
         proc.supervisor = asyncio.create_task(self._supervise(proc))
         return proc
@@ -655,12 +683,19 @@ class ProcessHooks(PluginHooks):
             proc.exit_code = code if code is not None else proc.exit_code
             proc.ended = time.monotonic()
             proc.changed.set()
+            if proc.source is not None:
+                proc.source.publish(f"Monitor ended: {proc.note or proc.state_text()}")
+                proc.source.finish()
 
     async def stop(self, proc: Process) -> None:
         """Kill and reap ``proc``; completes even if the caller is cancelled."""
         await asyncio.shield(asyncio.ensure_future(self._stop(proc)))
 
     async def _stop(self, proc: Process) -> None:
+        # Stopping a live watch drops its queued events; an exited watch's
+        # last lines and end notice are still delivered.
+        if proc.source is not None and proc.state == "running":
+            proc.source.cancel()
         if proc.bridge is not None:
             proc.bridge.close()
         if proc.state == "running":
@@ -726,6 +761,9 @@ class ProcessHooks(PluginHooks):
     # -- lifecycle hooks -----------------------------------------------------
 
     def turn_rolled_back(self, event: TurnRolledBackEvent) -> None:
+        for source, started in list(self._monitor_sources.items()):
+            if started >= event.started_at:
+                source.cancel()
         doomed = [
             proc
             for proc in self._processes.values()
@@ -753,6 +791,8 @@ class ProcessHooks(PluginHooks):
 
     async def aclose(self) -> None:
         self._closed = True  # queued tool calls now refuse
+        for source in list(self._monitor_sources):
+            source.cancel()
         if self._close_task is None or self._close_task.done():
             self._close_task = asyncio.create_task(self._close_all())
         await asyncio.shield(self._close_task)
@@ -875,6 +915,23 @@ class IdArgs(BaseModel):
     id: str = Field(description="The process id from process_start, e.g. 'p-3f9a1c'.")
 
 
+class MonitorArgs(BaseModel):
+    command: str = Field(
+        min_length=1,
+        description=(
+            "Command that prints a line only when something needs attention. "
+            "Use unbuffered output (e.g. python -u). Redirect noisy stderr if needed."
+        ),
+    )
+    name: str | None = Field(default=None, max_length=40)
+    timeout: float = Field(
+        default=300,
+        gt=0,
+        le=1800,
+        description="Watch deadline in seconds; also capped by process.max_lifetime.",
+    )
+
+
 class LogsArgs(IdArgs):
     since: int | None = Field(
         default=None,
@@ -912,6 +969,35 @@ class NoArgs(BaseModel):
     ),
 )
 async def process_start(args: StartArgs, ctx: ToolContext) -> str:
+    return await _start_process(args, ctx)
+
+
+@tool(
+    name="process_monitor",
+    high_risk=True,
+    description=(
+        "Watch events in the background: start a sandboxed command and deliver "
+        "each output line to this agent without polling tools. Returns immediately. "
+        "Use a script that filters/deduplicates changes (logs, files, CI status) "
+        "and flushes output. Events queue while the agent is busy and wake it "
+        "when idle, even with the web UI closed. Default deadline 5 minutes, "
+        "maximum 30; one end notice. Uses process_start's permissions and limits. "
+        "Inspect/stop with process_logs, process_list, process_stop."
+    ),
+)
+async def process_monitor(args: MonitorArgs, ctx: ToolContext) -> str:
+    if not ctx.background.enabled or ctx.background.closed:
+        raise ToolError("this frontend does not support monitor event delivery")
+    return await _start_process(
+        StartArgs(command=args.command, name=args.name),
+        ctx,
+        monitor_timeout=args.timeout,
+    )
+
+
+async def _start_process(
+    args: StartArgs, ctx: ToolContext, *, monitor_timeout: float | None = None
+) -> str:
     hooks = _hooks(ctx)
     options, sandbox = parse_process_options(ctx.options or {})
     command = args.command.strip()
@@ -970,6 +1056,13 @@ async def process_start(args: StartArgs, ctx: ToolContext) -> str:
             command,
             name=args.name.strip() if args.name and args.name.strip() else None,
             port=args.port,
+            monitor_timeout=monitor_timeout,
+        )
+    if monitor_timeout is not None:
+        return (
+            f"Started monitor {_label(proc)} (deadline {_duration(proc.lifetime)}). "
+            "Output lines will arrive as monitor events; do not poll. "
+            "Use process_stop to cancel this watch, process_logs for its logs."
         )
     match = await hooks.wait_ready(
         proc, pattern, timeout if pattern is not None else min(timeout, _EXIT_SETTLE)
