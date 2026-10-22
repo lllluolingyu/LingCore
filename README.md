@@ -360,6 +360,15 @@ launching process. Real `.env` files are gitignored; commit a secret-free
 `coding`, `frontend`, `daily`, and `teaching` profiles include one. Run `lingcore doctor --profile <path>` after copying
 or editing one. To create a new agent type, add a directory—no code required.
 
+Model replies that reach an output or context limit end with an explicit
+incomplete-response error, preserving the output-guarded partial text and the
+provider's `finish_reason` in session history. CLI and web history show the
+warning, including provider hints and the number of tool calls not run.
+A cut-off tool batch never runs. Continue
+explicitly after reviewing the partial reply, or adjust the profile's output
+budget/context; these limits do not trigger transport retries. Malformed tool
+arguments are returned as failed tool results so the model can correct them.
+
 ### Native Anthropic, caching, and thinking
 
 Select `backend: anthropic` to use the native Messages API. Its default endpoint

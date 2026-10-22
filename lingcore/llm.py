@@ -50,7 +50,7 @@ from typing import Any
 import httpx
 from openai import AsyncOpenAI
 
-from lingcore.errors import LLMStreamError
+from lingcore.errors import INCOMPLETE_FINISH_REASONS, LLMStreamError
 from lingcore.message import NATIVE_MODALITIES, Message, ToolCall
 from lingcore.usage import UsageSink, usage_from_openai
 
@@ -114,16 +114,17 @@ class _ToolCallAccumulator:
     name: str = ""
     args_fragments: list[str] = field(default_factory=list)
 
-    def build(self) -> ToolCall:
+    def build(self, *, cut_off: bool = False) -> ToolCall:
         raw = "".join(self.args_fragments).strip()
+        if not raw and not cut_off:
+            # Some compatible servers omit the JSON for a no-argument call.
+            return ToolCall(id=self.id, name=self.name)
         try:
-            parsed = json.loads(raw) if raw else {}
+            parsed = json.loads(raw)
         except json.JSONDecodeError:
-            # Malformed args: hand the model an empty dict so the tool's
-            # pydantic validation reports the problem back to it cleanly.
-            parsed = {}
+            parsed = None
         if not isinstance(parsed, dict):
-            parsed = {}
+            return ToolCall(id=self.id, name=self.name, invalid_arguments=raw)
         return ToolCall(id=self.id, name=self.name, arguments=parsed)
 
 
@@ -332,7 +333,12 @@ class LLMClient:
             )
 
         tool_calls = (
-            [accumulators[i].build() for i in sorted(accumulators)]
+            [
+                accumulators[i].build(
+                    cut_off=finish_reason in INCOMPLETE_FINISH_REASONS
+                )
+                for i in sorted(accumulators)
+            ]
             if accumulators
             else None
         )

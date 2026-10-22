@@ -32,6 +32,15 @@ DISCARDED_NOTICE = "⚠️ Discarded partial response."
 STREAM_PLACEHOLDER = "…"
 
 
+def error_text(event: Error) -> str:
+    """Render an error using only authoritative partial text, never raw deltas."""
+    if event.partial_content is not None:
+        return "\n\n".join(
+            part for part in (event.partial_content, f"⚠️ {event.message}") if part
+        )
+    return f"❌ {event.message}"
+
+
 def chunk_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
     """Split deterministically, preferring paragraph/newline/space boundaries."""
     if limit <= 0:
@@ -157,10 +166,13 @@ class TelegramTurnRenderer:
         elif isinstance(event, UsageReported | TurnStatsReported):
             pass  # accounting only; never rendered into a chat
         elif isinstance(event, Error):
-            await self._discard_for_terminal(f"❌ {event.message}")
+            if event.partial_content is not None:
+                await self.reconcile_final(error_text(event))
+            else:
+                await self._discard_for_terminal(error_text(event))
 
     async def reconcile_final(self, content: str) -> None:
-        """Make current-attempt messages exactly match authoritative Final text."""
+        """Make current-attempt messages match authoritative terminal text."""
         chunks = chunk_text(content or EMPTY_RESPONSE)
         for index, chunk in enumerate(chunks):
             if index < len(self._messages):

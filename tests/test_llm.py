@@ -134,7 +134,8 @@ async def test_parallel_tool_calls_kept_separate(client, monkeypatch):
     assert calls[1].arguments == {"path": "."}
 
 
-async def test_malformed_args_become_empty_dict(client, monkeypatch):
+@pytest.mark.parametrize("raw", ["{not json", "[]", "null", "42", '"text"'])
+async def test_malformed_args_are_marked_unexecutable(client, monkeypatch, raw):
     events = [
         _Event(
             [
@@ -144,7 +145,7 @@ async def test_malformed_args_become_empty_dict(client, monkeypatch):
                             _ToolCallDelta(
                                 index=0,
                                 id="c0",
-                                function=_Fn(name="x", arguments="{not json"),
+                                function=_Fn(name="x", arguments=raw),
                             ),
                         ]
                     )
@@ -154,7 +155,45 @@ async def test_malformed_args_become_empty_dict(client, monkeypatch):
         _Event([_Choice(_Delta(), finish_reason="tool_calls")]),
     ]
     chunks = await _collect(client, monkeypatch, events)
-    assert chunks[-1].tool_calls[0].arguments == {}
+    call = chunks[-1].tool_calls[0]
+    assert call.invalid_arguments == raw
+    assert call.arguments == {}
+    # Provider replay stays valid JSON; the marker survives local persistence.
+    assert json.loads(call.to_openai()["function"]["arguments"]) == {}
+    assert type(call).model_validate_json(call.model_dump_json()) == call
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "{}"])
+@pytest.mark.parametrize("reason", ["tool_calls", "length"])
+async def test_empty_arguments_distinguish_finished_and_cut_off_calls(
+    client, monkeypatch, raw, reason
+):
+    chunks = await _collect(
+        client,
+        monkeypatch,
+        [
+            _Event(
+                [
+                    _Choice(
+                        _Delta(
+                            tool_calls=[
+                                _ToolCallDelta(
+                                    index=0,
+                                    id="c",
+                                    function=_Fn(name="x", arguments=raw),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            ),
+            _Event([_Choice(_Delta(), finish_reason=reason)]),
+        ],
+    )
+    call = chunks[-1].tool_calls[0]
+    assert (call.invalid_arguments is not None) == (
+        reason == "length" and not raw.strip()
+    )
 
 
 # --------------------------------------------------------------------------- #

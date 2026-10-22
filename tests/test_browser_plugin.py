@@ -38,6 +38,7 @@ TOOLS = [
     "browser_type",
     "browser_select",
     "browser_press",
+    "browser_scroll",
     "browser_back",
     "browser_screenshot",
     "browser_resize",
@@ -119,6 +120,130 @@ def test_options_are_strict():
         browser.parse_browser_options({"headles": True})
     with pytest.raises(ConfigError, match="must be a boolean"):
         browser.parse_browser_options({"headless": "false"})
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"settle_quiet_ms": -1},
+        {"settle_timeout_ms": 0},
+        {"settle_quiet_ms": True},
+        {"settle_timeout_ms": "soon"},
+        {"settle_timeout_ms": 10_001},
+        {"settle_quiet_ms": 501, "settle_timeout_ms": 500},
+    ],
+)
+def test_settling_options_reject_invalid_budgets(options):
+    with pytest.raises(ConfigError):
+        browser.parse_browser_options(options)
+
+
+async def test_settling_follows_popup_and_renders_observed_page(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        browser, "_playwright_errors", lambda: (_FakeError, _FakeTimeout)
+    )
+    observed = []
+    pages = []
+
+    class Page(_FakePage):
+        async def evaluate(self, expression, args):
+            observed.append(self)
+            pages.append(Page())  # each page opens another while settling
+            return True
+
+    async def active():
+        return pages[-1]
+
+    pages.append(Page())
+    session = SimpleNamespace(options=browser.BrowserOptions(), page=active)
+    shown, notes = await browser._settled_page(session, pages[0])
+    assert shown is observed[-1]
+    assert shown is not pages[-1]  # never claim the last, unobserved popup was settled
+    assert "repeated tab changes" in notes[0] and "timed out" not in notes[0]
+
+
+async def test_settling_timeout_and_cancellation_are_bounded(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        browser, "_playwright_errors", lambda: (_FakeError, _FakeTimeout)
+    )
+    entered = asyncio.Event()
+
+    class Page(_FakePage):
+        async def evaluate(self, expression, args):
+            entered.set()
+            await asyncio.Event().wait()
+
+    page = Page()
+
+    async def active():
+        return page
+
+    session = SimpleNamespace(
+        options=browser.BrowserOptions(settle_quiet_ms=5, settle_timeout_ms=20),
+        page=active,
+    )
+    shown, notes = await asyncio.wait_for(browser._settled_page(session, page), 1)
+    assert shown is page and "timed out" in notes[0]
+    entered.clear()
+    session.options = browser.BrowserOptions()
+    task = asyncio.create_task(browser._settled_page(session, page))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    session.options = browser.BrowserOptions(settle_quiet_ms=0)
+    assert await browser._settled_page(session, page) == (page, [])
+
+
+async def test_settling_recovers_when_navigation_destroys_context(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        browser, "_playwright_errors", lambda: (_FakeError, _FakeTimeout)
+    )
+    calls = []
+
+    class Page(_FakePage):
+        async def evaluate(self, expression, args):
+            calls.append(args)
+            if len(calls) == 1:
+                raise _FakeError("Execution context was destroyed")
+            return True
+
+    page = Page()
+
+    async def active():
+        return page
+
+    session = SimpleNamespace(options=browser.BrowserOptions(), page=active)
+    assert await browser._settled_page(session, page) == (page, [])
+    assert len(calls) == 2
+    assert calls[1][1] <= calls[0][1]  # navigation cannot reset the deadline
+
+
+async def test_settling_reports_repeated_page_errors(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        browser, "_playwright_errors", lambda: (_FakeError, _FakeTimeout)
+    )
+
+    class Page(_FakePage):
+        async def evaluate(self, expression, args):
+            raise _FakeError("Target page has been closed")
+
+    page = Page()
+
+    async def active():
+        return page
+
+    session = SimpleNamespace(options=browser.BrowserOptions(), page=active)
+    _, notes = await browser._settled_page(session, page)
+    assert "page/navigation errors" in notes[0] and "timed out" not in notes[0]
 
 
 @pytest.mark.parametrize(
@@ -524,6 +649,9 @@ class _FakePage:
     async def wait_for_load_state(self, *args, **kwargs):
         pass
 
+    async def evaluate(self, expression, args):
+        return True
+
     async def title(self):
         return "Fake"
 
@@ -796,7 +924,9 @@ def site():
 
 
 def _ref(snapshot: str, label: str) -> str:
-    line = next(line for line in snapshot.splitlines() if label in line)
+    line = next(
+        line for line in snapshot.splitlines() if label in line and "[ref=" in line
+    )
     return line.split("[ref=", 1)[1].split("]", 1)[0]
 
 
@@ -1416,3 +1546,165 @@ async def test_live_broken_page_explains_itself(tmp_path, live, site):
     assert "uncaught exception: 'ReferenceError: undefinedFunction" in result.content
     assert "plain-log-line" not in result.content
     assert "Failed to load resource" not in result.content  # Chromium's echo
+
+
+async def test_live_typing_under_overlay_does_not_click(tmp_path, owner_browser):
+    owner, cdp_url = owner_browser
+    page = owner.pages[0]
+    await page.set_content("""<!doctype html>
+      <style>.cover{position:fixed;inset:0;z-index:10}</style>
+      <input aria-label="Covered input" onclick="window.clicked++">
+      <div class="cover" aria-hidden="true" onclick="window.clicked++"></div>
+      <script>window.clicked=0;</script>""")
+    async with Agent.from_profile(
+        profile_for(tmp_path, cdp_url=cdp_url, timeout=1), llm=FakeLLMClient([])
+    ) as agent:
+        snapshot = await browser.browser_snapshot.run(
+            browser.SnapshotArgs(), agent.tool_ctx
+        )
+        result = await browser.browser_type.run(
+            browser.TypeArgs(ref=_ref(snapshot, "Covered input"), text="Typed safely"),
+            agent.tool_ctx,
+        )
+        assert "Timed out" not in result
+        assert await page.locator("input").input_value() == "Typed safely"
+        assert await page.evaluate("window.clicked") == 0
+        assert await page.locator("input").evaluate(
+            "el => el === document.activeElement"
+        )
+
+
+@pytest.mark.parametrize("tag", ["iframe", "frame"])
+async def test_live_typing_frame_body_avoids_click_side_effects(
+    tmp_path, owner_browser, tag
+):
+    owner, cdp_url = owner_browser
+    page = owner.pages[0]
+    markup = (
+        '<iframe src="about:blank"></iframe>'
+        if tag == "iframe"
+        else '<frameset rows="*"><frame src="about:blank"></frameset>'
+    )
+    await page.set_content(f"<!doctype html>{markup}")
+    frame = page.frames[1]
+    await frame.set_content("""<body contenteditable="true" role="textbox" aria-label="Editor"
+      onclick="window.clicked++"><a href="#clicked">Editable link</a>
+      <script>window.clicked=0;</script></body>""")
+    async with Agent.from_profile(
+        profile_for(tmp_path, cdp_url=cdp_url), llm=FakeLLMClient([])
+    ) as agent:
+        snapshot = await browser.browser_snapshot.run(
+            browser.SnapshotArgs(), agent.tool_ctx
+        )
+        result = await browser.browser_type.run(
+            browser.TypeArgs(ref=_ref(snapshot, tag), text="Safe editor text"),
+            agent.tool_ctx,
+        )
+        assert "Timed out" not in result
+        assert await frame.locator("body").inner_text() == "Safe editor text"
+        assert await frame.evaluate("window.clicked") == 0
+        assert await frame.locator("body").evaluate(
+            "el => el === document.activeElement"
+        )
+
+
+async def test_live_actions_observe_late_dom_and_popups(tmp_path, owner_browser):
+    owner, cdp_url = owner_browser
+    page = owner.pages[0]
+    await page.set_content("""<!doctype html><title>Start</title>
+      <button onclick="setTimeout(() => document.querySelector('p').textContent = 'Updated late', 80)">Update</button>
+      <button onclick="setTimeout(() => {
+        const w = window.open('about:blank'); w.document.title = 'Popup';
+        w.setTimeout(() => w.document.body.innerHTML = '<h1>Popup ready</h1>', 80);
+      }, 80)">Open popup</button><p>Initial</p>""")
+    async with Agent.from_profile(
+        profile_for(tmp_path, cdp_url=cdp_url), llm=FakeLLMClient([])
+    ) as agent:
+        ctx = agent.tool_ctx
+        initial = await browser.browser_snapshot.run(browser.SnapshotArgs(), ctx)
+        updated = await browser.browser_click.run(
+            browser.RefArgs(ref=_ref(initial, "Update")), ctx
+        )
+        assert "Updated late" in updated and "Initial" not in updated
+        popup = await browser.browser_click.run(
+            browser.RefArgs(ref=_ref(updated, "Open popup")), ctx
+        )
+        assert popup.startswith("[Popup] about:blank")
+        assert "Popup ready" in popup
+        assert "timed out" not in popup
+
+
+async def test_live_scroll_and_iframe_typing_preserve_focus_and_values(
+    tmp_path, owner_browser
+):
+    owner, cdp_url = owner_browser
+    page = owner.pages[0]
+    await page.set_content("""<!doctype html><title>Editor</title>
+      <label>Name <input></label>
+      <iframe title="Editor frame" srcdoc='<body contenteditable="true" role="textbox"
+        aria-label="Rich editor">Initial</body>'></iframe>
+      <div style="height:3000px"></div><button>Save</button>
+      <output id="position">Top</output>
+      <script>onscroll = () => document.querySelector('#position').textContent =
+        scrollY > 0 ? 'Away from top' : 'Top';</script>""")
+    async with Agent.from_profile(
+        profile_for(tmp_path, cdp_url=cdp_url), llm=FakeLLMClient([])
+    ) as agent:
+        ctx = agent.tool_ctx
+        for label, tag in [("Name", "INPUT"), ("iframe", "IFRAME")]:
+            snapshot = await browser.browser_snapshot.run(browser.SnapshotArgs(), ctx)
+            typed = await browser.browser_type.run(
+                browser.TypeArgs(ref=_ref(snapshot, label), text="Keep this value"), ctx
+            )
+            assert "Keep this value" in typed
+            for direction in ["down", "up", "bottom", "top"]:
+                view = await browser.browser_scroll.run(
+                    browser.ScrollArgs(direction=direction), ctx
+                )
+                assert f"Scrolled {direction}:" in view.text
+                assert "Keep this value" in view.text
+                assert (
+                    len(view.attachments) == 1 and view.attachments[0].kind == "image"
+                )
+                assert await page.evaluate("document.activeElement.tagName") == tag
+                position = await page.evaluate("window.scrollY")
+                if direction in {"down", "bottom"}:
+                    assert position > 0 and "Away from top" in view.text
+                else:
+                    assert position == 0
+            frame = page.main_frame if tag == "INPUT" else page.frames[1]
+            assert await frame.get_by_role("textbox").evaluate(
+                "el => el === document.activeElement"
+            )
+            # Page scrolling must not steal future keyboard input from the editor.
+            await page.keyboard.press("End")
+            await page.keyboard.type("!")
+            assert "Keep this value!" in await browser.browser_snapshot.run(
+                browser.SnapshotArgs(), ctx
+            )
+        stuck = await browser.browser_scroll.run(
+            browser.ScrollArgs(direction="up"), ctx
+        )
+        assert "did not move" in stuck.text
+        await page.set_content("""<!doctype html><style>html,body{height:100%;overflow:hidden;margin:0}</style>
+          <div style="height:100%;overflow:auto"><div style="height:3000px"></div></div>""")
+        panel = await browser.browser_scroll.run(browser.ScrollArgs(), ctx)
+        assert "did not move" in panel.text
+
+
+async def test_live_settling_timeout_is_reported(tmp_path, owner_browser):
+    owner, cdp_url = owner_browser
+    page = owner.pages[0]
+    await page.set_content("""<!doctype html><p>Tick</p><script>
+      setInterval(() => document.querySelector('p').textContent = String(Date.now()), 10);
+    </script>""")
+    async with Agent.from_profile(
+        profile_for(
+            tmp_path, cdp_url=cdp_url, settle_quiet_ms=50, settle_timeout_ms=120
+        ),
+        llm=FakeLLMClient([]),
+    ) as agent:
+        result = await asyncio.wait_for(
+            browser.browser_snapshot.run(browser.SnapshotArgs(), agent.tool_ctx), 5
+        )
+        assert "DOM settling timed out" in result

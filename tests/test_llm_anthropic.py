@@ -482,19 +482,28 @@ async def test_fragmented_parallel_tool_calls_survive_real_sdk_stream(make_clien
 
 
 @pytest.mark.parametrize("fragments", [[], ["{broken"], ["[]"], ["null"]])
-async def test_empty_or_invalid_tool_arguments_allow_tool_validation(
+async def test_empty_arguments_are_valid_but_invalid_arguments_are_marked(
     make_client, fragments
 ):
     client, _, _ = make_client(
         [_start(), *_tool(0, "c", "read_file", fragments), *_stop("tool_use")]
     )
     chunks = [chunk async for chunk in client.stream([Message.user("go")])]
-    assert chunks[-1].tool_calls == [ToolCall(id="c", name="read_file", arguments={})]
+    assert chunks[-1].tool_calls == [
+        ToolCall(
+            id="c",
+            name="read_file",
+            invalid_arguments="".join(fragments) if fragments else None,
+        )
+    ]
 
 
 @pytest.mark.parametrize(
     "reason, hint",
-    [("max_tokens", "max_tokens"), ("model_context_window_exceeded", "context")],
+    [
+        ("max_tokens", "max_tokens"),
+        ("model_context_window_exceeded", "context"),
+    ],
 )
 @pytest.mark.parametrize("thinking", [False, True])
 async def test_tool_limits_abort_batch_without_retry_or_dispatch(
@@ -539,8 +548,12 @@ async def test_tool_limits_abort_batch_without_retry_or_dispatch(
         isinstance(event, (ToolCallStarted, StreamRetry)) for event in events
     )
     assert isinstance(events[-1], Error) and hint in events[-1].message
+    assert "tool call response was truncated" in events[-1].message
+    assert "2 tool call(s) were not run" in events[-1].message
     assert len(requests) == 1
-    assert not any(message.role == "assistant" for message in agent.memory.render(""))
+    partial = agent.memory.messages[-1]
+    assert partial.finish_reason == client._map_finish_reason(reason)
+    assert not partial.tool_calls and partial.anthropic_content is None
     assert seen == [TokenUsage("served-model", 12, 9)]
     assert body.closed
 
@@ -851,6 +864,20 @@ async def test_thinking_exhausting_output_limit_is_actionable_without_retry(
     with pytest.raises(LLMStreamError, match=hint) as error:
         [chunk async for chunk in client.stream([Message.user("hi")])]
     assert not error.value.retryable
+
+
+async def test_thinking_limit_keeps_provider_hint_in_agent_history(
+    make_client, tmp_path
+):
+    client, requests, _ = make_client(
+        [_start(), *_thinking(0, ["still thinking"], ["signed"]), *_stop("max_tokens")]
+    )
+    profile = AgentProfile(llm={"model": "alias"}, tools=[], workspace=str(tmp_path))
+    async with Agent.from_profile(profile, llm=client) as agent:
+        events = [event async for event in agent.run("think")]
+        assert "reduce the thinking budget" in events[-1].message
+        assert agent.memory.messages[-1].finish_detail == events[-1].message
+        assert len(requests) == 1
 
 
 async def test_thinking_binding_controls_reach_api_from_profile(make_client):

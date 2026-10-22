@@ -9,6 +9,7 @@ requested_tools:
 - browser_type
 - browser_select
 - browser_press
+- browser_scroll
 - browser_back
 - browser_screenshot
 - browser_resize
@@ -30,16 +31,25 @@ How the tools fit together:
   set `submit: true` to press Enter afterwards.
 - `browser_press` sends a key (`Enter`, `Escape`, `PageDown`, `Control+A`) to
   the focused element. `browser_back` goes back one page.
+- `browser_scroll` scrolls the page independently of keyboard focus and returns
+  its actual movement, a snapshot, and a viewport screenshot. Use it instead
+  of End/PageDown, which can stay inside a focused editor. Inner panels are
+  separate scroll containers.
 - `browser_snapshot` re-reads the page (e.g. after content loads late). Pass
   `ref` to read only one element's subtree (a list, a form) or `depth` to read
   only the top levels; this keeps long pages short.
 - `browser_screenshot` attaches an image when layout, charts or images matter.
-  The snapshot is the source of truth for text and refs.
+  Images show only the viewport unless `full_page` is true; offscreen content
+  can be absent. Snapshots include offscreen content and supply text and refs.
 - `browser_resize` changes the active tab's viewport (e.g. 390x844 for a
   phone, 1280x800 for a desktop) to check responsive layouts; screenshot
   afterwards to see the result. It changes only the size, not touch or the
   user agent.
 - `browser_close` discards the session (tabs, cookies, approvals).
+
+Actions and observations wait for bounded DOM quiet; a timeout note means the
+page may still be changing. `browser_type` focuses fields without clicking and
+can fill an editable iframe/frame body when given the frame's ref.
 
 Guidance:
 

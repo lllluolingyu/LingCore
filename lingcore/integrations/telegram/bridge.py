@@ -28,6 +28,7 @@ from lingcore.integrations.telegram.rendering import (
     EMPTY_RESPONSE,
     TelegramTurnRenderer,
     chunk_text,
+    error_text,
 )
 from lingcore.integrations.telegram.state import TelegramStateStore
 from lingcore.media import FILE_MAX_BYTES, IMAGE_MAX_BYTES, attachment_from_bytes
@@ -429,9 +430,9 @@ class TelegramBridge:
             turn = runtime.agent.run(incoming)
             async with aclosing(turn):
                 async for event in turn:
-                    if isinstance(event, Final):
+                    if isinstance(event, Final | Error):
                         # Agent commits and releases its checkpoint before
-                        # yielding Final. Keep Stop from misclassifying the
+                        # yielding a terminal event. Keep Stop from misclassifying the
                         # remaining Telegram I/O as a pre-turn cancellation.
                         runtime.final_delivery = True
                     try:
@@ -462,16 +463,18 @@ class TelegramBridge:
         self,
         event: AgentEvent,
         *,
-        renderer: TelegramTurnRenderer,
+        renderer: TelegramTurnRenderer | None,
         sender: TelegramSender,
         chat_id: int,
         warning_sent: bool,
     ) -> bool:
         """Best-effort delivery after one renderer operation failed."""
-        if isinstance(event, Final):
+        if isinstance(event, Final) or (
+            isinstance(event, Error) and event.partial_content is not None
+        ):
             # Remove stale placeholders/partial chunks where possible before
             # sending the authoritative response as fresh plain messages.
-            for response_id in renderer.response_message_ids:
+            for response_id in renderer.response_message_ids if renderer else ():
                 try:
                     await sender.delete_message(chat_id, response_id)
                 except asyncio.CancelledError:
@@ -481,11 +484,13 @@ class TelegramBridge:
             await self._best_effort_plain(
                 sender,
                 chat_id,
-                event.content or EMPTY_RESPONSE,
+                (event.content or EMPTY_RESPONSE)
+                if isinstance(event, Final)
+                else error_text(event),
             )
             return True
         if isinstance(event, Error):
-            await self._best_effort_plain(sender, chat_id, f"❌ {event.message}")
+            await self._best_effort_plain(sender, chat_id, error_text(event))
             return True
         if isinstance(event, TurnCancelled):
             await self._best_effort_plain(sender, chat_id, f"⏹️ {event.reason}")
@@ -708,13 +713,15 @@ class TelegramBridge:
                 continue
             if isinstance(event, PluginNotice):
                 text = f"Plugin {event.plugin} · {event.hook} · {event.action}: {event.message}"
-            elif isinstance(event, Error):
-                text = f"❌ {event.message}"
-            elif isinstance(event, TurnCancelled):
-                text = f"⏹️ {event.reason}"
-            elif isinstance(event, Final) and event.content:
-                # Stop landed after the reply was committed; it still stands.
-                text = event.content
+            elif isinstance(event, Final | Error | TurnCancelled):
+                await self._fallback_delivery(
+                    event,
+                    renderer=renderer,
+                    sender=sender,
+                    chat_id=chat_id,
+                    warning_sent=False,
+                )
+                continue
             else:
                 continue
             await self._best_effort_plain(sender, chat_id, text)

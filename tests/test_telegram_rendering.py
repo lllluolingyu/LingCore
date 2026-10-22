@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
+import pytest
+
 from lingcore.events import (
+    Error,
     Final,
     StreamRetry,
     TextDelta,
@@ -179,3 +182,20 @@ async def test_confirmation_timeout_and_shutdown_denial_without_real_sleep():
     assert await timed is False
     await manager.deny_all()
     assert await stopped is False
+
+
+@pytest.mark.parametrize("guarded", ["Partial answer", ""])
+async def test_incomplete_response_keeps_partial_text_with_visible_warning(guarded):
+    sender = FakeSender()
+    renderer = TelegramTurnRenderer(sender, 1, edit_interval=0)
+    await renderer.handle(TextDelta("SECRET"))
+    await renderer.handle(
+        Error(
+            "Model response incomplete: output limit.",
+            finish_reason="length",
+            partial_content=guarded,
+        )
+    )
+    visible = "\n".join(sender.messages.values())
+    assert guarded in visible and "Model response incomplete" in visible
+    assert "SECRET" not in visible

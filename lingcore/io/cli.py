@@ -53,6 +53,7 @@ from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
+from lingcore.errors import INCOMPLETE_FINISH_REASONS, incomplete_response_message
 from lingcore.events import (
     AgentEvent,
     Compacted,
@@ -669,6 +670,7 @@ class CLIFrontend:
         # Streamed reply text not yet committed to the scrollback (the block in
         # progress), and whether this reply segment has committed anything.
         self._pending = ""
+        self._segment_text = ""
         self._segment_open = False
         self._segment_committed = False
         # What the transcript printed last ("text", "tool", or None at turn
@@ -1049,6 +1051,8 @@ class CLIFrontend:
         self._show_live(self._working)
 
     def _start_turn(self) -> None:
+        self._segment_text = ""
+        self._segment_committed = False
         self._turn_started = time.monotonic()
         self._working.started = self._turn_started
         self._last_kind = None
@@ -1074,6 +1078,7 @@ class CLIFrontend:
         self._stop_live()
         self.console.print()
         self._segment_open = True
+        self._segment_text = ""
         self._segment_committed = False
         self._last_kind = "text"
 
@@ -1087,6 +1092,7 @@ class CLIFrontend:
 
     def _feed(self, text: str) -> None:
         self._open_segment()
+        self._segment_text += text
         self._pending += text
         cut = _stable_prefix(self._pending)
         if cut:
@@ -1137,6 +1143,8 @@ class CLIFrontend:
                     elif call.name == "process_start":
                         self._process_commands.add(command)
                 self._flush()
+                self._segment_text = ""
+                self._segment_committed = False
                 self._render_call(call)
                 self._show_working(f"running {call.name}")
             case ToolResultEvent(result):
@@ -1191,7 +1199,16 @@ class CLIFrontend:
             case Final(_):
                 self._flush()
                 self._end_turn()
-            case Error(message):
+            case Error(message, partial_content=partial):
+                if partial is not None and partial != self._segment_text:
+                    committed = self._segment_committed
+                    self._discard()
+                    if committed:
+                        self.console.print(
+                            "[yellow]Partial reply above replaced after output filtering.[/]"
+                        )
+                    if partial:
+                        self._feed(partial)
                 self._flush()
                 self.console.print(Text.assemble(("✗ error: ", "bold red"), message))
                 self._end_turn()
@@ -1339,6 +1356,11 @@ class CLIFrontend:
             elif m.role == "assistant":
                 if m.content:
                     self._replay(f"  ● {_short(m.content)}")
+                if m.finish_reason in INCOMPLETE_FINISH_REASONS:
+                    warning = m.finish_detail or incomplete_response_message(
+                        m.finish_reason
+                    )
+                    self.console.print(Text(f"  ⚠ {warning}", style="yellow"))
                 for tc in m.tool_calls:
                     # Tool names are model-generated (an unknown-tool call is
                     # stored verbatim) — Text renders them literally.

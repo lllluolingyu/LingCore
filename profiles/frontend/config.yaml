@@ -72,6 +72,7 @@ tools:
   - browser_type
   - browser_select
   - browser_press
+  - browser_scroll
   - browser_back
   - browser_screenshot
   - browser_resize

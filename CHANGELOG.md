@@ -7,6 +7,16 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ### Fixed
 
+- Malformed or non-object tool arguments are rejected before hooks or execution,
+  instead of accidentally running tools with default arguments.
+- Provider output/context limits produce an explicit incomplete-response error,
+  preserve output-guarded partial text and completion metadata in session history,
+  and never execute a cut-off tool batch. Provider hints and dropped-call counts
+  survive replay, and Telegram fallbacks retain the guarded partial reply.
+  These limits are not retried as transport failures.
+- Browser observations wait for configurable, bounded DOM quiet across navigation
+  and popup changes. Typing focuses fields without clicking and supports editable
+  iframe/frame bodies, including inputs covered by styled labels or overlays.
 - Calendar listings keep unsupported recurring series visible even after their
   original occurrence, with an explicit incomplete-coverage warning. Adding an
   event also warns when those series prevent a complete overlap check.
@@ -19,6 +29,9 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ### Added
 
+- `browser_scroll` scrolls the page independently of editor focus and returns
+  actual movement, a fresh snapshot, and a viewport screenshot. The frontend
+  profile enables it.
 - `calendar_update` patches saved events atomically by id, retaining omitted
   details, imported properties and alarms. Repeating events require an explicit
   whole-series or single-occurrence scope; a moved occurrence retains its

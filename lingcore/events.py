@@ -64,6 +64,11 @@ class Error:
     """A turn-level error the frontend should surface."""
 
     message: str
+    # Set for a provider-declared incomplete response, never a transport retry.
+    finish_reason: str | None = None
+    # Authoritative, post-output-guardrail text; replaces streamed deltas.
+    # None means no replacement, whereas "" explicitly clears partial text.
+    partial_content: str | None = None
 
 
 @dataclass(slots=True)

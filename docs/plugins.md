@@ -222,11 +222,13 @@ a missing Chromium build surfaces as the first tool call's error.
 ```yaml
 plugins: [browser]
 tools: [browser_navigate, browser_snapshot, browser_click, browser_type,
-        browser_select, browser_press, browser_back, browser_screenshot,
+        browser_select, browser_press, browser_scroll, browser_back, browser_screenshot,
         browser_resize, browser_close]
 tool_options:
   browser:
     timeout: 15                 # seconds per browser action (1-120)
+    settle_quiet_ms: 500         # DOM quiet before observing; 0 disables settling
+    settle_timeout_ms: 3000      # total settling budget, including navigation/popups
     headless: true
   fetch_url:                    # the network policy for fetch_url *and* the browser
     allowed_networks: [198.18.0.0/15, "2001:2::/48"]  # e.g. a fake-IP proxy
@@ -244,6 +246,28 @@ attach an image. Tool calls on one browser are serialized. `browser_snapshot`
 accepts an optional `ref` (only that element's subtree, e.g. one list or form)
 and `depth` (only that many levels below the root), which keeps long pages
 cheap to read; refs in a partial snapshot stay valid for the action tools.
+
+Actions, snapshots and screenshots wait for DOM quiet before observing. The
+quiet period is configurable from 0–5,000 ms and must not exceed the total
+settling budget (1–10,000 ms). Navigation and popup changes share that budget;
+the returned snapshot and any accompanying screenshot use the same selected
+page. Timeouts, repeated tab changes, and page errors have distinct notes.
+Quiet is a heuristic, not a guarantee that an application finished all of its
+background work. A successful quiet check adds at least the quiet period (500 ms by
+default), including navigate, back and resize. Continuous DOM changes, including
+attribute animations, can consume the full budget (3 s by default) on each call.
+Lower these settings for latency-sensitive workflows, or set `settle_quiet_ms: 0`
+to disable settling.
+
+`browser_type` uses DOM focus without clicking, so covering labels and click
+handlers do not block or alter filling. It accepts an iframe/frame ref when
+its body is editable. `browser_scroll` scrolls the page by a viewport or
+to its top/bottom, independent of keyboard focus; its result reports the actual
+offset change and includes a fresh snapshot and viewport screenshot. An inner
+scrollable panel is separate: an unchanged page offset is reported explicitly.
+Snapshots include offscreen content; screenshots show only the viewport unless
+`full_page: true` is requested.
+
 `browser_resize` changes the active tab's viewport during a session (within the
 same 320-3840 x 240-2160 bounds as `viewport_width`/`viewport_height`, which set
 the startup size), so one session can check mobile and desktop breakpoints. It

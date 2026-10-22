@@ -123,6 +123,85 @@ async def _finish(bridge: TelegramBridge):
     await asyncio.sleep(0)
 
 
+@pytest.mark.parametrize("stop", [False, True])
+@pytest.mark.parametrize("guarded", ["Safe partial", ""])
+async def test_incomplete_fallback_delivers_guarded_text(
+    tmp_path, monkeypatch, stop, guarded
+):
+    from lingcore.guardrails import NoopGuardrail
+    from lingcore.plugins.hooks import HookRunner
+
+    class Redactor(NoopGuardrail):
+        async def post_output(self, text):
+            assert text == "SECRET"
+            return guarded
+
+    class BrokenEditor(FakeSender):
+        async def edit_message(self, *args, **kwargs):
+            raise RuntimeError("delivery failed")
+
+    entered = asyncio.Event()
+
+    class SlowHooks(HookRunner):
+        async def turn_end(self, event):
+            entered.set()
+            await asyncio.Event().wait()
+
+    _, _, bridge = _setup(
+        tmp_path,
+        monkeypatch,
+        llm_factory=lambda _: FakeLLMClient(
+            [ScriptedTurn(text="SECRET", finish_reason="length")]
+        ),
+    )
+    sender = BrokenEditor()
+    runtime = await bridge.runtime_for(11, 11, sender)
+    runtime.agent.guardrail = Redactor()
+    if stop:
+        runtime.agent._hooks = SlowHooks([], runtime.agent.tool_ctx)
+    try:
+        await bridge.handle_message(
+            TelegramMessage(1, 11, 11, "private", text="go"), sender
+        )
+        if stop:
+            await asyncio.wait_for(entered.wait(), 2)
+            await bridge.handle_message(
+                TelegramMessage(2, 11, 11, "private", text="/stop"), sender
+            )
+        await _finish(bridge)
+        visible = "\n".join(sender.messages.values())
+        assert guarded in visible and "Model response incomplete" in visible
+        assert "SECRET" not in visible
+        saved = runtime.store.messages(runtime.agent.tool_ctx.session_id)[-1]
+        assert saved.content == guarded and saved.finish_reason == "length"
+    finally:
+        await bridge.shutdown()
+
+
+async def test_incomplete_stop_delivery_without_renderer(tmp_path, monkeypatch):
+    from lingcore.events import Error
+
+    _, _, bridge = _setup(tmp_path, monkeypatch)
+    sender = FakeSender()
+    runtime = await bridge.runtime_for(11, 11, sender)
+    try:
+        await bridge._deliver_cancelled_events(
+            runtime,
+            Error(
+                "Incomplete reply",
+                finish_reason="length",
+                partial_content="Saved partial",
+            ),
+            [],
+        )
+        assert any(
+            "Saved partial\n\n⚠️ Incomplete reply" == text
+            for text in sender.messages.values()
+        )
+    finally:
+        await bridge.shutdown()
+
+
 async def test_two_users_are_isolated_in_state_profile_and_attachments(
     tmp_path, monkeypatch
 ):

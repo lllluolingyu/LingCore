@@ -37,11 +37,48 @@ class LLMStreamError(LingCoreError):
     retry ever covers. ``retryable=False`` means retrying cannot help: the
     request itself is invalid, or opening the stream already exhausted the
     backend's own (header-aware) retry budget.
+
+    A provider-declared output/context limit also carries ``finish_reason``
+    and the number of dropped tool calls so the agent can preserve an
+    actionable incomplete-response diagnostic without retrying.
     """
 
-    def __init__(self, message: str, *, retryable: bool) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        finish_reason: str | None = None,
+        dropped_tool_calls: int = 0,
+    ) -> None:
         super().__init__(message)
         self.retryable = retryable
+        self.finish_reason = finish_reason
+        self.dropped_tool_calls = dropped_tool_calls
+
+
+INCOMPLETE_FINISH_REASONS = frozenset({"length", "model_context_window_exceeded"})
+
+
+def incomplete_response_message(
+    reason: str, *, detail: str | None = None, dropped_tool_calls: int = 0
+) -> str:
+    """One diagnostic for live replies and persisted incomplete responses."""
+    if reason == "model_context_window_exceeded":
+        message = (
+            "Model response incomplete: the context window was exhausted. "
+            "Shorten or compact the conversation before continuing."
+        )
+    else:
+        message = (
+            "Model response incomplete: the output token limit was reached. "
+            "Ask the model to continue, or increase the output token limit."
+        )
+    if detail:
+        message += f" Provider detail: {detail}."
+    if dropped_tool_calls:
+        message += f" {dropped_tool_calls} tool call(s) were not run."
+    return message
 
 
 class MaxIterationsError(LingCoreError):

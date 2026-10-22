@@ -57,7 +57,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, overload
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -107,6 +107,8 @@ _OPTIONS = frozenset(
         "offload_over_chars",
         "max_chars",
         "cdp_url",
+        "settle_quiet_ms",
+        "settle_timeout_ms",
     }
 )
 # Options that shape a browser LingCore launches; meaningless when attaching.
@@ -139,6 +141,20 @@ _RELAY_CHUNK = 64 * 1024
 # SOCKS5 reply codes (RFC 1928).
 _SOCKS_OK, _SOCKS_NOT_ALLOWED, _SOCKS_UNREACHABLE = 0, 2, 4
 _SOCKS_BAD_COMMAND, _SOCKS_BAD_ADDRESS = 7, 8
+_SETTLE_JS = """([quietMs, capMs]) => new Promise(resolve => {
+    let quiet;
+    const done = stable => {
+        observer.disconnect(); clearTimeout(quiet); clearTimeout(cap); resolve(stable);
+    };
+    const observer = new MutationObserver(() => {
+        clearTimeout(quiet); quiet = setTimeout(() => done(true), quietMs);
+    });
+    observer.observe(document, {
+        subtree: true, childList: true, attributes: true, characterData: true
+    });
+    quiet = setTimeout(() => done(true), quietMs);
+    const cap = setTimeout(() => done(false), capMs);
+})"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +167,8 @@ class BrowserOptions:
     offload_over_chars: int = 20_000
     max_chars: int = 40_000
     cdp_url: str | None = None
+    settle_quiet_ms: int = 500
+    settle_timeout_ms: int = 3_000
 
 
 class _Closable(Protocol):
@@ -235,6 +253,14 @@ def parse_browser_options(raw: object) -> BrowserOptions:
     if executable is not None and (not isinstance(executable, str) or not executable):
         raise ConfigError(f"{path}.executable_path must be a non-empty string")
     defaults = BrowserOptions()
+    quiet_ms = int_option(
+        raw, "settle_quiet_ms", 500, minimum=0, maximum=5_000, option_path=path
+    )
+    settle_ms = int_option(
+        raw, "settle_timeout_ms", 3_000, minimum=1, maximum=10_000, option_path=path
+    )
+    if quiet_ms > settle_ms:
+        raise ConfigError(f"{path}.settle_quiet_ms must be <= settle_timeout_ms")
     return BrowserOptions(
         headless=bool_option(raw, "headless", True, option_path=path),
         timeout_ms=int_option(
@@ -268,6 +294,8 @@ def parse_browser_options(raw: object) -> BrowserOptions:
             raw, "max_chars", defaults.max_chars, minimum=1_000, option_path=path
         ),
         cdp_url=cdp_url,
+        settle_quiet_ms=quiet_ms,
+        settle_timeout_ms=settle_ms,
     )
 
 
@@ -901,6 +929,7 @@ class BrowserSession:
         *,
         ref: str | None = None,
         depth: int | None = None,
+        page: Page | None = None,
     ) -> str:
         """The active page as a titled AI snapshot plus any pending notes.
 
@@ -908,7 +937,7 @@ class BrowserSession:
         that many levels; refs in a partial snapshot stay valid for actions.
         """
         playwright_error, _ = _playwright_errors()
-        page = await self.page()
+        page = page if page is not None else await self.page()
         target = page if ref is None else _locator(page, ref)
         kwargs: dict[str, Any] = {"mode": "ai"}
         if depth is not None:
@@ -922,7 +951,9 @@ class BrowserSession:
         if ref is not None:
             lines.append(f"(Only the subtree of {ref.strip().removeprefix('ref=')}.)")
         if len(self._pages) > 1:
-            lines.append(f"({len(self._pages)} tabs are open; the newest is active.)")
+            lines.append(
+                f"({len(self._pages)} tabs are open; this snapshot shows {page.url}.)"
+            )
         lines.extend((notes or []) + self.drain_notes())
         text = "\n".join(lines) + "\n\n" + snapshot
         return offload_text(
@@ -1021,14 +1052,87 @@ def _hooks(ctx: ToolContext) -> BrowserHooks:
     return hooks
 
 
+async def _settled_page(session: BrowserSession, page: Page) -> tuple[Page, list[str]]:
+    """Settle and select a page under one deadline, even across popup/navigation races."""
+    options = session.options
+    if options.settle_quiet_ms == 0:
+        return await session.page(), []
+    playwright_error, playwright_timeout = _playwright_errors()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + options.settle_timeout_ms / 1000
+    current = page
+    for attempt in range(3):
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        try:
+            async with asyncio.timeout(remaining):
+                await current.wait_for_load_state(
+                    "domcontentloaded", timeout=max(1, int(remaining * 1000))
+                )
+                cap_ms = max(1, int((deadline - loop.time()) * 1000))
+                stable = await current.evaluate(
+                    _SETTLE_JS, [options.settle_quiet_ms, cap_ms]
+                )
+            newest = await session.page()
+            if newest is current:
+                return current, [] if stable else [
+                    "DOM settling timed out; the page may still be changing."
+                ]
+            # If the budget is spent, render the page we actually observed,
+            # rather than silently switching to an unobserved popup.
+            if loop.time() >= deadline:
+                break
+            if attempt == 2:
+                return current, [
+                    "DOM settling stopped after repeated tab changes; "
+                    "showing the last observed page."
+                ]
+            current = newest
+        except (TimeoutError, playwright_timeout):
+            break
+        except playwright_error:
+            # Navigation can destroy evaluate's execution context. Retry the
+            # selected page under the original deadline; cancellation propagates.
+            current = await session.page()
+            if attempt == 2:
+                return current, [
+                    "DOM settling interrupted by repeated page/navigation errors; "
+                    "the current page may still be changing."
+                ]
+    return current, ["DOM settling timed out; the page may still be changing."]
+
+
+@overload
 async def _act(
     ctx: ToolContext,
     action: Any,
     *,
-    settle: bool = True,
     navigate_to: str | None = None,
     launched_only: str | None = None,
-) -> str:
+    screenshot: Literal[False] = False,
+) -> str: ...
+
+
+@overload
+async def _act(
+    ctx: ToolContext,
+    action: Any,
+    *,
+    navigate_to: str | None = None,
+    launched_only: str | None = None,
+    screenshot: Literal[True],
+) -> ToolOutput: ...
+
+
+async def _act(
+    ctx: ToolContext,
+    action: Any,
+    *,
+    navigate_to: str | None = None,
+    launched_only: str | None = None,
+    screenshot: bool = False,
+) -> str | ToolOutput:
     """Run ``action(page)`` holding the browser and return a fresh snapshot.
 
     ``navigate_to`` is authorized against the session the action will use,
@@ -1050,17 +1154,23 @@ async def _act(
         session._acting = True
         try:
             try:
-                await action(page)
-                if settle:
-                    # A click may start a navigation; wait briefly for it to land.
-                    await page.wait_for_load_state("domcontentloaded", timeout=5_000)
+                note = await action(page)
+                if note:
+                    notes.append(note)
             except playwright_timeout as exc:
                 notes.append(f"Timed out: {_error_text(exc)}")
             except playwright_error as exc:
                 raise ToolError(
                     " ".join([_error_text(exc), *session.drain_notes()])
                 ) from None
-            return await session.render(ctx, notes)
+            shown, settling_notes = await _settled_page(session, page)
+            text = await session.render(ctx, [*notes, *settling_notes], page=shown)
+            if screenshot:
+                view = await _screenshot(shown)
+                return ToolOutput(
+                    text=f"{text}\n\n{view.text}", attachments=view.attachments
+                )
+            return text
         finally:
             session._acting = False
             session._action_target = None
@@ -1068,6 +1178,13 @@ async def _act(
 
 class NavigateArgs(BaseModel):
     url: str = Field(description="The http(s) URL to open in the active tab.")
+
+
+class ScrollArgs(BaseModel):
+    direction: Literal["up", "down", "top", "bottom"] = Field(
+        default="down",
+        description="Scroll the page up/down one viewport, or jump to its top/bottom.",
+    )
 
 
 class RefArgs(BaseModel):
@@ -1151,19 +1268,23 @@ async def browser_navigate(args: NavigateArgs, ctx: ToolContext) -> str:
     async def go(page: Page) -> None:
         await page.goto(args.url, wait_until="domcontentloaded")
 
-    return await _act(ctx, go, settle=False, navigate_to=args.url)
+    return await _act(ctx, go, navigate_to=args.url)
 
 
 @tool(
     name="browser_snapshot",
     description=(
-        "Return the active page's current accessibility snapshot, optionally "
+        "Return the active page's settled accessibility snapshot, including "
+        "offscreen content, optionally "
         "only one element's subtree (ref) or only the top levels (depth)."
     ),
 )
 async def browser_snapshot(args: SnapshotArgs, ctx: ToolContext) -> str:
     async with _hooks(ctx).use(ctx) as session:
-        return await session.render(ctx, ref=args.ref, depth=args.depth)
+        page, notes = await _settled_page(session, await session.page())
+        return await session.render(
+            ctx, notes, ref=args.ref, depth=args.depth, page=page
+        )
 
 
 @tool(
@@ -1180,13 +1301,16 @@ async def browser_click(args: RefArgs, ctx: ToolContext) -> str:
 @tool(
     name="browser_type",
     description=(
-        "Replace the text of the input with the given ref, optionally pressing "
+        "Focus and fill the input or rich-text editor with the given ref, optionally pressing "
         "Enter, and return the new snapshot."
     ),
 )
 async def browser_type(args: TypeArgs, ctx: ToolContext) -> str:
     async def fill(page: Page) -> None:
         field = _locator(page, args.ref)
+        if await field.evaluate("el => ['IFRAME', 'FRAME'].includes(el.tagName)"):
+            field = field.content_frame.locator("body")
+        await field.focus()
         await field.fill(args.text)
         if args.submit:
             await field.press("Enter")
@@ -1217,6 +1341,39 @@ async def browser_press(args: PressArgs, ctx: ToolContext) -> str:
 
 
 @tool(
+    name="browser_scroll",
+    description=(
+        "Scroll the page up/down one viewport or to top/bottom, independent of "
+        "keyboard focus. Return the actual movement, a fresh snapshot and a "
+        "viewport screenshot. This scrolls the page, not an inner panel."
+    ),
+)
+async def browser_scroll(args: ScrollArgs, ctx: ToolContext) -> ToolOutput:
+    async def scroll(page: Page) -> str:
+        before, after, bottom = await page.evaluate(
+            """direction => {
+                const before = window.scrollY;
+                const end = Math.max(0, document.scrollingElement.scrollHeight - innerHeight);
+                const top = direction === 'top' ? 0 : direction === 'bottom' ? end
+                    : before + (direction === 'up' ? -1 : 1) * innerHeight;
+                window.scrollTo({top, behavior: 'instant'});
+                return [before, window.scrollY, end].map(Math.round);
+            }""",
+            args.direction,
+        )
+        if before != after:
+            return f"Scrolled {args.direction}: page offset {before} -> {after} px (bottom is {bottom})."
+        if bottom <= 0:
+            return (
+                "The page did not move: it does not scroll itself (an inner panel may)."
+            )
+        edge = "top" if args.direction in {"up", "top"} else "bottom"
+        return f"The page did not move: it is already at the {edge}, or page scrolling is blocked."
+
+    return await _act(ctx, scroll, screenshot=True)
+
+
+@tool(
     name="browser_back",
     description="Go back one page in the active tab's history.",
 )
@@ -1224,37 +1381,43 @@ async def browser_back(args: NoArgs, ctx: ToolContext) -> str:
     async def back(page: Page) -> None:
         await page.go_back(wait_until="domcontentloaded")
 
-    return await _act(ctx, back, settle=False)
+    return await _act(ctx, back)
 
 
 @tool(
     name="browser_screenshot",
     description=(
         "Attach a PNG screenshot of the active page so the model can see its "
-        "layout. Use the snapshot for text and refs."
+        "layout. Viewport only unless full_page is true: missing content may be "
+        "offscreen. Use the snapshot for text and refs."
     ),
 )
 async def browser_screenshot(args: ScreenshotArgs, ctx: ToolContext) -> ToolOutput:
-    playwright_error, _ = _playwright_errors()
     async with _hooks(ctx).use(ctx) as session:
-        page = await session.page()
-        try:
-            data = await page.screenshot(type="png", full_page=args.full_page)
-            media_type, name = "image/png", "screenshot.png"
-            if len(data) > IMAGE_MAX_BYTES:
-                data = await page.screenshot(
-                    type="jpeg", quality=70, full_page=args.full_page
-                )
-                media_type, name = "image/jpeg", "screenshot.jpg"
-        except playwright_error as exc:
-            raise ToolError(f"screenshot failed: {_error_text(exc)}") from None
-        attachment = attachment_from_bytes(
-            data, name=name, media_type=media_type, kind="image"
-        )
+        page, notes = await _settled_page(session, await session.page())
+        result = await _screenshot(page, full_page=args.full_page)
         return ToolOutput(
-            text=f"attached a screenshot of {page.url} ({len(data)} bytes)",
-            attachments=[attachment],
+            text="\n".join([*notes, result.text]), attachments=result.attachments
         )
+
+
+async def _screenshot(page: Page, *, full_page: bool = False) -> ToolOutput:
+    playwright_error, _ = _playwright_errors()
+    try:
+        data = await page.screenshot(type="png", full_page=full_page)
+        media_type, name = "image/png", "screenshot.png"
+        if len(data) > IMAGE_MAX_BYTES:
+            data = await page.screenshot(type="jpeg", quality=70, full_page=full_page)
+            media_type, name = "image/jpeg", "screenshot.jpg"
+    except playwright_error as exc:
+        raise ToolError(f"screenshot failed: {_error_text(exc)}") from None
+    attachment = attachment_from_bytes(
+        data, name=name, media_type=media_type, kind="image"
+    )
+    return ToolOutput(
+        text=f"attached a screenshot of {page.url} ({len(data)} bytes)",
+        attachments=[attachment],
+    )
 
 
 @tool(
@@ -1271,7 +1434,7 @@ async def browser_resize(args: ResizeArgs, ctx: ToolContext) -> str:
     async def resize(page: Page) -> None:
         await page.set_viewport_size({"width": args.width, "height": args.height})
 
-    snapshot = await _act(ctx, resize, settle=False, launched_only="browser_resize")
+    snapshot = await _act(ctx, resize, launched_only="browser_resize")
     return f"Viewport is now {args.width}x{args.height}.\n{snapshot}"
 
 

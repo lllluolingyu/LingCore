@@ -297,6 +297,45 @@ def test_cli_resume_labels_compaction_summary_as_derived_state():
     assert "you › earlier facts" not in out
 
 
+@pytest.mark.parametrize(
+    "detail", [None, "Thinking exhausted max_tokens; reduce the thinking budget."]
+)
+def test_cli_resume_marks_incomplete_replies(detail):
+    from datetime import datetime, timezone
+
+    from rich.console import Console
+
+    from lingcore.message import Message
+    from lingcore.sessions import SessionMeta
+
+    cli = CLIFrontend(agent_name="t")
+    cli.console = Console(record=True, width=240)
+    now = datetime.now(timezone.utc)
+    meta = SessionMeta(id="abcd1234", title="t", created_at=now, updated_at=now)
+    cli.show_resume(
+        meta,
+        [Message.assistant("partial", finish_reason="length", finish_detail=detail)],
+    )
+    output = cli.console.export_text()
+    assert "partial" in output
+    assert (detail or "Model response incomplete") in output
+
+
+@pytest.mark.parametrize("guarded", ["Safe partial", ""])
+def test_cli_incomplete_error_replaces_uncommitted_raw_text(guarded):
+    from rich.console import Console
+
+    cli = CLIFrontend(agent_name="t")
+    cli.console = Console(record=True, width=240)
+    cli.render(TextDelta("SECRET"))
+    cli.render(
+        Error("Incomplete reply", finish_reason="length", partial_content=guarded)
+    )
+    output = cli.console.export_text()
+    assert "SECRET" not in output
+    assert guarded in output and "Incomplete reply" in output
+
+
 async def test_cli_confirm_deny(monkeypatch):
     cli = CLIFrontend()
     cli.console.quiet = True

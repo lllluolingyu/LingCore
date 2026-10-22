@@ -21,7 +21,12 @@ from contextlib import AbstractContextManager, aclosing, nullcontext
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from lingcore.composer import ComposeContext, PromptComposer, StaticComposer
-from lingcore.errors import LLMStreamError
+from lingcore.errors import (
+    INCOMPLETE_FINISH_REASONS,
+    LLMStreamError,
+    ToolError,
+    incomplete_response_message,
+)
 from lingcore.events import (
     AgentEvent,
     Error,
@@ -1108,6 +1113,9 @@ class Agent:
                 content_parts: list[str] = []
                 reasoning_parts: list[str] = []
                 tool_calls: list[ToolCall] = []
+                finish_reason: str | None = None
+                finish_detail: str | None = None
+                dropped_tool_calls = 0
                 anthropic_content: list[dict[str, Any]] | None = None
                 try:
                     async for chunk in self.llm.stream(messages, tools=schemas):
@@ -1118,12 +1126,22 @@ class Agent:
                             yield TextDelta(chunk.text_delta)
                         if chunk.tool_calls:
                             tool_calls = chunk.tool_calls
+                        if chunk.finish_reason:
+                            finish_reason = chunk.finish_reason
                         if (
                             snapshot := getattr(chunk, "anthropic_content", None)
                         ) is not None:
                             anthropic_content = snapshot
                     break
                 except LLMStreamError as e:
+                    if e.finish_reason in INCOMPLETE_FINISH_REASONS:
+                        # The provider hit a limit, rather than losing the
+                        # connection. Preserve partial text and end explicitly;
+                        # retrying the same request/budget cannot fix this.
+                        finish_reason = e.finish_reason
+                        finish_detail = str(e)
+                        dropped_tool_calls = e.dropped_tool_calls
+                        break
                     attempt += 1
                     if not e.retryable or attempt > self.stream_retries:
                         spent = (
@@ -1171,13 +1189,46 @@ class Agent:
                     yield Error(message)
                     return
 
+            incomplete = finish_reason in INCOMPLETE_FINISH_REASONS
+            content = "".join(content_parts)
+            if incomplete:
+                assert finish_reason is not None
+                # Guard and persist the authoritative partial reply before the
+                # terminal outcome commits, including the Stop/hook path.
+                content = await self.guardrail.post_output(content)
+                finish_detail = incomplete_response_message(
+                    finish_reason,
+                    detail=finish_detail,
+                    dropped_tool_calls=max(dropped_tool_calls, len(tool_calls)),
+                )
             assistant = Message.assistant(
-                content="".join(content_parts),
-                tool_calls=tool_calls,
+                content=content,
+                # No call in a cut-off batch may execute, even one whose JSON
+                # happened to finish before the rest of the response was lost.
+                tool_calls=[] if incomplete else tool_calls,
                 reasoning_content="".join(reasoning_parts) or None,
-                anthropic_content=anthropic_content,
+                anthropic_content=None if incomplete else anthropic_content,
+                finish_reason=finish_reason,
+                finish_detail=finish_detail,
             )
             self.memory.add(assistant)
+
+            if incomplete:
+                assert finish_detail is not None
+                message = finish_detail
+                terminal = Error(
+                    message, finish_reason=finish_reason, partial_content=content
+                )
+                await self._turn_end(
+                    TurnEndEvent("", error=message, turn_index=self._turn_index),
+                    lease,
+                    terminal,
+                )
+                for notice in self._hooks.drain_notices():
+                    yield notice
+                self._clear_turn_state(lease)
+                yield terminal
+                return
 
             if not assistant.tool_calls:
                 final = await self.guardrail.post_output(assistant.content)
@@ -1360,10 +1411,13 @@ class Agent:
             # hook: plugins cannot make an invalid or forbidden call reachable.
             try:
                 tool = self._resolve_tool(call.name, authorized=authorized)
+                if call.invalid_arguments is not None:
+                    raise ToolError(
+                        "not run: tool arguments must be a complete JSON object; "
+                        "submit the call again with valid arguments"
+                    )
                 args = tool.validate_args(call.arguments)
             except Exception as e:
-                from lingcore.errors import ToolError
-
                 msg = str(e) if isinstance(e, ToolError) else f"internal error: {e!r}"
                 return ToolResult(
                     call_id=call.id, name=call.name, content=f"ERROR: {msg}", ok=False
@@ -1393,8 +1447,6 @@ class Agent:
                         call_id=call.id, name=call.name, content=out, ok=True
                     )
             except Exception as e:
-                from lingcore.errors import ToolError
-
                 msg = str(e) if isinstance(e, ToolError) else f"internal error: {e!r}"
                 result = ToolResult(
                     call_id=call.id, name=call.name, content=f"ERROR: {msg}", ok=False

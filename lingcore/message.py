@@ -120,6 +120,9 @@ class ToolCall(BaseModel):
     id: str
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+    # Invalid JSON must never become an executable call with default arguments.
+    # Keep a marker (including an empty string), but omit it from provider wire data.
+    invalid_arguments: str | None = Field(default=None, repr=False)
 
     def to_openai(self) -> dict[str, Any]:
         return {
@@ -181,6 +184,10 @@ class Message(BaseModel):
     # content beside the SDK-independent text/tool projections. Other backends
     # ignore this state; legacy messages have no snapshot.
     anthropic_content: list[dict[str, Any]] | None = None
+    # Provider completion metadata, persisted but never sent as a request field.
+    finish_reason: str | None = None
+    # Complete incomplete-response diagnostic, including provider hints/counts.
+    finish_detail: str | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
     tool_call_id: str | None = None
     name: str | None = None
@@ -219,6 +226,8 @@ class Message(BaseModel):
         *,
         reasoning_content: str | None = None,
         anthropic_content: list[dict[str, Any]] | None = None,
+        finish_reason: str | None = None,
+        finish_detail: str | None = None,
     ) -> Message:
         return cls(
             role="assistant",
@@ -226,6 +235,8 @@ class Message(BaseModel):
             tool_calls=tool_calls or [],
             reasoning_content=reasoning_content,
             anthropic_content=anthropic_content,
+            finish_reason=finish_reason,
+            finish_detail=finish_detail,
         )
 
     @classmethod

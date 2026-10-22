@@ -29,7 +29,7 @@ from typing import Any
 
 from anthropic import AsyncAnthropic, Timeout
 
-from lingcore.errors import LLMStreamError
+from lingcore.errors import INCOMPLETE_FINISH_REASONS, LLMStreamError
 from lingcore.llm import LLMChunk, _close_quietly, _describe, _ToolCallAccumulator
 from lingcore.message import NATIVE_MODALITIES, Message
 from lingcore.usage import UsageSink
@@ -336,12 +336,16 @@ class AnthropicLLMClient:
                     "thinking exhausted max_tokens before completing a response; "
                     "increase sampling.max_tokens or reduce the thinking budget",
                     retryable=False,
+                    finish_reason=finish_reason,
+                    dropped_tool_calls=len(accumulators),
                 )
             if finish_reason == "model_context_window_exceeded":
                 raise LLMStreamError(
                     "thinking exhausted the context window; shorten or compact "
                     "the conversation before retrying",
                     retryable=False,
+                    finish_reason=finish_reason,
+                    dropped_tool_calls=len(accumulators),
                 )
         if incomplete_thinking:
             raise LLMStreamError(
@@ -349,10 +353,7 @@ class AnthropicLLMClient:
                 retryable=True,
             )
 
-        if accumulators and finish_reason in {
-            "length",
-            "model_context_window_exceeded",
-        }:
+        if accumulators and finish_reason in INCOMPLETE_FINISH_REASONS:
             # A limit can cut off tool JSON even after content_block_stop.
             # Reject the whole batch before malformed arguments become {},
             # which could execute tools with unintended defaults. Retrying
@@ -363,7 +364,10 @@ class AnthropicLLMClient:
                 else "the context window was exhausted; shorten or compact the conversation"
             )
             raise LLMStreamError(
-                f"tool call response was truncated: {hint}", retryable=False
+                f"tool call response was truncated: {hint}",
+                retryable=False,
+                finish_reason=finish_reason,
+                dropped_tool_calls=len(accumulators),
             )
 
         tool_calls = []
