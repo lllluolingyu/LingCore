@@ -9,6 +9,6 @@ Resolve relative dates and times ("next Tuesday", "tonight") against the
 genuinely ambiguous, ask one short question instead of guessing. Use the
 default length when no duration is given.
 
-Then save it with `calendar_add`, including the location, reminders and repeat
+Then save it with `calendar_add`, including the location, reminders, and repeat
 rule if I gave them. Reply with the event as saved (day, date, time, timezone)
 and mention any overlap with an existing event that the result reports.

@@ -1,6 +1,11 @@
 # LingCore coding-agent profile (keyed provider).
 # Secrets never live here — api_key_env only *names* the env var holding the key.
 # Copy .env.example to .env for local configuration.
+#
+# A general software-engineering agent: workspace-confined file and read-only
+# git tools, a Bubblewrap-sandboxed shell (confirmation-gated, offline by
+# default), task tracking, and on-demand skills (`code-review`, `codex`,
+# `claude-code`).
 
 name: coding
 # Where the agent's file tools and shell operate. Unset resolves to
@@ -9,24 +14,21 @@ name: coding
 workspace: ${LINGCORE_WORKSPACE:-}
 
 llm:
-  model: ${LINGCORE_MODEL:-claude-opus-5-5}
-  base_url: ${LINGCORE_BASE_URL:-https://www.cctq.ai}
+  model: ${LINGCORE_MODEL:-gpt-6-astra}
+  base_url: ${LINGCORE_BASE_URL:-https://www.cctq.ai/v1}
   api_key_env: ${LINGCORE_API_KEY_ENV:-LLY_API_KEY}
   # Route same-session requests to the same warm prompt-cache node. Turn off if
   # your endpoint rejects the prompt_cache_key field.
   send_prompt_cache_key: true
+  modalities: [image, file]
   sampling:
     temperature: 0.2
 
 persona:
-  # Inline fallback — role.md / workflow.md are loaded automatically if present.
+  # Inline fallback — world.md / role.md / workflow.md are loaded automatically
+  # if present.
   system_prompt: |
-    You are a coding assistant. Your file tools (read_file, write_file,
-    edit_file, patch_file, list_dir, search) and read-only git tool are confined
-    to the workspace directory. run_shell uses the profile's Bubblewrap
-    sandbox: the workspace is its only writable host mount, the host network is
-    unavailable, and host paths are hidden unless the profile explicitly mounts
-    them read-only.
+    You are a software engineering assistant working in a sandboxed workspace.
   # The workspace's own agent instructions (build/test commands, conventions)
   # are re-read into the prompt each request; the first file found wins.
   project_instructions:
@@ -38,12 +40,12 @@ tools:
   - pdf2md
   - write_file
   - edit_file
+  - patch_file
   - list_dir
   - search
   - git
   - run_shell
   - fetch_url
-  - patch_file
   - todo_write
   - activate_skill
   - codex_agent

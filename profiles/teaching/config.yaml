@@ -1,7 +1,6 @@
 # LingCore teaching-assistant profile (keyed provider).
 # Secrets never live here — api_key_env / token_env only *name* env vars.
-# Copy this profile's .env.example to its gitignored .env for local values, or
-# export them before launch. The Canvas skill also carries a generic template.
+# Copy .env.example to .env for local configuration.
 #
 # A study companion built around Canvas LMS: it surfaces courses, due dates, and
 # announcements, syncs course files into the workspace, and reads those materials
@@ -14,15 +13,19 @@ name: teaching
 workspace: ${LINGCORE_WORKSPACE:-}
 
 llm:
-  model: ${LINGCORE_MODEL:-claude-opus-4-8}
-  base_url: ${LINGCORE_BASE_URL:-https://luolingyu.com/v1}
+  model: ${LINGCORE_MODEL:-claude-opus-5-5}
+  base_url: ${LINGCORE_BASE_URL:-https://www.cctq.ai}
   api_key_env: ${LINGCORE_API_KEY_ENV:-LLY_API_KEY}
+  # Route same-session requests to the same warm prompt-cache node. Turn off if
+  # your endpoint rejects the prompt_cache_key field.
+  send_prompt_cache_key: true
+  modalities: [image, file]
   sampling:
     temperature: 0.4
 
 persona:
-  # Inline fallback — world.md / role.md / workflow.md load automatically, and
-  # the canvas skill (declared below) appends its guidance as a prompt layer.
+  # Inline fallback — world.md / role.md / workflow.md are loaded automatically
+  # if present, and the canvas skill (declared below) appends its guidance.
   system_prompt: |
     You are a helpful teaching assistant.
 
@@ -56,13 +59,26 @@ tool_options:
       - ".pptx"
       - ".ppt"
       - ".docx"
+  read_file:
+    # Read large files in slices; the model can page with offset/limit.
+    max_lines: 2000
+    max_line_chars: 2000
+  list_dir:
+    max_entries: 200
 
 memory:
-  max_messages: 60
-  max_tokens: 16000
+  # Keep synced course readings and worked problems across a study session.
+  max_messages: 200
+  max_tokens: 64000
+  evict_to_ratio: 0.5
+  compaction:
+    enabled: true
+    compact_at_ratio: 0.85
+    keep_recent_ratio: 0.35
+    max_summary_chars: 8000
 
 loop:
-  max_iters: 20
+  max_iters: 40
   parallel_tools: true
 
 guardrail:
