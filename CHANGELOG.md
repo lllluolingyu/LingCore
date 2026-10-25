@@ -5,6 +5,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-26
+
 ### Fixed
 
 - Malformed or non-object tool arguments are rejected before hooks or execution,
@@ -29,6 +31,12 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ### Added
 
+- `process_monitor` runs bounded command watches and queues output as background
+  input, waking the Agent between turns without another user message. Monitor
+  input remains distinct from human messages in stored history and summaries.
+- Interactive CLI monitor wakeups preserve the current input draft and cursor.
+  Stop pauses automatic wakeups until the next user message; watches close with
+  the Agent and retain the profile's sandbox and approval rules.
 - `browser_scroll` scrolls the page independently of editor focus and returns
   actual movement, a fresh snapshot, and a viewport screenshot. The frontend
   profile enables it.
@@ -519,7 +527,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 - Initial tagged preview of the config-driven async agent runtime.
 
-[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/lllluolingyu/LingCore/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/lllluolingyu/LingCore/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/lllluolingyu/LingCore/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/lllluolingyu/LingCore/compare/v0.4.0...v0.4.1
