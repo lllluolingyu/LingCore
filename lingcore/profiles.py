@@ -11,10 +11,28 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from lingcore.errors import ConfigError
+from lingcore.paths import confined_directory
 
 _REPO_PROFILE_ROOT = Path(__file__).resolve().parents[1] / "profiles"
 _PACKAGED_TEMPLATE_ROOT = Path(__file__).resolve().parent / "profile_templates"
 _PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def initialize_state_directory(path: Path) -> Path:
+    """Create empty private state without copying source memories or sessions."""
+    absolute = path.expanduser().absolute()
+    package = Path(__file__).resolve().parent
+    if absolute.resolve().is_relative_to(package):
+        raise ConfigError("state directory is inside the installed package")
+    with confined_directory(
+        Path(absolute.anchor),
+        absolute.relative_to(absolute.anchor),
+        create=True,
+        permissions=0o700,
+    ):
+        pass
+    return absolute.resolve()
+
 
 # Keep this manifest explicit: profile workspaces, sessions, memories, secrets,
 # and other ignored local artifacts must never leak into a wheel template.

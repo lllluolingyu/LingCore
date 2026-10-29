@@ -416,6 +416,7 @@ class AnthropicLLMClient:
                 "output_tokens",
                 "cache_read_input_tokens",
                 "cache_creation_input_tokens",
+                "cache_creation",
                 "output_tokens_details",
             )
             if (value := getattr(usage, name, None)) is not None

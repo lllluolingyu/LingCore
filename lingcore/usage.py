@@ -21,11 +21,39 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, TypeGuard
+from typing import Any, Literal, TypeGuard
 
 UsageSink = Callable[["TokenUsage"], None]
+request_usage_observer: ContextVar[UsageSink | None] = ContextVar(
+    "request_usage_observer", default=None
+)
+billing_observer: ContextVar[Callable[[dict[str, int], bool], None] | None] = (
+    ContextVar("billing_observer", default=None)
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RequestUsage:
+    request_id: str
+    purpose: str
+    model: str
+    availability: Literal["reported", "missing", "partial"]
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cache_creation_5m_tokens: int | None = None
+    cache_creation_1h_tokens: int | None = None
+
+
+def _billing(values: dict[str, int], complete: bool) -> None:
+    observer = billing_observer.get()
+    if observer is not None:
+        observer(values, complete)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +98,11 @@ def usage_from_openai(model: str, usage: Any) -> TokenUsage | None:
     reasoning = _field(_field(usage, "completion_tokens_details"), "reasoning_tokens")
     input_tokens = _count(_field(usage, "prompt_tokens"))
     output_tokens = _count(_field(usage, "completion_tokens"))
+    _billing(
+        {},
+        _field(usage, "prompt_tokens") is not None
+        and _field(usage, "completion_tokens") is not None,
+    )
     return TokenUsage(
         model=model,
         input_tokens=input_tokens,
@@ -92,6 +125,19 @@ def usage_from_anthropic(model: str, usage: Any) -> TokenUsage | None:
     created = _count(_field(usage, "cache_creation_input_tokens"))
     output_tokens = _count(_field(usage, "output_tokens"))
     thinking = _field(_field(usage, "output_tokens_details"), "thinking_tokens")
+    categories = {"cache_creation_input_tokens": created}
+    creation = _field(usage, "cache_creation")
+    for source, target in (
+        ("ephemeral_5m_input_tokens", "cache_creation_5m_tokens"),
+        ("ephemeral_1h_input_tokens", "cache_creation_1h_tokens"),
+    ):
+        if _field(creation, source) is not None:
+            categories[target] = _count(_field(creation, source))
+    _billing(
+        categories,
+        _field(usage, "input_tokens") is not None
+        and _field(usage, "output_tokens") is not None,
+    )
     return TokenUsage(
         model=model,
         input_tokens=uncached + cached + created,
@@ -113,6 +159,9 @@ class UsageMeter:
         self._tally: list[TokenUsage] | None = None
 
     def record(self, usage: TokenUsage) -> None:
+        observer = request_usage_observer.get()
+        if observer is not None:
+            observer(usage)
         self._pending.append(usage)
         if self._tally is not None:
             self._tally.append(usage)

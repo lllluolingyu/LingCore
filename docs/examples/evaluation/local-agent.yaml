@@ -1,0 +1,23 @@
+# Current AgentProfile shape. The native runner supplies fresh state.
+name: native-file-evaluation
+llm:
+  backend: openai
+  model: ${LINGCORE_MODEL}
+  base_url: ${LINGCORE_BASE_URL}
+  api_key_env: LINGCORE_API_KEY
+  modalities: []
+  max_retries: 0
+  stream_retries: 0
+persona:
+  system_prompt: |
+    Complete the requested file task in the workspace using the available
+    tools. Verify the saved contents before reporting completion.
+  project_instructions: []
+tools: [read_file, write_file, list_dir]
+plugins: []
+skills: []
+loop:
+  max_iters: 8
+  parallel_tools: false
+sessions:
+  enabled: false

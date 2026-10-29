@@ -19,6 +19,7 @@ from typing import Any, AsyncIterator
 from lingcore.errors import LLMStreamError
 from lingcore.llm import LLMChunk
 from lingcore.message import Message, ToolCall
+from lingcore.usage import TokenUsage, UsageSink
 
 
 @dataclass
@@ -29,6 +30,7 @@ class ScriptedTurn:
     tool_calls: list[ToolCall] | None = None
     finish_reason: str = "stop"
     reasoning: str = ""
+    usage: TokenUsage | None = None
 
 
 @dataclass
@@ -51,6 +53,7 @@ class FakeLLMClient:
         self._turns = list(turns)
         self.calls: list[list[Message]] = []  # records messages seen each turn
         self.tool_schemas: list[list[dict[str, Any]] | None] = []  # tools per turn
+        self.usage_sink: UsageSink | None = None
 
     async def stream(
         self, messages: list[Message], tools: list[dict[str, Any]] | None = None
@@ -71,6 +74,8 @@ class FakeLLMClient:
         if isinstance(turn, StreamFailure):
             raise LLMStreamError(turn.reason, retryable=turn.retryable)
         yield LLMChunk(tool_calls=turn.tool_calls, finish_reason=turn.finish_reason)
+        if turn.usage is not None and self.usage_sink is not None:
+            self.usage_sink(turn.usage)
 
 
 def _chunk_text(text: str, size: int = 4) -> list[str]:

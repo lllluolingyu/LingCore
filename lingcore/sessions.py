@@ -1591,7 +1591,9 @@ def attach_session(
     return SessionMemory(inner, store, sid), sid, turn_index
 
 
-def open_store(profile: "AgentProfile") -> tuple[SessionStore | None, str | None]:
+def open_store(
+    profile: "AgentProfile", *, state_dir: Path | None = None
+) -> tuple[SessionStore | None, str | None]:
     """Open the profile's session store, applying the path policy.
 
     Returns ``(store, notice)``: a usable store with no notice, or ``None``
@@ -1614,13 +1616,16 @@ def open_store(profile: "AgentProfile") -> tuple[SessionStore | None, str | None
             )
         db_path = raw.resolve()
     else:
-        source_dir = getattr(profile, "_source_dir", None)
+        source_dir = state_dir or getattr(profile, "_source_dir", None)
         if source_dir is None:
             return None, "session persistence disabled: profile has no source directory"
         resolved = (source_dir / raw).resolve()
         if not resolved.is_relative_to(source_dir.resolve()):
             raise ConfigError(f"sessions.path escapes profile directory: {cfg.path}")
         db_path = resolved
+
+    if state_dir is not None and not db_path.is_relative_to(state_dir.resolve()):
+        raise ConfigError("sessions.path escapes the explicit state directory")
 
     # Both relative and absolute paths resolve before this shared package
     # guard, so allow_absolute_path can never create a sessions.db inside

@@ -34,6 +34,7 @@ from lingcore.message import Attachment
 
 if TYPE_CHECKING:
     from lingcore.plugins import PluginHooks
+    from lingcore.tracing import TraceRecorder
 
 
 @runtime_checkable
@@ -41,6 +42,13 @@ class ConfirmFn(Protocol):
     """A frontend-supplied callback gating risky actions (e.g. run_shell)."""
 
     def __call__(self, prompt: str, /) -> Awaitable[bool]: ...
+
+
+class EnvironmentBinding(Protocol):
+    """Identity of a trial-scoped environment supplied by a tool binding."""
+
+    @property
+    def binding_id(self) -> str: ...
 
 
 @dataclass(slots=True)
@@ -59,6 +67,8 @@ class ToolContext:
     session_id: str | None = None
     plugins: Mapping[str, PluginHooks] = field(default_factory=dict, repr=False)
     background: BackgroundInbox = field(default_factory=BackgroundInbox, repr=False)
+    recorder: TraceRecorder | None = field(default=None, repr=False)
+    environment_binding: EnvironmentBinding | None = field(default=None, repr=False)
 
     def getenv(self, name: str, default: str | None = None) -> str | None:
         """Resolve this profile's ``.env``, then the process environment.
@@ -94,6 +104,7 @@ class Tool:
     # this so skill activation asks for confirmation before granting it, without
     # the core permission model having to know the tool's name.
     high_risk: bool = False
+    workspace_path_args: tuple[str, ...] = ()
 
     def json_schema(self) -> dict[str, Any]:
         """Render to an OpenAI ``function`` tool spec."""
@@ -163,6 +174,7 @@ def tool(
     registry: ToolRegistry | None = None,
     *,
     high_risk: bool = False,
+    workspace_path_args: tuple[str, ...] = (),
 ) -> Callable[[ToolFn], Tool]:
     """Decorator: register an async function as a Tool.
 
@@ -197,6 +209,7 @@ def tool(
             args_model=args_model,
             fn=fn,
             high_risk=high_risk,
+            workspace_path_args=workspace_path_args,
         )
         (registry if registry is not None else REGISTRY).register(built)
         return built

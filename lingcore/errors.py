@@ -17,6 +17,19 @@ class ConfigError(LingCoreError):
     """A profile/framework config is invalid or references a missing secret."""
 
 
+class BudgetExceeded(BaseException):
+    """Terminal admission signal, deliberately outside recoverable tool errors.
+
+    Tools, memory fallbacks and model-error containment catch Exception. An
+    exhausted execution must cross those boundaries without becoming model input.
+    Agent.run handles this signal and preserves the frontend Error contract.
+    """
+
+    def __init__(self, limit: str) -> None:
+        super().__init__(f"execution stopped: {limit}")
+        self.limit = limit
+
+
 class ToolError(LingCoreError):
     """An expected, in-domain tool failure.
 

@@ -19,11 +19,13 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import AbstractContextManager, aclosing, nullcontext
 from typing import TYPE_CHECKING, Any, Literal, Protocol
+from uuid import uuid4
 
 from lingcore.background import BackgroundInbox, BackgroundInput
 from lingcore.composer import ComposeContext, PromptComposer, StaticComposer
 from lingcore.errors import (
     INCOMPLETE_FINISH_REASONS,
+    BudgetExceeded,
     LLMStreamError,
     ToolError,
     incomplete_response_message,
@@ -43,6 +45,7 @@ from lingcore.events import (
     TurnStatsReported,
     UsageReported,
 )
+from lingcore.execution import ExecutionBudget, ExecutionOutcome
 from lingcore.guardrails import Guardrail, NoopGuardrail, build_guardrail
 from lingcore.ingest import ingest_attachments
 from lingcore.llm import LLMChunk
@@ -63,6 +66,11 @@ from lingcore.plugins.commands import CommandCatalog
 from lingcore.plugins.hooks import HookRunner, TurnRolledBackEvent
 from lingcore.todos import TodoItem, TodoState
 from lingcore.tools import Tool, ToolContext, ToolOutput, ToolRegistry
+from lingcore.tracing import NoopRecorder, SpanScope, TraceRecorder
+from lingcore.tracing.content import CommittedContentBuffer
+from lingcore.tracing.context import bind, current_span, new_context
+from lingcore.tracing.models import TraceLink
+from lingcore.tracing.requests import InstrumentedClient, RequestLedger, closing_stream
 from lingcore.usage import TurnClock, TurnStats, UsageMeter
 
 if TYPE_CHECKING:
@@ -146,6 +154,9 @@ class Agent:
         todo_state: TodoState | None = None,
         hooks: HookRunner | None = None,
         commands: CommandCatalog | None = None,
+        recorder: TraceRecorder | None = None,
+        execution_budget: ExecutionBudget | None = None,
+        request_ledger: RequestLedger | None = None,
     ) -> None:
         # v0.1 accepted a static prompt as the fourth positional argument or
         # as ``system_prompt=``. Keep both forms while routing new code through
@@ -158,7 +169,25 @@ class Agent:
             composer = StaticComposer(composer)
         if composer is None:
             raise TypeError("Agent requires a composer or system_prompt")
-        self.llm = llm
+        self.recorder = recorder if recorder is not None else NoopRecorder()
+        self.execution_budget = execution_budget
+        self.execution_outcome: ExecutionOutcome | None = None
+        self.request_ledger = request_ledger or (
+            llm.ledger if isinstance(llm, InstrumentedClient) else RequestLedger()
+        )
+        self.llm: _LLMLike = (
+            llm
+            if isinstance(llm, InstrumentedClient)
+            or (not self.recorder.enabled and execution_budget is None)
+            else InstrumentedClient(
+                llm,
+                self.recorder,
+                self.request_ledger,
+                model=getattr(llm, "model", "unknown"),
+                provider="injected",
+                budget=execution_budget,
+            )
+        )
         self.tools = tools
         # Tools active without any skill. None ⇒ all of the ceiling (today's
         # default). A narrower set gates the rest behind skill activation; the
@@ -169,6 +198,21 @@ class Agent:
             else frozenset(tools.names())
         )
         self.tool_ctx = tool_ctx
+        self.tool_ctx.recorder = self.recorder
+        if tool_ctx.confirm is not None:
+            original_confirm = tool_ctx.confirm
+
+            async def traced_confirm(prompt: str) -> bool:
+                with self.recorder.span(
+                    "approval.wait", attributes={"policy": "frontend"}
+                ) as approval:
+                    allowed = await original_confirm(prompt)
+                    approval.attributes["decision"] = "allow" if allowed else "deny"
+                    if not allowed:
+                        approval.close("denied")
+                    return allowed
+
+            tool_ctx.confirm = traced_confirm
         self._hooks = hooks or HookRunner([], tool_ctx)
         self.commands = commands if commands is not None else CommandCatalog()
         self._closed = False
@@ -191,6 +235,7 @@ class Agent:
         # into ``agent.usage_meter`` itself.
         self.usage_meter = usage_meter or UsageMeter()
         self._session_store = session_store
+        self._owned_session_store: SessionStore | None = None
         if session_store is not None and (
             session_id is None or not hasattr(self.memory, "last_sequence")
         ):
@@ -233,6 +278,14 @@ class Agent:
         self._turn_stats_lease: object | None = None
         self._turn_stats_committed = False  # the user message reached memory
         self._turn_stats_seq: int | None = None  # ... and this durable row
+        self._turn_trace: SpanScope | None = None
+        self._trace_status: Literal[
+            "ok", "error", "cancelled", "denied", "incomplete", "budget_exceeded"
+        ] = "error"
+        self._turn_captures = CommittedContentBuffer(
+            self.recorder.artifact_max_bytes, self.recorder.secrets
+        )
+        self._turn_iterations = 0
 
     # ------------------------------------------------------------------
     # Convenience accessor kept for tests that still read .system_prompt
@@ -282,6 +335,10 @@ class Agent:
         tool_options: "dict | None" = None,
         session_store: "SessionStore | None" = None,
         session_id: str | None = None,
+        recorder: TraceRecorder | None = None,
+        state_dir: "Path | None" = None,
+        tool_registry: ToolRegistry | None = None,
+        execution_budget: ExecutionBudget | None = None,
     ) -> "Agent":
         """Assemble a runnable Agent from a validated profile.
 
@@ -324,6 +381,18 @@ class Agent:
             return LLMClient(**kwargs)
 
         client = llm if llm is not None else make_client(profile.llm)
+        if (
+            llm is not None
+            and hasattr(llm, "usage_sink")
+            and getattr(llm, "usage_sink") is None
+        ):
+            setattr(llm, "usage_sink", usage_meter.record)
+        if (
+            vision_llm is not None
+            and hasattr(vision_llm, "usage_sink")
+            and getattr(vision_llm, "usage_sink") is None
+        ):
+            setattr(vision_llm, "usage_sink", usage_meter.record)
 
         # --- Modality fallbacks (only when the model lacks a native kind) ----
         media_adapter: "MediaAdapter | None" = None
@@ -352,9 +421,28 @@ class Agent:
 
         # Discovery reads only data; loading executes only engaged code. The
         # plugin/skill catalog must exist before selecting the explicit ceiling.
-        from lingcore.plugins.loader import load_plugins
+        from lingcore.errors import ConfigError
+        from lingcore.plugins.loader import LoadedPlugins, load_plugins
 
-        loaded_plugins = load_plugins(profile)
+        if tool_registry is not None:
+            if (
+                profile.plugins
+                or profile.skills
+                or "activate_skill" in profile.tools
+                or sk_opts
+            ):
+                raise ConfigError(
+                    "an injected registry cannot be combined with plugins or skills"
+                )
+            if set(tool_registry.names()) != set(profile.tools):
+                raise ConfigError(
+                    "injected registry must match the profile tool ceiling exactly"
+                )
+            loaded_plugins = LoadedPlugins(
+                [], {}, frozenset(), [], CommandCatalog(), []
+            )
+        else:
+            loaded_plugins = load_plugins(profile)
         loaded_skills = loaded_plugins.skills
         for name in profile.skills:
             if name not in loaded_skills:
@@ -372,13 +460,17 @@ class Agent:
         unengaged = (
             set(profile.tools) & registered_module_tools()
         ) - loaded_plugins.tool_names
-        if unengaged:
+        if unengaged and tool_registry is None:
             from lingcore.errors import ConfigError
 
             raise ConfigError(
                 f"profile tools belong to modules not engaged by this profile: {sorted(unengaged)}"
             )
-        tools = REGISTRY.subset(profile.tools)
+        tools = (
+            tool_registry
+            if tool_registry is not None
+            else REGISTRY.subset(profile.tools)
+        )
         # The initially-enabled subset (``initial_tools`` or the complement of
         # ``skill_gated_tools``; neither ⇒ all of the ceiling). Skills unlock the
         # rest, if any, on activation.
@@ -395,240 +487,359 @@ class Agent:
                 initial_tools_set |= frozenset(sk.requested_tools) & frozenset(
                     profile.tools
                 )
-        workspace = profile.workspace_path(base_dir)
+        if state_dir is not None:
+            from lingcore.profiles import initialize_state_directory
+
+            state_dir = initialize_state_directory(state_dir)
+        effective_state = state_dir or source_dir
+        workspace = (
+            state_dir / "workspace"
+            if state_dir is not None and profile.workspace is None
+            else profile.workspace_path(base_dir)
+        )
         workspace.mkdir(parents=True, exist_ok=True)
 
-        # One effective tool_options dict drives BOTH the ToolContext the tools
-        # see and the auto-compaction injection below — reading the override for
-        # one and the profile for the other would let a caller's override be
-        # silently inverted (profile off + override on wouldn't compact; the
-        # reverse would compact anyway).
-        effective_tool_options = (
-            tool_options if tool_options is not None else dict(profile.tool_options)
+        from lingcore.tracing.config import build_recorder
+
+        recorder = (
+            recorder
+            if recorder is not None
+            else build_recorder(profile, workspace, state_dir)
         )
-        # Persistent-memory auto-compaction: inject the summarizer (the main
-        # client, duck-typed) so the memory tool can condense memory.md at its
-        # length limit instead of hard-failing. Opt-in via tool_options.memory.
-        mem_tool_opts = effective_tool_options.get("memory", {})
-        if "memory" in profile.tools and mem_tool_opts.get("auto_compact", False):
-            from lingcore.tools.builtin.memory import MEMORY_SUMMARIZER_KEY
+        owns_store = False
+        try:
+            ledger = RequestLedger()
+            raw_client = client
 
-            effective_tool_options[MEMORY_SUMMARIZER_KEY] = client
-        mem = WindowMemory(
-            max_messages=profile.memory.max_messages,
-            max_tokens=profile.memory.max_tokens,
-            model=profile.llm.model,
-            evict_to_ratio=profile.memory.evict_to_ratio,
-        )
-        memory: ShortTermMemory = mem
-        # Compaction wraps the window when enabled: it summarizes old history
-        # (via the main client, duck-typed) before the window's eviction fires.
-        if profile.memory.compaction.enabled:
-            from lingcore.memory import SummarizingMemory
-
-            cc = profile.memory.compaction
-            memory = SummarizingMemory(
-                mem,
-                summarizer=client,
-                compact_at_ratio=cc.compact_at_ratio,
-                keep_recent_ratio=cc.keep_recent_ratio,
-                max_summary_chars=cc.max_summary_chars,
-            )
-        sid = session_id
-        restored_turn_index = 0
-        if session_store is not None:
-            from lingcore.sessions import attach_session
-
-            memory, sid, restored_turn_index = attach_session(
-                memory, session_store, session_id
-            )
-        # Prompt-cache routing key: bind same-session requests to one warm node.
-        # Set post-construction now that the session id is known; only on a real
-        # LLMClient we built (a test-injected fake is left untouched).
-        if profile.llm.send_prompt_cache_key and sid and isinstance(client, LLMClient):
-            client._prompt_cache_key = sid
-        # Built whole once the session id is known: a tool that keeps per-chat
-        # auxiliary state (e.g. external-agent conversation aliases) scopes it by
-        # ``session_id``, so the context must carry the resumed/fresh id from
-        # the start rather than have it patched in afterwards.
-        tool_ctx = ToolContext(
-            workspace=workspace,
-            confirm=confirm,
-            options=effective_tool_options,
-            profile_dir=source_dir,
-            environment=dict(getattr(profile, "_profile_env", {})),
-            session_id=sid,
-        )
-        guardrail = build_guardrail(profile.guardrail.policy, profile.guardrail.options)
-
-        # --- Dynamic skill state (only when the activate_skill tool is enabled) ---
-        skill_state: "SkillState | None" = None
-        if "activate_skill" in profile.tools:
-            from lingcore.skills import SkillState
-            from lingcore.tools.builtin.skill import SKILL_STATE_KEY
-
-            ptools = frozenset(profile.tools)
-            # Only offer skills this profile can actually use. A skill is
-            # activatable only if the profile authorizes at least one of its
-            # requested tools (or it ships none and is purely instructional).
-            # Otherwise a code-shipping skill like ``canvas`` is advertised to a
-            # profile that can grant none of its tools — effective_tools is ∅, so
-            # activating it would only mislead the model.
-            offerable = {
-                name: sk
-                for name, sk in loaded_skills.items()
-                if not sk.requested_tools or (ptools & frozenset(sk.requested_tools))
-            }
-            # The name-based baseline (or the operator's override of it) plus
-            # every authorized tool that declares itself ``high_risk`` — a
-            # tool's own declaration is a floor the override cannot lower, so
-            # skill-shipped code stays confirmation-gated without the core
-            # permission model listing its names.
-            high_risk = sk_opts.get("high_risk_tools")
-            declared_high_risk = frozenset(
-                name for name in tools.names() if tools.get(name).high_risk
-            )
-            skill_state = SkillState(
-                skills=offerable,
-                profile_tools=ptools,
-                allow_concurrent=bool(sk_opts.get("allow_concurrent", False)),
-                high_risk_tools=(
-                    frozenset(high_risk)
-                    if high_risk is not None
-                    else SkillState.high_risk_tools
+            def instrument(
+                raw: _LLMLike, cfg: LLMCfg, purpose: str | None = None
+            ) -> _LLMLike:
+                if not recorder.enabled and execution_budget is None:
+                    return raw
+                return InstrumentedClient(
+                    raw,
+                    recorder,
+                    ledger,
+                    model=cfg.model,
+                    provider=cfg.backend,
+                    max_retries=cfg.max_retries,
+                    default_purpose=purpose,
+                    budget=execution_budget,
                 )
-                | declared_high_risk,
+
+            client = instrument(raw_client, profile.llm)
+            if media_adapter is not None and media_adapter.vision is not None:
+                media_adapter.vision = instrument(
+                    media_adapter.vision,
+                    profile.media_fallback.image or profile.llm,
+                    "vision",
+                )
+
+            # One effective tool_options dict drives BOTH the ToolContext the tools
+            # see and the auto-compaction injection below — reading the override for
+            # one and the profile for the other would let a caller's override be
+            # silently inverted (profile off + override on wouldn't compact; the
+            # reverse would compact anyway).
+            effective_tool_options = (
+                tool_options if tool_options is not None else dict(profile.tool_options)
             )
-            if session_store is not None and sid is not None:
-                persisted = session_store.active_skill_state(sid)
-                restored = [
-                    name
-                    for name in persisted.active
-                    if name in skill_state.skills
-                    and (
-                        skill_state.effective_tools(skill_state.skills[name])
-                        & skill_state.high_risk_tools
-                    )
-                    <= (persisted.approvals_for(name) & skill_state.high_risk_tools)
-                ]
-                if not skill_state.allow_concurrent and len(restored) > 1:
-                    restored = restored[-1:]
-                skill_state.active[:] = restored
-                skill_state.approved_high_risk = {
-                    name: (persisted.approvals_for(name) & skill_state.high_risk_tools)
-                    for name in restored
-                }
-            # Share the live state object with the activate_skill tool.
-            tool_ctx.options[SKILL_STATE_KEY] = skill_state
+            if state_dir is not None:
+                from lingcore.paths import PathEscapeError, resolve_confined
 
-        # --- Todo checklist (only when the todo_write tool is enabled) -------
-        todo_state: TodoState | None = None
-        if "todo_write" in profile.tools:
-            from lingcore.tools.builtin.todo import TODO_STATE_KEY
-
-            todo_state = TodoState()
-            if session_store is not None and sid is not None:
-                todo_state.items = session_store.latest_todos(sid)
-            tool_ctx.options[TODO_STATE_KEY] = todo_state
-
-        # --- Build composer ----------------------------------------------
-        # LayeredComposer when .md layers, memory, or skills exist; else Static.
-        composer: PromptComposer
-        layers: list[str] = []
-        includes: list[str] = []
-        memory_path: Path | None = None
-        if source_dir is not None:
-            layer_names = ["world.md", "role.md", "workflow.md"]
-            layers = [
-                (source_dir / name).read_text("utf-8")
-                for name in layer_names
-                if (source_dir / name).is_file()
-            ]
-            includes = [
-                (source_dir / inc).read_text("utf-8")
-                for inc in profile.persona.include
-                if (source_dir / inc).is_file()
-            ]
-            # Read memory settings from the *effective* options (caller overrides
-            # included), so the injected memory file matches where the memory
-            # tool actually writes. An absolute path is honored only when the
-            # profile opted in — the same gate the tool enforces before writing.
-            mem_opts = effective_tool_options.get("memory", {})
-            if "memory" in profile.tools:
-                raw_mem = Path(mem_opts.get("path", "memory.md"))
-                if raw_mem.is_absolute():
-                    if mem_opts.get("allow_absolute_path", False):
-                        memory_path = raw_mem.resolve()
-                else:
-                    memory_path = (source_dir / raw_mem).resolve()
-
-        # Statically-declared skills (profile ``skills:``) inject their
-        # instructions as an always-on prompt layer — distinct from the dynamic
-        # activate_skill path, which injects via active_skills in the loop.
-        static_skill_layers = [
-            loaded_skills[name].instructions
-            for name in profile.skills
-            if loaded_skills.get(name) and loaded_skills[name].instructions
-        ]
-
-        # Layer the prompt when there are real layer sources (files, includes,
-        # static skills), a memory file, or dynamic skills. The persona's inline
-        # system_prompt does NOT by itself trigger layering — a bare-prompt agent
-        # stays a zero-overhead StaticComposer.
-        needs_layering = (
-            bool(
-                layers
-                or includes
-                or static_skill_layers
-                or loaded_plugins.prompt_layers
+                for key, default in (
+                    ("memory", "memory.md"),
+                    ("calendar", "calendar.ics"),
+                ):
+                    options = effective_tool_options.get(key, {})
+                    raw = Path(options.get("path", default))
+                    if raw.is_absolute() and not options.get(
+                        "allow_absolute_path", False
+                    ):
+                        raise ConfigError(
+                            f"absolute {key} path requires allow_absolute_path"
+                        )
+                    try:
+                        resolved = resolve_confined(state_dir, raw)
+                    except PathEscapeError:
+                        raise ConfigError(
+                            f"{key} path escapes the explicit state directory"
+                        ) from None
+                    if not resolved.is_relative_to(state_dir):
+                        raise ConfigError(
+                            f"{key} path escapes the explicit state directory"
+                        )
+            owns_store = (
+                state_dir is not None
+                and session_store is None
+                and profile.sessions.enabled
             )
-            or memory_path is not None
-            or skill_state is not None
-            or bool(profile.persona.project_instructions)
-        )
-        if needs_layering:
-            # persona.system_prompt is the inline *fallback* persona: fold it in
-            # as the base layer when no world/role/workflow file supplies one, so
-            # a profile relying on the inline prompt doesn't silently lose it just
-            # because memory or skills forced the layered path.
-            base_layers = layers
-            if not layers and profile.persona.system_prompt.strip():
-                base_layers = [profile.persona.system_prompt]
-            composer = LayeredComposer(
-                layers=base_layers
-                + includes
-                + static_skill_layers
-                + loaded_plugins.prompt_layers,
-                memory_path=memory_path,
-                skill_instructions=skill_state.instruction_map() if skill_state else {},
+            if owns_store:
+                from lingcore.sessions import open_store
+
+                session_store, _ = open_store(profile, state_dir=state_dir)
+            if (
+                state_dir is not None
+                and session_store is not None
+                and not session_store.db_path.resolve().is_relative_to(state_dir)
+            ):
+                raise ConfigError("session store escapes the explicit state directory")
+            # Persistent-memory auto-compaction: inject the summarizer (the main
+            # client, duck-typed) so the memory tool can condense memory.md at its
+            # length limit instead of hard-failing. Opt-in via tool_options.memory.
+            mem_tool_opts = effective_tool_options.get("memory", {})
+            if "memory" in profile.tools and mem_tool_opts.get("auto_compact", False):
+                from lingcore.tools.builtin.memory import MEMORY_SUMMARIZER_KEY
+
+                effective_tool_options[MEMORY_SUMMARIZER_KEY] = instrument(
+                    raw_client, profile.llm, "memory_condensation"
+                )
+            mem = WindowMemory(
+                max_messages=profile.memory.max_messages,
+                max_tokens=profile.memory.max_tokens,
+                model=profile.llm.model,
+                evict_to_ratio=profile.memory.evict_to_ratio,
+            )
+            memory: ShortTermMemory = mem
+            # Compaction wraps the window when enabled: it summarizes old history
+            # (via the main client, duck-typed) before the window's eviction fires.
+            if profile.memory.compaction.enabled:
+                from lingcore.memory import SummarizingMemory
+
+                cc = profile.memory.compaction
+                memory = SummarizingMemory(
+                    mem,
+                    summarizer=instrument(raw_client, profile.llm, "summary"),
+                    compact_at_ratio=cc.compact_at_ratio,
+                    keep_recent_ratio=cc.keep_recent_ratio,
+                    max_summary_chars=cc.max_summary_chars,
+                )
+            sid = session_id
+            restored_turn_index = 0
+            if session_store is not None:
+                from lingcore.sessions import attach_session
+
+                memory, sid, restored_turn_index = attach_session(
+                    memory, session_store, session_id
+                )
+            # Prompt-cache routing key: bind same-session requests to one warm node.
+            # Set post-construction now that the session id is known; only on a real
+            # LLMClient we built (a test-injected fake is left untouched).
+            if (
+                profile.llm.send_prompt_cache_key
+                and sid
+                and isinstance(raw_client, LLMClient)
+            ):
+                raw_client._prompt_cache_key = sid
+            # Built whole once the session id is known: a tool that keeps per-chat
+            # auxiliary state (e.g. external-agent conversation aliases) scopes it by
+            # ``session_id``, so the context must carry the resumed/fresh id from
+            # the start rather than have it patched in afterwards.
+            tool_ctx = ToolContext(
                 workspace=workspace,
-                project_instructions=tuple(profile.persona.project_instructions),
+                confirm=confirm,
+                options=effective_tool_options,
+                profile_dir=effective_state,
+                environment=dict(getattr(profile, "_profile_env", {})),
+                session_id=sid,
             )
-        else:
-            composer = StaticComposer(profile.persona.system_prompt)
+            guardrail = build_guardrail(
+                profile.guardrail.policy, profile.guardrail.options
+            )
 
-        agent = cls(
-            llm=client,
-            tools=tools,
-            tool_ctx=tool_ctx,
-            composer=composer,
-            memory=memory,
-            guardrail=guardrail,
-            max_iters=profile.loop.max_iters,
-            parallel_tools=profile.loop.parallel_tools,
-            stream_retries=profile.llm.stream_retries,
-            session_id=sid,
-            skill_state=skill_state,
-            media_adapter=media_adapter,
-            initial_tools=initial_tools_set,
-            session_store=session_store,
-            usage_meter=usage_meter,
-            todo_state=todo_state,
-            hooks=HookRunner(loaded_plugins.hook_factories, tool_ctx),
-            commands=loaded_plugins.commands,
-        )
-        agent._turn_index = restored_turn_index
-        return agent
+            # --- Dynamic skill state (only when the activate_skill tool is enabled) ---
+            skill_state: "SkillState | None" = None
+            if "activate_skill" in profile.tools:
+                from lingcore.skills import SkillState
+                from lingcore.tools.builtin.skill import SKILL_STATE_KEY
+
+                ptools = frozenset(profile.tools)
+                # Only offer skills this profile can actually use. A skill is
+                # activatable only if the profile authorizes at least one of its
+                # requested tools (or it ships none and is purely instructional).
+                # Otherwise a code-shipping skill like ``canvas`` is advertised to a
+                # profile that can grant none of its tools — effective_tools is ∅, so
+                # activating it would only mislead the model.
+                offerable = {
+                    name: sk
+                    for name, sk in loaded_skills.items()
+                    if not sk.requested_tools
+                    or (ptools & frozenset(sk.requested_tools))
+                }
+                # The name-based baseline (or the operator's override of it) plus
+                # every authorized tool that declares itself ``high_risk`` — a
+                # tool's own declaration is a floor the override cannot lower, so
+                # skill-shipped code stays confirmation-gated without the core
+                # permission model listing its names.
+                high_risk = sk_opts.get("high_risk_tools")
+                declared_high_risk = frozenset(
+                    name for name in tools.names() if tools.get(name).high_risk
+                )
+                skill_state = SkillState(
+                    skills=offerable,
+                    profile_tools=ptools,
+                    allow_concurrent=bool(sk_opts.get("allow_concurrent", False)),
+                    high_risk_tools=(
+                        frozenset(high_risk)
+                        if high_risk is not None
+                        else SkillState.high_risk_tools
+                    )
+                    | declared_high_risk,
+                )
+                if session_store is not None and sid is not None:
+                    persisted = session_store.active_skill_state(sid)
+                    restored = [
+                        name
+                        for name in persisted.active
+                        if name in skill_state.skills
+                        and (
+                            skill_state.effective_tools(skill_state.skills[name])
+                            & skill_state.high_risk_tools
+                        )
+                        <= (persisted.approvals_for(name) & skill_state.high_risk_tools)
+                    ]
+                    if not skill_state.allow_concurrent and len(restored) > 1:
+                        restored = restored[-1:]
+                    skill_state.active[:] = restored
+                    skill_state.approved_high_risk = {
+                        name: (
+                            persisted.approvals_for(name) & skill_state.high_risk_tools
+                        )
+                        for name in restored
+                    }
+                # Share the live state object with the activate_skill tool.
+                tool_ctx.options[SKILL_STATE_KEY] = skill_state
+
+            # --- Todo checklist (only when the todo_write tool is enabled) -------
+            todo_state: TodoState | None = None
+            if "todo_write" in profile.tools:
+                from lingcore.tools.builtin.todo import TODO_STATE_KEY
+
+                todo_state = TodoState()
+                if session_store is not None and sid is not None:
+                    todo_state.items = session_store.latest_todos(sid)
+                tool_ctx.options[TODO_STATE_KEY] = todo_state
+
+            # --- Build composer ----------------------------------------------
+            # LayeredComposer when .md layers, memory, or skills exist; else Static.
+            composer: PromptComposer
+            layers: list[str] = []
+            includes: list[str] = []
+            memory_path: Path | None = None
+            if source_dir is not None:
+                layer_names = ["world.md", "role.md", "workflow.md"]
+                layers = [
+                    (source_dir / name).read_text("utf-8")
+                    for name in layer_names
+                    if (source_dir / name).is_file()
+                ]
+                includes = [
+                    (source_dir / inc).read_text("utf-8")
+                    for inc in profile.persona.include
+                    if (source_dir / inc).is_file()
+                ]
+            if effective_state is not None:
+                # Read memory settings from the *effective* options (caller overrides
+                # included), so the injected memory file matches where the memory
+                # tool actually writes. An absolute path is honored only when the
+                # profile opted in — the same gate the tool enforces before writing.
+                mem_opts = effective_tool_options.get("memory", {})
+                if "memory" in profile.tools:
+                    raw_mem = Path(mem_opts.get("path", "memory.md"))
+                    if raw_mem.is_absolute():
+                        if mem_opts.get("allow_absolute_path", False):
+                            memory_path = raw_mem.resolve()
+                    else:
+                        memory_path = (effective_state / raw_mem).resolve()
+
+            # Statically-declared skills (profile ``skills:``) inject their
+            # instructions as an always-on prompt layer — distinct from the dynamic
+            # activate_skill path, which injects via active_skills in the loop.
+            static_skill_layers = [
+                loaded_skills[name].instructions
+                for name in profile.skills
+                if loaded_skills.get(name) and loaded_skills[name].instructions
+            ]
+
+            # Layer the prompt when there are real layer sources (files, includes,
+            # static skills), a memory file, or dynamic skills. The persona's inline
+            # system_prompt does NOT by itself trigger layering — a bare-prompt agent
+            # stays a zero-overhead StaticComposer.
+            needs_layering = (
+                bool(
+                    layers
+                    or includes
+                    or static_skill_layers
+                    or loaded_plugins.prompt_layers
+                )
+                or memory_path is not None
+                or skill_state is not None
+                or bool(profile.persona.project_instructions)
+            )
+            if needs_layering:
+                # persona.system_prompt is the inline *fallback* persona: fold it in
+                # as the base layer when no world/role/workflow file supplies one, so
+                # a profile relying on the inline prompt doesn't silently lose it just
+                # because memory or skills forced the layered path.
+                base_layers = layers
+                if not layers and profile.persona.system_prompt.strip():
+                    base_layers = [profile.persona.system_prompt]
+                composer = LayeredComposer(
+                    layers=base_layers
+                    + includes
+                    + static_skill_layers
+                    + loaded_plugins.prompt_layers,
+                    memory_path=memory_path,
+                    skill_instructions=skill_state.instruction_map()
+                    if skill_state
+                    else {},
+                    workspace=workspace,
+                    project_instructions=tuple(profile.persona.project_instructions),
+                )
+            else:
+                composer = StaticComposer(profile.persona.system_prompt)
+
+            agent = cls(
+                llm=client,
+                tools=tools,
+                tool_ctx=tool_ctx,
+                composer=composer,
+                memory=memory,
+                guardrail=guardrail,
+                max_iters=profile.loop.max_iters,
+                parallel_tools=profile.loop.parallel_tools,
+                stream_retries=profile.llm.stream_retries,
+                session_id=sid,
+                skill_state=skill_state,
+                media_adapter=media_adapter,
+                initial_tools=initial_tools_set,
+                session_store=session_store,
+                usage_meter=usage_meter,
+                todo_state=todo_state,
+                hooks=HookRunner(loaded_plugins.hook_factories, tool_ctx),
+                commands=loaded_plugins.commands,
+                recorder=recorder,
+                request_ledger=ledger,
+                execution_budget=execution_budget,
+            )
+            agent._turn_index = restored_turn_index
+            agent._owned_session_store = session_store if owns_store else None
+            if session_store is not None and sid is not None:
+                meta = session_store.get(sid)
+                if meta is not None and meta.fork is not None:
+                    recorder.event(
+                        "session.link",
+                        attributes={
+                            "source_session_id": meta.fork.parent_session_id,
+                            "through_seq": meta.fork.through_seq,
+                            "relation": "fork",
+                        },
+                    )
+            return agent
+        except BaseException:
+            recorder.abort()
+            if owns_store and session_store is not None:
+                session_store.close()
+            raise
 
     async def __aenter__(self) -> Agent:
         return self
@@ -644,7 +855,16 @@ class Agent:
         """
         self._closed = True
         self.background.close()
-        await self._hooks.aclose()
+        try:
+            await self._hooks.aclose()
+        finally:
+            try:
+                await self.recorder.aclose()
+            finally:
+                owned = getattr(self, "_owned_session_store", None)
+                if owned is not None:
+                    owned.close()
+                    self._owned_session_store = None
 
     def drain_usage(self) -> list[UsageReported]:
         """Return usage recorded but not yet emitted by ``run``.
@@ -699,6 +919,15 @@ class Agent:
         if self._turn_checkpoint is None or not self._turn_cancel_requested:
             raise RuntimeError("no cancelled turn is ready to finalize")
         committed = self._turn_committed
+        if self._turn_trace is not None:
+            self.recorder.event(
+                "turn.finalize",
+                context=self._turn_trace.context,
+                attributes={
+                    "committed": committed is not None,
+                    "outcome": "committed" if committed is not None else "cancelled",
+                },
+            )
         if committed is not None:
             self._hooks.drain_notices()
             self._clear_turn_state()
@@ -722,6 +951,7 @@ class Agent:
         self,
         lease: object | None = None,
         reason: Literal["cancelled", "failed", "abandoned"] = "cancelled",
+        trace_status: Literal["error", "cancelled", "budget_exceeded"] | None = None,
     ) -> None:
         """Restore the turn checkpoint and always release its lease.
 
@@ -768,6 +998,19 @@ class Agent:
             self._hooks.turn_rolled_back(
                 TurnRolledBackEvent(reason, self._turn_started_at)
             )
+            self._trace_status = trace_status or (
+                "cancelled" if reason != "failed" else "error"
+            )
+            self._turn_captures.clear()
+            if self._turn_trace is not None:
+                self.recorder.event(
+                    "turn.rollback",
+                    context=self._turn_trace.context,
+                    attributes={
+                        "reason": reason,
+                        "session.message_seq": self._turn_message_seq,
+                    },
+                )
             self._clear_turn_state(lease)
 
     def _turn_waiting(self) -> AbstractContextManager[None]:
@@ -814,6 +1057,15 @@ class Agent:
         """Release turn state only when ``lease`` still owns it."""
         if lease is not None and self._turn_lease is not lease:
             return
+        if self._turn_trace is not None:
+            self._turn_trace.close(
+                self._trace_status,
+                iterations=self._turn_iterations,
+                outcome=self._trace_status,
+                **{"session.message_seq": self._turn_message_seq},
+            )
+            self._turn_trace = None
+        self._turn_captures.clear()
         self._active_turn_task = None
         self._turn_lease = None
         self._turn_checkpoint = None
@@ -895,6 +1147,41 @@ class Agent:
         self._turn_stats_committed = False
         self._turn_stats_seq = None
         self.usage_meter.open_tally()
+        parent_context = current_span.get()
+        turn_context = new_context(
+            turn_id=str(uuid4()),
+            session_id=self._session_id,
+            trial_id=parent_context.trial_id if parent_context else None,
+            execution_id=parent_context.execution_id if parent_context else None,
+        )
+        if parent_context is not None:
+            turn_context = turn_context.model_copy(
+                update={
+                    "links": (
+                        TraceLink(
+                            trace_id=parent_context.trace_id,
+                            span_id=parent_context.span_id,
+                            relation="trial",
+                        ),
+                    )
+                }
+            )
+        turn_scope = self.recorder.span(
+            "agent.turn",
+            context=turn_context,
+            attributes={
+                "input_origin": "monitor"
+                if isinstance(user_input, BackgroundInput)
+                else "user"
+            },
+        )
+        self._turn_trace = turn_scope
+        self._trace_status = "error"
+        self._turn_captures = CommittedContentBuffer(
+            self.recorder.artifact_max_bytes, self.recorder.secrets
+        )
+        self._turn_iterations = 0
+        self.execution_outcome = None
 
         turn = self._run_turn(user_input, lease)
         try:
@@ -910,7 +1197,8 @@ class Agent:
                         break
                     self._active_turn_task = asyncio.current_task()
                     try:
-                        event = await anext(turn)
+                        with bind(turn_scope.context):
+                            event = await anext(turn)
                     except StopAsyncIteration:
                         break
                     # Capture terminal stats before yielding: the conversation
@@ -929,6 +1217,36 @@ class Agent:
                     if stats is not None:
                         yield TurnStatsReported(stats)
                     yield event
+        except BudgetExceeded as exc:
+            self.execution_outcome = ExecutionOutcome(
+                status="failed"
+                if exc.limit == "usage_unavailable"
+                else "timed_out"
+                if exc.limit == "wall_seconds"
+                else "budget_exceeded",
+                cause="provider" if exc.limit == "usage_unavailable" else "agent",
+                limit_type=None if exc.limit == "usage_unavailable" else exc.limit,
+                provider_error_category="usage_unavailable"
+                if exc.limit == "usage_unavailable"
+                else None,
+            )
+            repaired = True
+            try:
+                self._rollback_turn(
+                    lease,
+                    "failed",
+                    trace_status="cancelled"
+                    if exc.limit == "wall_seconds"
+                    else "budget_exceeded",
+                )
+            except Exception:
+                repaired = False
+            stats = self._finish_turn_stats(lease, persist=repaired)
+            for usage in self.usage_meter.drain():
+                yield UsageReported(usage)
+            if stats is not None:
+                yield TurnStatsReported(stats)
+            yield Error(str(exc))
         except asyncio.CancelledError:
             # Cancellation alone deliberately retains the checkpoint for the
             # frontend's cancel -> await -> finalize handshake. Mark the
@@ -937,6 +1255,10 @@ class Agent:
             if self._turn_lease is lease:
                 self._turn_cancel_requested = True
                 self._active_turn_task = None
+                if self._turn_committed is None:
+                    self.execution_outcome = ExecutionOutcome(
+                        status="cancelled", cause="agent"
+                    )
             raise
         except GeneratorExit:
             owner = self._active_turn_task
@@ -962,6 +1284,7 @@ class Agent:
                     self._finish_turn_stats(lease)
             raise
         except Exception as exc:
+            self.execution_outcome = ExecutionOutcome(status="failed", cause="runner")
             notices = self._hooks.drain_notices()
             message = f"agent turn failed: {type(exc).__name__}: {exc}"
             rolled_back = True
@@ -991,6 +1314,11 @@ class Agent:
     ) -> AsyncGenerator[AgentEvent, None]:
         """Run the acquired turn; :meth:`run` owns failure containment."""
         await self._hooks.start()
+        if (
+            isinstance(user_input, BackgroundInput)
+            and self.execution_budget is not None
+        ):
+            self.execution_budget.reserve_automatic_turn()
         for notice in self._hooks.drain_notices():
             yield notice
         if isinstance(user_input, str):
@@ -1038,6 +1366,10 @@ class Agent:
             yield notice
         if decision is not None:
             if decision.action == "block":
+                self.execution_outcome = ExecutionOutcome(
+                    status="failed", cause="policy"
+                )
+                self._trace_status = "denied"
                 self._clear_turn_state(lease)
                 yield Error(
                     f"input blocked by plugin {decision.plugin}: {decision.reason}"
@@ -1055,6 +1387,9 @@ class Agent:
         if background:
             user_message.name = "monitor"
         self.memory.add(user_message)
+        self._capture_committed(
+            "message", {"role": "user", "content": user_message.content}
+        )
         self._turn_user_message = user_message
         self._turn_stats_committed = True
         if self._session_store is not None and self._session_id is not None:
@@ -1082,7 +1417,12 @@ class Agent:
                 session_id=self._session_id,
                 active_skills=active,
             )
-            system_prompt = await self.composer.compose(compose_ctx)
+            with self.recorder.span("prompt.compose") as composition:
+                system_prompt = await self.composer.compose(compose_ctx)
+                composition.attributes.update(
+                    characters=len(system_prompt),
+                    layers=len(getattr(self.composer, "layers", ())),
+                )
 
             # The live todo list is carried by tool results, which compaction
             # summarizes away and eviction drops. Memory re-pins this note in
@@ -1104,14 +1444,21 @@ class Agent:
                 set_turn_index = getattr(self.memory, "set_compaction_turn_index", None)
                 if callable(set_turn_index):
                     set_turn_index(self._turn_index)
-                compacted = await self.memory.maybe_compact(system_prompt)
+                with self.recorder.span("memory.compact") as compaction:
+                    compaction.attributes["input_messages"] = len(self.memory.messages)
+                    compacted = await self.memory.maybe_compact(system_prompt)
+                    compaction.attributes["output_messages"] = len(self.memory.messages)
                 if compacted is not None:
                     yield compacted
 
             self._turn_index += 1
+            self._turn_iterations += 1
 
             messages = self.memory.render(system_prompt)
             schemas = self._effective_tool_schemas()
+            self._capture_committed(
+                "prompt", {"system": system_prompt, "tools": schemas}
+            )
 
             # --- Stream one assistant turn, recovering from mid-stream loss ---
             # A turn that fails in flight was never committed to memory, so it
@@ -1130,20 +1477,23 @@ class Agent:
                 dropped_tool_calls = 0
                 anthropic_content: list[dict[str, Any]] | None = None
                 try:
-                    async for chunk in self.llm.stream(messages, tools=schemas):
-                        if chunk.reasoning_delta:
-                            reasoning_parts.append(chunk.reasoning_delta)
-                        if chunk.text_delta:
-                            content_parts.append(chunk.text_delta)
-                            yield TextDelta(chunk.text_delta)
-                        if chunk.tool_calls:
-                            tool_calls = chunk.tool_calls
-                        if chunk.finish_reason:
-                            finish_reason = chunk.finish_reason
-                        if (
-                            snapshot := getattr(chunk, "anthropic_content", None)
-                        ) is not None:
-                            anthropic_content = snapshot
+                    async with closing_stream(
+                        self.llm.stream(messages, tools=schemas)
+                    ) as stream:
+                        async for chunk in stream:
+                            if chunk.reasoning_delta:
+                                reasoning_parts.append(chunk.reasoning_delta)
+                            if chunk.text_delta:
+                                content_parts.append(chunk.text_delta)
+                                yield TextDelta(chunk.text_delta)
+                            if chunk.tool_calls:
+                                tool_calls = chunk.tool_calls
+                            if chunk.finish_reason:
+                                finish_reason = chunk.finish_reason
+                            if (
+                                snapshot := getattr(chunk, "anthropic_content", None)
+                            ) is not None:
+                                anthropic_content = snapshot
                     break
                 except LLMStreamError as e:
                     if e.finish_reason in INCOMPLETE_FINISH_REASONS:
@@ -1165,6 +1515,11 @@ class Agent:
                         # keep the runtime counter aligned with durable replay.
                         self._turn_index -= 1
                         message = f"model request failed{spent}: {e}"
+                        self.execution_outcome = ExecutionOutcome(
+                            status="failed",
+                            cause="provider",
+                            provider_error_category="stream_error",
+                        )
                         await self._turn_end(
                             TurnEndEvent(
                                 "", error=message, turn_index=self._turn_index
@@ -1183,13 +1538,31 @@ class Agent:
                         reason=str(e),
                         discarded_chars=sum(len(p) for p in content_parts),
                     )
-                    with self._turn_waiting():
-                        await asyncio.sleep(_backoff_seconds(attempt))
+                    previous_request = self.request_ledger.last_request_id
+                    self.request_ledger.retry_request_id = previous_request
+                    delay = _backoff_seconds(attempt)
+                    with (
+                        self._turn_waiting(),
+                        self.recorder.span(
+                            "retry.backoff",
+                            attributes={
+                                "attempt": attempt,
+                                "delay_seconds": delay,
+                                "previous_request_id": previous_request,
+                            },
+                        ),
+                    ):
+                        await asyncio.sleep(delay)
                 except Exception as e:
                     # A duck-typed backend may raise anything; without a
                     # retryable classification, surface it and end the turn.
                     self._turn_index -= 1
                     message = f"model request failed: {type(e).__name__}: {e}"
+                    self.execution_outcome = ExecutionOutcome(
+                        status="failed",
+                        cause="provider",
+                        provider_error_category="unclassified",
+                    )
                     await self._turn_end(
                         TurnEndEvent("", error=message, turn_index=self._turn_index),
                         lease,
@@ -1224,6 +1597,17 @@ class Agent:
                 finish_detail=finish_detail,
             )
             self.memory.add(assistant)
+            self._capture_committed(
+                "message",
+                {
+                    "role": "assistant",
+                    "content": assistant.content,
+                    "tool_calls": [
+                        c.model_dump(exclude={"invalid_arguments"})
+                        for c in assistant.tool_calls
+                    ],
+                },
+            )
 
             if incomplete:
                 assert finish_detail is not None
@@ -1272,6 +1656,18 @@ class Agent:
                 yield notice
             for result in results:
                 self.memory.add(Message.from_tool_result(result))
+                self._capture_committed(
+                    "message",
+                    {
+                        "role": "tool",
+                        "tool_call_id": result.call_id,
+                        "name": result.name,
+                        "content": result.content
+                        if result.ok
+                        else "[tool error content excluded]",
+                        "ok": result.ok,
+                    },
+                )
                 yield ToolResultEvent(result)
             media = [
                 attachment for result in results for attachment in result.attachments
@@ -1363,12 +1759,51 @@ class Agent:
         cancel -> await -> finalize handshake, but finalization then returns
         ``terminal`` instead of restoring the checkpoint.
         """
+        self._trace_status = (
+            "ok"
+            if isinstance(terminal, Final)
+            else "incomplete"
+            if terminal.finish_reason
+            else "error"
+        )
+        if self.execution_outcome is None:
+            self.execution_outcome = ExecutionOutcome(
+                status="completed" if isinstance(terminal, Final) else "failed",
+                cause=None
+                if isinstance(terminal, Final)
+                else "provider"
+                if terminal.finish_reason
+                else "agent",
+                provider_error_category=terminal.finish_reason
+                if isinstance(terminal, Error)
+                else None,
+            )
+        if self._turn_trace is not None:
+            self._capture_committed(
+                "guarded_final",
+                terminal.content
+                if isinstance(terminal, Final)
+                else terminal.partial_content,
+            )
+            self.recorder._capture_sanitized(
+                "turn.committed",
+                self._turn_captures.data,
+                context=self._turn_trace.context,
+                truncated=self._turn_captures.truncated,
+                omitted_items=self._turn_captures.omitted_items,
+            )
         try:
             await self._hooks.turn_end(event)
         except asyncio.CancelledError:
             if self._turn_lease is lease:
                 self._turn_committed = terminal
             raise
+
+    def _capture_committed(self, kind: str, value: Any) -> None:
+        """Buffer bounded evidence until the whole turn commits; rollback drops it."""
+        if self.recorder.content != "redacted" or self._turn_trace is None:
+            return
+        self._turn_captures.append(kind, value)
 
     def _effective_tool_schemas(self) -> list[dict[str, Any]]:
         """Tool schemas for the current step: the initially-enabled tools plus
@@ -1417,53 +1852,133 @@ class Agent:
         # one call must affect only the next loop iteration, never sibling calls
         # whose schemas were computed under the previous state.
         authorized = self._authorized_tool_names()
+        producing_request_id = self.request_ledger.last_request_id
 
         async def run_one(call: ToolCall) -> ToolResult:
             # Validation and the batch's authorization snapshot precede every
             # hook: plugins cannot make an invalid or forbidden call reachable.
-            try:
-                tool = self._resolve_tool(call.name, authorized=authorized)
-                if call.invalid_arguments is not None:
-                    raise ToolError(
-                        "not run: tool arguments must be a complete JSON object; "
-                        "submit the call again with valid arguments"
+            identity = {
+                "tool.name": call.name,
+                "tool.call_id": call.id,
+                "request_id": producing_request_id,
+            }
+            with self.recorder.span("tool.dispatch", attributes=identity) as dispatch:
+                if self.execution_budget is not None:
+                    self.execution_budget.reserve_tool()
+                try:
+                    tool = self._resolve_tool(call.name, authorized=authorized)
+                    if call.invalid_arguments is not None:
+                        raise ToolError(
+                            "not run: tool arguments must be a complete JSON object; "
+                            "submit the call again with valid arguments"
+                        )
+                    args = tool.validate_args(call.arguments)
+                except Exception as e:
+                    dispatch.close(
+                        "denied",
+                        decision="reject",
+                        reason="authorization"
+                        if call.name not in authorized
+                        else "invalid_arguments",
                     )
-                args = tool.validate_args(call.arguments)
-            except Exception as e:
-                msg = str(e) if isinstance(e, ToolError) else f"internal error: {e!r}"
-                return ToolResult(
-                    call_id=call.id, name=call.name, content=f"ERROR: {msg}", ok=False
-                )
-            event = ToolCallEvent(call.id, call.name, call.arguments)
-            decision = await self._hooks.before_tool(event)
-            if decision is not None and decision.action == "deny":
-                result = ToolResult(
-                    call_id=call.id,
-                    name=call.name,
-                    content=f"ERROR: blocked by plugin {decision.plugin}: {decision.reason}",
-                    ok=False,
-                )
-                return await self._hooks.after_tool(event, result)
-            try:
-                out = await tool.run(args, self.tool_ctx)
-                if isinstance(out, ToolOutput):
+                    msg = (
+                        str(e) if isinstance(e, ToolError) else f"internal error: {e!r}"
+                    )
+                    return ToolResult(
+                        call_id=call.id,
+                        name=call.name,
+                        content=f"ERROR: {msg}",
+                        ok=False,
+                    )
+                event = ToolCallEvent(call.id, call.name, call.arguments)
+                decision = await self._hooks.before_tool(event)
+                if decision is not None and decision.action == "deny":
+                    dispatch.close("denied", decision="deny", reason="plugin")
                     result = ToolResult(
                         call_id=call.id,
                         name=call.name,
-                        content=out.text,
-                        attachments=out.attachments,
-                        ok=True,
+                        content=f"ERROR: blocked by plugin {decision.plugin}: {decision.reason}",
+                        ok=False,
                     )
-                else:
+                    return await self._hooks.after_tool(event, result)
+                dispatch.attributes["decision"] = "allow"
+            self.recorder.event(
+                "policy.decision",
+                attributes={
+                    "tool.name": call.name,
+                    "decision": "allow",
+                    "policy": "profile_and_plugins",
+                },
+            )
+            with self.recorder.span("tool.execute", attributes=identity) as execution:
+                if self.recorder.content == "redacted":
+                    from pathlib import Path
+
+                    try:
+                        validated = args.model_dump(mode="json")
+                        for key in tool.workspace_path_args:
+                            if isinstance(validated.get(key), str):
+                                resolved = (
+                                    self.tool_ctx.workspace / Path(validated[key])
+                                ).resolve()
+                                validated[key] = (
+                                    str(
+                                        resolved.relative_to(
+                                            self.tool_ctx.workspace.resolve()
+                                        )
+                                    )
+                                    if resolved.is_relative_to(
+                                        self.tool_ctx.workspace.resolve()
+                                    )
+                                    else "[outside-workspace]"
+                                )
+                        self._capture_committed(
+                            "tool.arguments",
+                            {
+                                "span_id": execution.context.span_id,
+                                "arguments": validated,
+                                "workspace_path_args": tool.workspace_path_args,
+                            },
+                        )
+                    except Exception:
+                        # Unserializable plugin arguments remain executable;
+                        # their missing evidence cannot pass an argument grader.
+                        self._capture_committed(
+                            "tool.arguments",
+                            {"span_id": execution.context.span_id, "unavailable": True},
+                        )
+                try:
+                    out = await tool.run(args, self.tool_ctx)
+                    if isinstance(out, ToolOutput):
+                        result = ToolResult(
+                            call_id=call.id,
+                            name=call.name,
+                            content=out.text,
+                            attachments=out.attachments,
+                            ok=True,
+                        )
+                    else:
+                        result = ToolResult(
+                            call_id=call.id, name=call.name, content=out, ok=True
+                        )
+                except Exception as e:
+                    execution.attributes["error.type"] = type(e).__name__
+                    msg = (
+                        str(e) if isinstance(e, ToolError) else f"internal error: {e!r}"
+                    )
                     result = ToolResult(
-                        call_id=call.id, name=call.name, content=out, ok=True
+                        call_id=call.id,
+                        name=call.name,
+                        content=f"ERROR: {msg}",
+                        ok=False,
                     )
-            except Exception as e:
-                msg = str(e) if isinstance(e, ToolError) else f"internal error: {e!r}"
-                result = ToolResult(
-                    call_id=call.id, name=call.name, content=f"ERROR: {msg}", ok=False
+                execution.close(
+                    "ok" if result.ok else "error",
+                    ok=result.ok,
+                    output_bytes=len(result.content.encode(errors="replace")),
+                    attachments=len(result.attachments),
                 )
-            return await self._hooks.after_tool(event, result)
+                return await self._hooks.after_tool(event, result)
 
         if self.parallel_tools and len(calls) > 1:
             tasks = [asyncio.create_task(run_one(call)) for call in calls]

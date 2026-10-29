@@ -1,0 +1,36 @@
+# Native case schema. This entire file is evaluator-owned.
+# Only input.turns is sent to the agent; graders are never model context.
+schema_version: lingcore.eval.case.v1
+id: write-greeting
+revision: 1
+tags: [smoke, files]
+# Preflight fails, rather than the trial, if the candidate's ceiling lacks these.
+requires:
+  tools: [write_file, read_file]
+input:
+  turns:
+    - user: |
+        Create hello.txt containing exactly "Hello, LingCore!" followed by a
+        single newline. Read the file to verify it, then report completion.
+fixture:
+  workspace: empty
+graders:
+  - id: artifact
+    kind: artifact_text
+    required: true
+    path: hello.txt
+    equals: "Hello, LingCore!\n"
+  - id: tool_policy
+    kind: tool_policy
+    required: true
+    # Workspace-path arguments compare after resolution, so ./hello.txt and the
+    # absolute in-workspace path also match. forbid matches attempted calls,
+    # including ones rejected as outside the ceiling.
+    require:
+      - tool: write_file
+        arguments: {path: hello.txt}
+      - tool: read_file
+        arguments: {path: hello.txt}
+    causal_order:
+      - [write_file, read_file]
+    forbid: [run_shell, terminal_exec]

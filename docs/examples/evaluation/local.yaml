@@ -1,0 +1,42 @@
+# Executable with lingcore eval run; an unlocked native development suite.
+schema_version: lingcore.eval.suite.v1
+name: native-file-smoke
+track: development
+source:
+  kind: local
+  cases: [cases/write-greeting.yaml]
+  # Milestone 1 runs this suite unlocked; set required: true once locked
+  # plans (milestone 2) exist and results need to be comparable.
+  lock:
+    required: false
+    capture: [tasks, candidate, grader]
+agent:
+  kind: lingcore
+  profile: local-agent.yaml
+  tool_binding: builtin
+execution:
+  runner: native
+  repetitions: 2
+  concurrency: 1
+  infrastructure_retries: 0
+  state: fresh_per_execution
+  approval_policy: deny
+  limits:
+    wall_seconds: 60
+    model_requests: 8
+    tool_calls: 8
+    reported_tokens: 32000
+    usage_missing: stop
+    automatic_turns: 0
+trace:
+  required: true
+  content: redacted
+  max_bytes: 8388608
+  artifact_max_bytes: 1048576
+  exports: []
+grading:
+  authority: local
+  success: all_required
+report:
+  headline: mean_case_success
+  include: [coverage, rewards, failures, latency, usage, trace_health]

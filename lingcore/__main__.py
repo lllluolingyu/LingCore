@@ -61,8 +61,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("doctor", "telegram", "profile", "plugin"),
-        help="Run diagnostics, Telegram, or manage installed profile templates.",
+        choices=("doctor", "telegram", "profile", "plugin", "trace", "eval"),
+        help="Run diagnostics, Telegram, traces, evaluations, or profile management.",
     )
     parser.add_argument(
         "--workspace",
@@ -109,6 +109,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("use profile management as `lingcore profile init|list`")
     if args.command == "plugin":
         parser.error("use plugin management as `lingcore plugin list|info|new`")
+    if args.command == "trace":
+        parser.error("use trace inspection as `lingcore trace show <directory>`")
+    if args.command == "eval":
+        parser.error(
+            "use evaluation as `lingcore eval run <suite> --output <directory>`"
+        )
     if args.command == "telegram":
         conflicts = []
         if args.continue_:
@@ -522,6 +528,14 @@ async def _main_async(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] == "eval":
+        from lingcore.evaluation.runner import evaluation_command
+
+        return evaluation_command(raw_argv[1:])
+    if raw_argv and raw_argv[0] == "trace":
+        from lingcore.tracing.inspect import trace_command
+
+        return trace_command(raw_argv[1:])
     if raw_argv and raw_argv[0] == "profile":
         return _profile_command(raw_argv[1:])
     if raw_argv and raw_argv[0] == "plugin":

@@ -135,10 +135,17 @@ class ConfinedDirectory:
             ) from exc
 
     @contextmanager
-    def subdirectory(self, name: str) -> Iterator[ConfinedDirectory]:
+    def subdirectory(
+        self, name: str, *, create: bool = False, permissions: int = 0o755
+    ) -> Iterator[ConfinedDirectory]:
         """Open one no-follow child directory relative to this descriptor."""
         leaf = _leaf_name(name)
         self.ensure_anchored()
+        if create:
+            try:
+                os.mkdir(leaf, permissions, dir_fd=self._fd)
+            except FileExistsError:
+                pass
         try:
             fd = os.open(leaf, self._flags, dir_fd=self._fd)
         except OSError as exc:
@@ -393,7 +400,11 @@ class ConfinedLockFile:
 
 @contextmanager
 def confined_directory(
-    base: Path, rel: str | Path = ".", *, create: bool = False
+    base: Path,
+    rel: str | Path = ".",
+    *,
+    create: bool = False,
+    permissions: int = 0o755,
 ) -> Iterator[ConfinedDirectory]:
     """Open a directory below ``base`` without following intermediate links.
 
@@ -413,7 +424,7 @@ def confined_directory(
         for part in parts:
             if create:
                 try:
-                    os.mkdir(part, 0o755, dir_fd=fd)
+                    os.mkdir(part, permissions, dir_fd=fd)
                 except FileExistsError:
                     pass
             try:

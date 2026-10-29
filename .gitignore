@@ -221,6 +221,7 @@ style.css
 /profiles/*/calendar.ics*
 /profiles/*/workspace/
 /profiles/*/.lingcore/
+/profiles/*/traces/
 
 # One-off local implementation guides may contain live provider credentials.
 /temporary-guide.md

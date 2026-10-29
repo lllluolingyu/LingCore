@@ -310,8 +310,18 @@ class HookRunner:
     ) -> Any:
         if getattr(type(instance), hook) is getattr(PluginHooks, hook):
             return None
-        async with asyncio.timeout(factory.hook_timeout):
-            return await getattr(instance, hook)(*args)
+        from lingcore.tracing import NoopRecorder
+
+        recorder = self._ctx.recorder or NoopRecorder()
+        with recorder.span(
+            "plugin.hook", attributes={"plugin": factory.name, "hook": hook}
+        ) as span:
+            async with asyncio.timeout(factory.hook_timeout):
+                result = await getattr(instance, hook)(*args)
+                action = getattr(result, "action", None)
+                if isinstance(action, str):
+                    span.attributes["decision"] = action
+                return result
 
     async def start(self) -> None:
         async with self._lifecycle_lock:

@@ -762,6 +762,13 @@ class TelegramBridge:
             # all derived absolute files inherit that consent.
             session_updates["allow_absolute_path"] = True
         scoped.sessions = scoped.sessions.model_copy(update=session_updates)
+        if scoped.tracing.enabled:
+            scoped.tracing = scoped.tracing.model_copy(
+                update={
+                    "path": configured("traces"),
+                    "allow_absolute_path": absolute_state,
+                }
+            )
         # Profile-scoped files each user writes get a per-user path, like the
         # sessions database: the memory file and the calendar.
         for key, filename, tools in _PER_USER_FILES:

@@ -347,6 +347,20 @@ class SessionsCfg(BaseModel):
     allow_absolute_path: bool = False
 
 
+class TracingCfg(BaseModel):
+    """Optional private local journal; content is always opt-in."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    path: str = "traces"
+    allow_absolute_path: bool = False
+    content: Literal["metadata", "redacted"] = "metadata"
+    queue_capacity: int = Field(default=4096, ge=1, le=65536)
+    flush_interval_seconds: float = Field(default=1, gt=0, le=60)
+    max_bytes: int = Field(default=67108864, ge=4096)
+    artifact_max_bytes: int = Field(default=4194304, ge=256)
+
+
 class AgentProfile(BaseModel):
     """A complete, validated agent definition loaded from YAML.
 
@@ -391,6 +405,7 @@ class AgentProfile(BaseModel):
     guardrail: GuardrailCfg = Field(default_factory=GuardrailCfg)
     sessions: SessionsCfg = Field(default_factory=SessionsCfg)
     media_fallback: MediaFallbackCfg = Field(default_factory=MediaFallbackCfg)
+    tracing: TracingCfg = Field(default_factory=TracingCfg)
 
     @field_validator("plugins")
     @classmethod

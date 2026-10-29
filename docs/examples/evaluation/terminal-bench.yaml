@@ -1,0 +1,62 @@
+# PROPOSED schema. Not executable by LingCore v0.5.1.
+schema_version: lingcore.eval.suite.v1
+name: terminal-bench-4-development
+track: development
+
+source:
+  kind: harbor
+  dataset: terminal-bench/terminal-bench@4.0.0
+  release_source:
+    repository: https://github.com/harbor-framework/terminal-bench
+    commit: 452bf305c6daa62fc59061d22133a7cbc7c1572e
+  selection:
+    policy: sorted_capability_subset
+    count: 3
+    required:
+      os: linux
+      gpu_count: 0
+      containers: 1
+      # Must map to documented task.toml metadata; unverified for 4.0.
+      interaction: command
+    unsupported: record_exclusion
+  lock:
+    required: true
+    capture: [tasks, images, verifier, harness, adapter, candidate]
+
+agent:
+  kind: lingcore
+  profile: terminal-agent.yaml
+  tool_binding: harbor-terminal-v1
+
+execution:
+  runner: harbor
+  environment: docker
+  resource_policy: task
+  repetitions: 1
+  concurrency: 1
+  infrastructure_retries: 0
+  state: fresh_per_execution
+  approval_policy: benchmark_environment
+  limits:
+    wall_seconds: 900
+    model_requests: 100
+    tool_calls: 200
+    reported_tokens: 1000000
+    usage_missing: stop
+    automatic_turns: 0
+
+trace:
+  required: true
+  content: redacted
+  max_bytes: 67108864
+  artifact_max_bytes: 4194304
+  exports: [atif]
+
+grading:
+  authority: harbor
+  reward_policy: upstream_locked
+  preserve_raw_results: true
+
+report:
+  headline: development_only
+  include: [coverage, rewards, failures, latency, usage, trace_health]

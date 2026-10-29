@@ -281,7 +281,8 @@ def _read_large_window(
         "or PDF it attaches the file so the model can view it natively (degrading "
         "to extracted/described text when the model cannot). Use pdf2md instead "
         "to read a PDF as cheap markdown text."
-    )
+    ),
+    workspace_path_args=("path",),
 )
 async def read_file(args: ReadArgs, ctx: ToolContext) -> str | ToolOutput:
     full = _resolve(ctx, args.path)
@@ -356,7 +357,10 @@ class WriteArgs(BaseModel):
     content: str = Field(description="Full UTF-8 content to write.")
 
 
-@tool(description="Create or overwrite a UTF-8 text file relative to the workspace.")
+@tool(
+    description="Create or overwrite a UTF-8 text file relative to the workspace.",
+    workspace_path_args=("path",),
+)
 async def write_file(args: WriteArgs, ctx: ToolContext) -> str:
     base = ctx.workspace.resolve()
     full = _resolve(ctx, args.path)
@@ -440,7 +444,10 @@ class ListArgs(BaseModel):
     path: str = Field(default=".", description="Directory relative to workspace.")
 
 
-@tool(description="List entries of a directory relative to the workspace root.")
+@tool(
+    description="List entries of a directory relative to the workspace root.",
+    workspace_path_args=("path",),
+)
 async def list_dir(args: ListArgs, ctx: ToolContext) -> str:
     full = _resolve(ctx, args.path)
     if not full.is_dir():

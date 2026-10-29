@@ -826,12 +826,21 @@ commitments.
    - Later for daily: a documented Telegram setup and `knowledge` over saved
      notes.
 
-5. **Next — Tracing and evaluations**
-   - Trace model requests, tools, retrieval, retries, compaction, confirmation
-     decisions, token usage and latency, excluding sensitive content by default.
-     Start with local structured traces and an optional OpenTelemetry exporter.
-   - Add `lingcore eval` for profile datasets, tool-trajectory assertions,
-     quality checks, latency/cost reporting and regression comparisons.
+5. **In progress — Tracing and evaluations**
+   - Implemented milestone 1: opt-in local JSONL traces, request usage,
+     tool/hook/approval timings, bounded redacted content, and
+     `lingcore trace show <run-directory>`. Tracing remains disabled by default.
+   - Implemented: execution budgets, typed outcomes, separate profile state,
+     a scripted frontend, and `lingcore eval run <suite> --output <directory>`
+     with fresh state, deterministic artifact/tool-policy graders, and per-case
+     reports. Native runs are unlocked development evaluations.
+   - Next: locked plans, the Harbor adapter, regression comparisons, and
+     optional exporters. Architecture and implementation sequence:
+     [Tracing and evaluation design](docs/tracing-and-evaluation.md), with
+     [public Terminal-Bench 4.0 through Harbor](docs/evaluation-terminal-bench.md)
+     and [example suite configurations](docs/examples/evaluation/README.md).
+     The native example is executable; Harbor and later-milestone APIs remain
+     proposed.
 
 6. **Later — Durable workflows**
    - Implemented in LingChat/AgentGUI: server-owned sessions keep turns and
