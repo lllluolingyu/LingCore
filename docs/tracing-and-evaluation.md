@@ -1,19 +1,27 @@
 # Tracing and evaluation design
 
-Status: milestone 1 implemented on 2026-10-29; the broader design was reviewed
-against LingCore v0.5.1 on 2026-10-28. Milestone 2 (locked plans) is planned
-below, and its step 2.1 is done. Harbor, ATIF/OpenTelemetry export, comparison,
-retrieval-specific instrumentation, and later-milestone APIs remain proposals.
+Status: milestones 1 and 2 implemented through 2026-10-30; the broader design
+was reviewed against LingCore v0.5.1 on 2026-10-28. Harbor, ATIF/OpenTelemetry
+export, comparison, retrieval-specific instrumentation, and later-milestone APIs
+remain proposals.
 
-The current native subset supports sequential local cases with empty workspace
-fixtures, scripted text turns, `artifact_text`, and `tool_policy`. It refuses
-locked plans, external sources, exports, infrastructure retries, and concurrent
-execution. Unknown costs remain null. Output-allowance capping, trace deletion,
-and arbitrary fixture copying are not exposed by this subset.
+The current native subset supports sequential local cases with fresh workspace
+fixtures (optionally seeded by `fixture.files`), scripted text turns,
+`artifact_text`, and `tool_policy`. It supports locked plans, resume,
+infrastructure retries, and regrading saved evidence. External sources, exports,
+and concurrent execution remain proposals. Unknown costs remain null.
+Output-allowance capping, trace deletion, and arbitrary fixture copying are not
+exposed by this subset.
 
 ```sh
 lingcore eval run docs/examples/evaluation/local.yaml --output /tmp/lingcore-evals
+lingcore eval resolve docs/examples/evaluation/local.yaml --lock local.lock.json
+lingcore eval validate --lock local.lock.json
+lingcore eval run --lock local.lock.json --output /tmp/lingcore-evals
+lingcore eval resume /tmp/lingcore-evals/<job-id>
+lingcore eval regrade /tmp/lingcore-evals/<job-id>
 lingcore eval report /tmp/lingcore-evals/<job-id>
+lingcore eval report /tmp/lingcore-evals/<job-id> --grades latest
 lingcore trace show /tmp/lingcore-evals/<job-id>/executions/<execution-id>/trace
 ```
 
@@ -60,7 +68,8 @@ same result and grading model without Harbor.
 | Interchange | Export ATIF for trajectories and optionally OpenTelemetry for operational spans |
 | Dependencies | No Harbor or OpenTelemetry imports in the base runtime |
 | First milestone | Local traces, bounded headless execution, and a minimal native evaluator, delivered as small independently shippable steps |
-| Later milestones | Locked plans, the Harbor adapter, repeated-run comparison, and export/frontend polish |
+| Second milestone | Measured offline identity, locked plans, append-only job ledger, resume, infrastructure retries, and regrade |
+| Later milestones | The Harbor adapter, repeated-run comparison, and export/frontend polish |
 
 Durable resumption of arbitrary tool execution, distributed orchestration,
 automatic prompt optimization, and a hosted trace service are later work.
@@ -603,7 +612,7 @@ retry policy. A retryable infrastructure execution replaces no historical
 record. Only the declared policy selects a valid execution for the same trial;
 agent failure or a poor reward never triggers another chance.
 
-Proposed commands:
+Implemented native commands:
 
 ```sh
 lingcore eval run docs/examples/evaluation/local.yaml --output /tmp/lingcore-evals  # milestone 1, unlocked
@@ -613,8 +622,14 @@ lingcore eval run --lock /tmp/local.lock.json --output /tmp/lingcore-evals
 lingcore eval resume /tmp/lingcore-evals/<job-id>
 lingcore eval regrade /tmp/lingcore-evals/<job-id>
 lingcore eval report /tmp/lingcore-evals/<job-id>
-lingcore eval compare <baseline-job> <candidate-job>
+lingcore eval report /tmp/lingcore-evals/<job-id> --grades latest
 lingcore trace show <run-directory>
+```
+
+Later commands:
+
+```sh
+lingcore eval compare <baseline-job> <candidate-job>
 lingcore trace export <run-directory> --format atif --output <trajectory.json>
 ```
 
@@ -624,8 +639,9 @@ unlocked development plan; it is refused when the suite sets
 `lock.required: true`, and its results are never benchmark-comparable.
 Exit codes: 0 = complete and declared gates pass; 1 = complete with valid task
 failures/gate failures; 2 = invalid or incomplete evaluation/configuration, or
-lock drift; 130 = user interruption. `resolve` and `validate` exit 0 or 2.
-Artifacts are written for every exit path.
+lock drift; 130 = user interruption. `resolve` and `validate` also return 130
+on interruption. Commands print the job path whenever one exists; locked
+preflight failure creates no job.
 
 Resume schedules only unfinished planned trials from the same lock. Previously
 running executions become interrupted. An interruption produced no grade, so
@@ -651,7 +667,7 @@ Steps 1.7 and 1.8 need the earlier steps.
 All eight steps below are implemented. Deterministic tests cover the local
 sink, runtime request/turn/tool lifecycle, state separation, execution driver,
 and the native example. The remaining sections describe the broader intended
-contract as well as the implemented milestone-one subset noted above.
+contract as well as the implemented native subset noted above.
 
 1. **1.1 Trace records and local sink.** Add `lingcore/tracing/{models,
    context,recorder,local}.py`: IDs, the envelope, the no-op recorder,
@@ -736,9 +752,9 @@ Decisions:
 - Interruption is not an infrastructure retry; see
   [Reproducibility and CLI](#reproducibility-and-cli).
 
-Step 2.1 is done. Steps 2.2 and 2.3 build the lock, and 2.4 needs both.
-Steps 2.5 and 2.6 need 2.4. Step 2.7 needs only 2.2 and can proceed in parallel
-with 2.5 and 2.6. Step 2.8 closes the milestone.
+All eight steps are implemented. The local example's locked lifecycle, killed
+worker recovery, grade-independent selection, regrading without an Agent, and
+CLI exit paths are covered by deterministic tests.
 
 1. **2.1 Milestone 1 follow-ups (done).** Fix what locks and resume depend on.
    - Narrow the known-secret set to the values of variables named by credential
@@ -777,8 +793,9 @@ with 2.5 and 2.6. Step 2.8 closes the milestone.
    flag, and pinned dependency versions. Grader kinds carry a version.
    Resolution refuses a resolved configuration that contains a known secret
    value, which invariant 4 already forbids. Accept: two resolutions of
-   unchanged inputs give identical digests; each input change moves exactly its
-   own digest; no model call, network access, or secret value.
+   unchanged inputs give identical digests; each input change moves its own
+   digest and the aggregates that contain it, while independent sections stay
+   stable; no model call, network access, or secret value.
 3. **2.3 Lock file, `eval resolve`, and `eval validate`.** Add
    `lingcore/evaluation/lock.py`. The lock records suite and case paths
    relative to the lock file with their digests, candidate and runtime identity,
@@ -855,7 +872,8 @@ with 2.5 and 2.6. Step 2.8 closes the milestone.
    [Harbor contract](evaluation-terminal-bench.md), validate ATIF against the
    pinned package, run a synthetic harness fixture and then a declared small
    Terminal-Bench subset. Accept: verifier failure is distinguished from
-   reward zero.
+   reward zero. Steps, formats, and tests are in the
+   [Harbor adapter implementation plan](evaluation-harbor-plan.md).
 4. **Regression comparison.** Add repeated runs, paired reports, uncertainty
    estimates, `eval compare`, and content-aware retrieval/calendar cases. Keep
    live-model jobs opt-in with explicit resource and token limits.

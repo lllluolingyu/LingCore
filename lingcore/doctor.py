@@ -492,6 +492,12 @@ def _profile_requirements(
     return requirements, example_names, config_errors
 
 
+def required_environment_names(profile: AgentProfile) -> frozenset[str]:
+    """Runtime environment names without values, clients, or writable state."""
+    requirements, _, _ = _profile_requirements(profile)
+    return frozenset(requirements)
+
+
 def required_example_names(profile: AgentProfile) -> frozenset[str]:
     """Names a profile's ``.env.example`` must document."""
     _, example_names, _ = _profile_requirements(profile)

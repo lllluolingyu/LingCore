@@ -21,7 +21,10 @@ def inspect_trace(
     directory: Path, *, max_bytes: int = 128 * 1024 * 1024
 ) -> TraceInspection:
     warnings: list[str] = []
-    with confined_directory(directory) as root:
+    directory = directory.absolute()
+    with confined_directory(
+        Path(directory.anchor), directory.relative_to(directory.anchor)
+    ) as root:
         data = root.read_regular("events.jsonl", max_bytes=max_bytes)
         health = (
             TraceHealth.model_validate_json(

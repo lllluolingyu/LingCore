@@ -16,7 +16,8 @@ from lingcore.evaluation.models import (
     ToolAssertion,
     ToolPolicy,
 )
-from lingcore.paths import PathEscapeError, confined_directory
+from lingcore.evaluation.storage import directory as confined
+from lingcore.paths import PathEscapeError
 from lingcore.tracing.inspect import TraceInspection
 
 
@@ -41,7 +42,7 @@ class Grader(Protocol):
 def collect_artifact(workspace: Path, spec: ArtifactText) -> Artifact:
     path = Path(spec.path)
     try:
-        with confined_directory(workspace, path.parent) as directory:
+        with confined(workspace / path.parent) as directory:
             data = directory.read_regular(path.name, max_bytes=spec.max_bytes)
         return Artifact(spec.id, data)
     except FileNotFoundError:
@@ -65,7 +66,7 @@ def captured_content(
         ):
             continue
         try:
-            with confined_directory(directory, "artifacts") as root:
+            with confined(directory / "artifacts") as root:
                 result.append(
                     root.read_regular(artifact_id + ".json", max_bytes=max_bytes)
                 )
@@ -81,6 +82,7 @@ def _result(
         id=spec.id,
         kind=spec.kind,
         required=spec.required,
+        version=GRADERS[spec.kind].version,
         status="not_evaluable" if passed is None else "valid",
         passed=passed,
         score=None if passed is None else float(passed),
@@ -89,6 +91,9 @@ def _result(
 
 
 class ArtifactTextGrader:
+    kind = "artifact_text"
+    version = 1
+
     def __init__(self, spec: ArtifactText) -> None:
         self.spec = spec
 
@@ -141,6 +146,9 @@ def _matches(assertion: ToolAssertion, invocation: Invocation) -> bool:
 
 
 class ToolPolicyGrader:
+    kind = "tool_policy"
+    version = 1
+
     def __init__(self, spec: ToolPolicy) -> None:
         self.spec = spec
 
@@ -227,6 +235,28 @@ class ToolPolicyGrader:
             ):
                 return _result(self.spec, False, "causal_order_failed")
         return _result(self.spec, True)
+
+
+GRADERS: dict[str, type[ArtifactTextGrader] | type[ToolPolicyGrader]] = {
+    "artifact_text": ArtifactTextGrader,
+    "tool_policy": ToolPolicyGrader,
+}
+
+
+def evidence_needs(
+    specs: list[GraderSpec], extra: list[str] | None = None
+) -> dict[str, Any]:
+    return {
+        "artifacts": sorted(
+            {Path(path).as_posix() for path in extra or ()}
+            | {Path(g.path).as_posix() for g in specs if isinstance(g, ArtifactText)}
+        ),
+        "content": any(
+            isinstance(g, ToolPolicy) and any(a.arguments for a in g.require)
+            for g in specs
+        ),
+        "metadata": any(isinstance(g, ToolPolicy) for g in specs),
+    }
 
 
 async def grade(specs: list[GraderSpec], evidence: TrialEvidence) -> Grade:

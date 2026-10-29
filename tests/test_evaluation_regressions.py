@@ -327,7 +327,7 @@ async def test_locked_suite_reports_actionable_safe_reason(
         suite, tmp_path / "out", client_factory=greeting_client
     )
     assert "locked plan" in report["configuration_error"]
-    assert "milestone 2" in report["configuration_error"]
+    assert "eval run --lock" in report["configuration_error"]
     from lingcore.__main__ import main
 
     assert main(["eval", "report", str(job)]) == 2

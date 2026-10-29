@@ -1,12 +1,11 @@
-# Executable with lingcore eval run; an unlocked native development suite.
+# Executable directly or with lingcore eval resolve followed by eval run --lock.
 schema_version: lingcore.eval.suite.v1
 name: native-file-smoke
 track: development
 source:
   kind: local
   cases: [cases/write-greeting.yaml]
-  # Milestone 1 runs this suite unlocked; set required: true once locked
-  # plans (milestone 2) exist and results need to be comparable.
+  # Keep both workflows available. Set required: true to enforce a locked run.
   lock:
     required: false
     capture: [tasks, candidate, grader]

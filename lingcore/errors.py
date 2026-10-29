@@ -8,6 +8,12 @@ and ``MaxIterationsError`` propagate to the caller/frontend.
 
 from __future__ import annotations
 
+from typing import Literal
+
+ProviderErrorCategory = Literal[
+    "transient", "request", "auth", "configuration", "interrupted", "unclassified"
+]
+
 
 class LingCoreError(Exception):
     """Base class for all LingCore-raised errors."""
@@ -63,11 +69,15 @@ class LLMStreamError(LingCoreError):
         retryable: bool,
         finish_reason: str | None = None,
         dropped_tool_calls: int = 0,
+        category: ProviderErrorCategory | None = None,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.finish_reason = finish_reason
         self.dropped_tool_calls = dropped_tool_calls
+        self.category: ProviderErrorCategory = category or (
+            "interrupted" if retryable else "unclassified"
+        )
 
 
 INCOMPLETE_FINISH_REASONS = frozenset({"length", "model_context_window_exceeded"})

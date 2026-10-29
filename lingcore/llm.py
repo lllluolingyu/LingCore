@@ -48,11 +48,39 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-from openai import AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    AuthenticationError,
+    PermissionDeniedError,
+)
 
-from lingcore.errors import INCOMPLETE_FINISH_REASONS, LLMStreamError
+from lingcore.errors import (
+    INCOMPLETE_FINISH_REASONS,
+    LLMStreamError,
+    ProviderErrorCategory,
+)
 from lingcore.message import NATIVE_MODALITIES, Message, ToolCall
 from lingcore.usage import UsageSink, usage_from_openai
+
+
+def _open_error_category(error: Exception) -> ProviderErrorCategory:
+    if isinstance(error, (AuthenticationError, PermissionDeniedError)):
+        return "auth"
+    if isinstance(error, (APIConnectionError, APITimeoutError)):
+        return "transient"
+    if isinstance(error, APIStatusError):
+        if error.status_code == 404:
+            return "configuration"
+        return (
+            "transient"
+            if error.status_code in {408, 409, 429} or error.status_code >= 500
+            else "request"
+        )
+    return "unclassified"
+
 
 # Connect phase fails fast even when ``timeout`` (the read/inactivity window) is
 # generous — a black-hole host shouldn't hold a slot for the full read window.
@@ -238,7 +266,9 @@ class LLMClient:
             stream = await self._open_stream(wire, tools)
         except Exception as e:
             raise LLMStreamError(
-                f"request failed: {_describe(e)}", retryable=False
+                f"request failed: {_describe(e)}",
+                retryable=False,
+                category=_open_error_category(e),
             ) from e
 
         accumulators: dict[int, _ToolCallAccumulator] = {}

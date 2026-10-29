@@ -6,6 +6,19 @@ This document accompanies the
 No benchmark was run, no score is claimed, and the proposed LingCore commands
 and adapter package are not implemented yet.
 
+The [milestone 3 implementation plan](evaluation-harbor-plan.md) (2026-10-30)
+supersedes parts of this design:
+- Harbor runs in its own Python environment, with a bridge that never imports
+  LingCore, instead of an in-process adapter.
+- The agent loop and model credentials stay in the LingCore process.
+- LingCore owns retries, and Harbor's retries stay off.
+- Regrades go through Harbor's own regrade.
+- Task selection uses only Harbor-parsed task metadata; `interaction` is no
+  longer a selection key.
+- The typed `ExecutionOutcome` and provider error categories already exist.
+
+Where the two documents differ, the plan wins.
+
 ## Public benchmark and pinned baseline
 
 Terminal-Bench measures agents completing tasks in terminal environments.

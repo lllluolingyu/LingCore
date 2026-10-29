@@ -27,12 +27,41 @@ from copy import deepcopy
 from itertools import groupby
 from typing import Any
 
-from anthropic import AsyncAnthropic, Timeout
+from anthropic import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncAnthropic,
+    AuthenticationError,
+    PermissionDeniedError,
+    Timeout,
+)
 
-from lingcore.errors import INCOMPLETE_FINISH_REASONS, LLMStreamError
+from lingcore.errors import (
+    INCOMPLETE_FINISH_REASONS,
+    LLMStreamError,
+    ProviderErrorCategory,
+)
 from lingcore.llm import LLMChunk, _close_quietly, _describe, _ToolCallAccumulator
 from lingcore.message import NATIVE_MODALITIES, Message
 from lingcore.usage import UsageSink
+
+
+def _open_error_category(error: Exception) -> ProviderErrorCategory:
+    if isinstance(error, (AuthenticationError, PermissionDeniedError)):
+        return "auth"
+    if isinstance(error, (APIConnectionError, APITimeoutError)):
+        return "transient"
+    if isinstance(error, APIStatusError):
+        if error.status_code == 404:
+            return "configuration"
+        return (
+            "transient"
+            if error.status_code in {408, 409, 429} or error.status_code >= 500
+            else "request"
+        )
+    return "unclassified"
+
 
 # Connect phase fails fast even when timeout is generous
 _MAX_CONNECT_SECONDS = 10.0
@@ -220,7 +249,9 @@ class AnthropicLLMClient:
             )
         except Exception as e:
             raise LLMStreamError(
-                f"request failed: {_describe(e)}", retryable=False
+                f"request failed: {_describe(e)}",
+                retryable=False,
+                category=_open_error_category(e),
             ) from e
 
         accumulators: dict[int, _ToolCallAccumulator] = {}

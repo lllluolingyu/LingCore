@@ -833,8 +833,13 @@ commitments.
    - Implemented: execution budgets, typed outcomes, separate profile state,
      a scripted frontend, and `lingcore eval run <suite> --output <directory>`
      with fresh state, deterministic artifact/tool-policy graders, and per-case
-     reports. Native runs are unlocked development evaluations.
-   - Next: locked plans, the Harbor adapter, regression comparisons, and
+     reports. Direct suite runs are unlocked development evaluations.
+   - Implemented milestone 2: offline `eval resolve` / `eval validate`,
+     `eval run --lock`, immutable attempt records, `eval resume`, bounded
+     infrastructure retries, and `eval regrade` over saved evidence. Reports
+     include selected and all-attempt usage. See
+     [locked evaluation plans](docs/evaluation-locked-plans.md).
+   - Next: the Harbor adapter, regression comparisons, and
      optional exporters. Architecture and implementation sequence:
      [Tracing and evaluation design](docs/tracing-and-evaluation.md), with
      [public Terminal-Bench 4.0 through Harbor](docs/evaluation-terminal-bench.md)

@@ -303,6 +303,23 @@ class Agent:
         """Back-compatible mutation of the v0.1 static prompt attribute."""
         self.composer = StaticComposer(value)
 
+    async def initial_system_prompt(self) -> str:
+        """Compose the turn-0 prompt without starting hooks or a model request."""
+        return await self.composer.compose(
+            ComposeContext(
+                user_message="",
+                turn_index=0,
+                session_id=None,
+                active_skills=tuple(self.skill_state.active)
+                if self.skill_state
+                else (),
+            )
+        )
+
+    def ceiling_tool_schemas(self) -> list[dict[str, Any]]:
+        """Read-only schemas for every authorized binding, including gated tools."""
+        return self.tools.schemas()
+
     @property
     def turn_pending_finalization(self) -> bool:
         """Whether a cancelled checkpoint is ready for frontend finalization.
@@ -1518,7 +1535,7 @@ class Agent:
                         self.execution_outcome = ExecutionOutcome(
                             status="failed",
                             cause="provider",
-                            provider_error_category="stream_error",
+                            provider_error_category=e.category,
                         )
                         await self._turn_end(
                             TurnEndEvent(

@@ -96,6 +96,8 @@ async def test_supplied_local_example_runs_with_fake_client_and_fresh_state(
 
     def assemble(cls, *args, **kwargs):
         agent = original(cls, *args, **kwargs)
+        if kwargs.get("execution_budget") is None:
+            return agent  # offline identity assembly is not a trial
         assert not (agent.tool_ctx.workspace / "hello.txt").exists()
         seen_workspaces.append(agent.tool_ctx.workspace)
         return agent
@@ -103,7 +105,18 @@ async def test_supplied_local_example_runs_with_fake_client_and_fresh_state(
     monkeypatch.setattr(Agent, "from_profile", classmethod(assemble))
     job, report = await run_suite(EXAMPLE, tmp_path, client_factory=factory)
     assert exit_code(report) == 0
-    assert report["coverage"] == {
+    assert {
+        key: report["coverage"][key]
+        for key in (
+            "planned",
+            "started",
+            "valid",
+            "invalid",
+            "unsupported",
+            "cancelled",
+            "missing",
+        )
+    } == {
         "planned": 2,
         "started": 2,
         "valid": 2,
@@ -131,7 +144,7 @@ async def test_supplied_local_example_runs_with_fake_client_and_fresh_state(
     )
 
 
-async def test_metadata_only_argument_assertion_is_not_evaluable(tmp_path, monkeypatch):
+async def test_metadata_only_argument_assertion_fails_preflight(tmp_path, monkeypatch):
     example_env(monkeypatch)
     suite_path = copied_suite(
         tmp_path, suite_changes={"trace": {"required": True, "content": "metadata"}}
@@ -140,10 +153,8 @@ async def test_metadata_only_argument_assertion_is_not_evaluable(tmp_path, monke
         suite_path, tmp_path / "out", client_factory=greeting_client
     )
     assert exit_code(report) == 2
-    result = report["cases"][0]["results"][0]
-    graders = {g["id"]: g for g in result["grade"]["graders"]}
-    assert graders["artifact"]["passed"] is True
-    assert graders["tool_policy"]["status"] == "not_evaluable"
+    assert "redacted" in report["configuration_error"]
+    assert not (job / "executions").exists()
 
 
 async def test_forbidden_call_outside_ceiling_is_still_a_valid_failure(
@@ -272,8 +283,8 @@ def test_cli_eval_and_trace_commands(tmp_path, monkeypatch, capsys):
 
     original = runner.run_suite
 
-    async def scripted(path, output):
-        return await original(path, output, client_factory=greeting_client)
+    async def scripted(path, output, **kwargs):
+        return await original(path, output, client_factory=greeting_client, **kwargs)
 
     monkeypatch.setattr(runner, "run_suite", scripted)
     assert main(["eval", "run", str(EXAMPLE), "--output", str(tmp_path)]) == 0

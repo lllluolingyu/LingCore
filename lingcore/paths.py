@@ -359,6 +359,11 @@ class ConfinedDirectory:
             dst_dir_fd=self._fd,
         )
 
+    def sync(self) -> None:
+        """Persist directory entries through the anchored descriptor."""
+        self.ensure_anchored()
+        os.fsync(self._fd)
+
 
 class ConfinedLockFile:
     """A persistent regular-file lock anchored to its opened parent."""
@@ -405,13 +410,15 @@ def confined_directory(
     *,
     create: bool = False,
     permissions: int = 0o755,
+    durable: bool = False,
 ) -> Iterator[ConfinedDirectory]:
     """Open a directory below ``base`` without following intermediate links.
 
     When ``create`` is true, missing components are created one at a time
     relative to the already-open parent.  A concurrent symlink insertion loses
     either the ``mkdir`` race or the subsequent ``O_NOFOLLOW`` open and is
-    refused; it is never traversed.
+    refused; it is never traversed. ``durable`` syncs each newly created
+    directory's parent before continuing.
     """
     parts = _relative_parts(rel)
     flags = _dir_flags()
@@ -425,6 +432,8 @@ def confined_directory(
             if create:
                 try:
                     os.mkdir(part, permissions, dir_fd=fd)
+                    if durable:
+                        os.fsync(fd)
                 except FileExistsError:
                     pass
             try:

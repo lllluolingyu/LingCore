@@ -1,6 +1,6 @@
 # Milestone 2: locked evaluation plans
 
-Status: implementation plan, 2026-10-30; step 2.1 is done. It expands
+Status: steps 2.1–2.8 implemented, 2026-10-30. It expands
 [milestone 2 of the tracing and evaluation design](tracing-and-evaluation.md#milestone-2-locked-plans)
 and builds on the milestone 1 native evaluator in `lingcore/evaluation/`.
 
@@ -65,10 +65,10 @@ quick development, and its results stay `locked: false`.
 - **Identity is always computed.** Resolution, locked runs, and unlocked runs
   all derive the same identity. Only locked runs enforce it, but an unlocked
   job still records it in `plan.json`, so it can be regraded.
-- **Digests cover parsed values, not file bytes.** Suite and case digests use
-  the validated model with defaults filled in. A comment or reordered key is
-  therefore not drift, while a changed default is. Source files that assembly
-  reads verbatim (prompt layers, skills, commands) are hashed as bytes.
+- **Digests cover parsed values, not file bytes.** Suite, case, and profile
+  YAML digests use the validated model with defaults filled in. A comment or
+  reordered key is therefore not drift, while a changed default is. Source files
+  that assembly reads verbatim (prompt layers, skills, commands) are hashed as bytes.
 - **Candidate identity is measured.** Resolution assembles the Agent offline
   and hashes what the model would actually receive: the initial system prompt
   and every tool schema in the ceiling.
@@ -77,9 +77,9 @@ quick development, and its results stay `locked: false`.
   evaluator-only graders. `run` refuses a change to either, and `regrade`
   refuses only an input change.
 - **Two lock digests.** `digest` covers the whole file for integrity.
-  `plan_digest` covers only identity, excluding paths, timestamps, and
-  limitations. Moving a suite directory or re-resolving unchanged inputs
-  therefore keeps `plan_digest`.
+  `plan_digest` covers only identity, excluding locator paths, timestamps,
+  limitations, informational git metadata, and credential availability. Moving
+  a suite directory or re-resolving unchanged inputs keeps `plan_digest`.
 - **Interrupted executions are replaced on resume** without using up the
   infrastructure retry allowance, and are counted in every report.
 - **Cleanup failure is never retried.** An agent can make cleanup fail, for
@@ -172,10 +172,10 @@ Section rules:
 | `candidate.model` | Backend, resolved model ID, endpoint. The endpoint is the URL host and port, or the suite's `agent.endpoint_alias`; query, userinfo, and path are dropped because proxies put tokens there |
 | `candidate.prompt_digest` | Turn-0 system prompt from offline assembly with an empty user message |
 | `candidate.tools` | `Tool.json_schema()` digest per ceiling tool, plus the initially enabled names |
-| `candidate.sources` | Bytes of every source file assembly reads: the profile YAML, `world.md`/`role.md`/`workflow.md`, `persona.include`, engaged profile-local skill directories, `commands/`, and engaged profile-local plugin roots. Installed plugins record their distribution version and root digest; bundled ones are covered by the runtime |
-| `candidate.credentials` | Names from `api_key_env`, `token_env`, and retrieval provider settings, and whether each is set. Never values |
+| `candidate.sources` | Semantic digest of the profile YAML, plus bytes of `world.md`/`role.md`/`workflow.md`, `persona.include`, offerable/engaged profile-local skill directories, `commands/`, and engaged profile-local plugin roots. Installed plugins record their distribution version and root digest; bundled ones are covered by the runtime |
+| `candidate.credentials` | Required environment names from the profile and engaged plugins, and whether each is set. Never values. Availability is informational and excluded from identity, so credentials can be provisioned after resolving |
 | `runtime.package_digest` | Sorted `(relative path, file digest)` pairs for every file under the installed `lingcore` package, excluding `__pycache__` |
-| `runtime.git` | Best effort, informational: commit and dirty flag when the package lives in a git checkout. `null` otherwise. The package digest is what detects drift |
+| `runtime.git` | Best effort, informational: commit and dirty flag only when the git top-level is the package's parent directory. An installation inside another project's venv records `null`. The package digest is what detects drift |
 | `runtime.dependencies` | Installed versions of the distributions `lingcore` requires |
 | `execution`, `trace`, `grading` | Validated suite policy with defaults filled in |
 | `trials` | Explicit ordered list; resume and reports use it, never re-derive it |
@@ -200,16 +200,22 @@ made on a machine without keys. `run` and `resume` require them.
     evidence.json           # written at collection: what was preserved
     artifacts/<digest>.bin  # collected artifact bytes, content-addressed
     result.json             # written at the end; never modified
-    interrupted.json        # written by resume when result.json is missing
+    interrupted.json        # written by resume when result.json is missing/unreadable
+    interrupted-<id>.json   # new recovery marker if an earlier marker is damaged
+    scratch-cleanup.json    # removed/missing/refused/failed; recovery uses a new suffix
     grades/<grade-set>.json # one per regrade pass
   grade-sets/<grade-set>.json
   report.json               # derived view of the original grade set; atomically replaced
   reports/<grade-set>.json  # derived view per regrade pass
+  quarantined/<execution-id>/issue.json # persistent unassigned marker; originals stay put
 ```
 
 Every write goes through `confined_directory` with private permissions.
 Immutable records use exclusive create; derived files use descriptor-relative
 atomic replace. Nothing in `executions/` is rewritten after it is written.
+Files are flushed and fsynced before syncing their parent directory; newly
+created parent entries are synced too. Crash-damaged records are still handled
+by the recovery rules below.
 
 `trial.json` gains `execution_id`, `attempt` (1-based within the trial,
 assigned while holding `.lock`), `started_at`, the lock's `plan_digest`, and
@@ -226,10 +232,9 @@ reported in usage).
 
 ## Steps
 
-Each step ships with tests and leaves the suite, Ruff, and mypy green. Step
-2.1 is done. Steps 2.2 and 2.3 build the lock, and 2.4 needs
-both. Steps 2.5 and 2.6 need 2.4. Step 2.7 needs only 2.2 and can proceed in
-parallel with 2.5 and 2.6. Step 2.8 closes the milestone.
+All steps are implemented with deterministic tests. The sequence below records
+the shipped contracts and their acceptance criteria. Step 2.1 was completed
+before the remaining milestone work.
 
 ### 2.1 Milestone 1 follow-ups
 
@@ -255,7 +260,8 @@ New `lingcore/evaluation/identity.py`:
   `finally`. Add two small public read-only accessors on `Agent` rather than
   reaching into private members: `initial_system_prompt()` and
   `ceiling_tool_schemas()`.
-- `runtime_identity() -> RuntimeIdentity`. The git probe runs
+- `runtime_identity() -> RuntimeIdentity`. The git probe first checks
+  `git rev-parse --show-toplevel` against the package's parent, then runs
   `git rev-parse HEAD` and `git status --porcelain --untracked-files=no -- lingcore`
   with a short timeout and no shell, and returns `null` on any failure.
 - `assert_secret_free(data, secrets)`, using the narrowed secret set from 2.1
@@ -268,8 +274,10 @@ Tests (`tests/test_eval_identity.py`): two resolutions of unchanged inputs are
 byte-identical apart from `created_at`. A table-driven test changes one input
 at a time (turn text, fixture, revision, grader spec, profile YAML value,
 `world.md`, an included file, a tool description, `LINGCORE_MODEL`, the
-endpoint, a limit, a package file) and asserts exactly one section digest
-moves. A changed comment moves nothing. A fixture API key in the environment
+endpoint, a limit, a package file) and asserts the corresponding section digest
+moves while independent sections stay stable. Aggregate suite/source/grading
+digests also move when their children change. A changed comment moves nothing.
+A fixture API key in the environment
 never appears in the output, and a secret expanded into `tool_options` is
 refused. A client that raises proves no model call is made.
 
@@ -282,7 +290,7 @@ New `lingcore/evaluation/lock.py`:
   unknown additive field in a newer minor revision is rejected too, because a
   lock is an enforcement document.
 - `resolve(suite_path, lock_path) -> Lock`. Preflight checks are the
-  milestone 1 ones, the evidence checks from 2.7 once it lands, and capture minimums from
+  milestone 1 ones, the evidence checks from 2.7, and capture minimums from
   `source.lock.capture` (an unknown name is an error; native resolution
   always captures every section).
 - `write_lock(lock, path, replace=False)`: exclusive create by default;
@@ -291,7 +299,10 @@ New `lingcore/evaluation/lock.py`:
   verification.
 - `validate(lock, lock_path) -> list[Drift]`. Each `Drift` is a dotted field
   name and a kind (`changed`, `missing`, `added`, `unreadable`) and never
-  carries a value. Case drift names the case ID.
+  carries an input value. Case drift names the case ID. An unreadable item
+  preserves an `EvaluationConfigError`'s safe diagnostic code and message;
+  raw parser or provider exception messages remain hidden. The CLI, locked run,
+  and resume display the same diagnostic.
 
 CLI: `eval resolve <suite> --lock <path> [--replace]` prints the trial count,
 cases with repetition counts, the model ID and endpoint, limits, and
@@ -332,9 +343,16 @@ identity. A second `run` on a held job lock is refused.
 New `lingcore/evaluation/jobs.py`:
 
 - `scan(job) -> JobState`: reads every execution directory and groups records
-  by trial, ordered by `attempt`. An execution is `finished` (has
-  `result.json`), `interrupted` (has `interrupted.json`), or `orphaned` (only
-  `trial.json`).
+  by trial, ordered by `attempt`. An execution is `finished` (has a readable
+  `result.json`), `interrupted` (has a valid recovery marker), or `orphaned`
+  (has a readable `trial.json` but no usable result). A recovery marker remains
+  authoritative if a previously unreadable result becomes readable later.
+  Unreadable trial records stay untouched and unassigned; `ledger_issues` names
+  the execution and record, without echoing corrupt contents. Plain files in
+  `executions/` are skipped; symlinks and valid records with inconsistent
+  identities are refused.
+  Resume persists unassigned decisions under `quarantined/`, so restoring a
+  damaged trial's readability cannot reintroduce it into attempt selection.
 - `select(trial_executions, policy) -> Selection` from 2.6.
 - `pending(lock, state, policy) -> list[TrialSpec]`: trials whose selection is
   unresolved and which may receive another execution, in lock order.
@@ -356,7 +374,10 @@ directory still never contains the trial workspace.
    `inspect_trace`. Then remove its recorded scratch directory if it still
    exists, has the `lingcore-eval-` prefix, and belongs to the current user.
    Removal failure is reported, not fatal.
-4. Run `pending` trials, then rewrite `report.json`.
+4. Restart any trial stopped by auth/configuration in a previous invocation,
+   then run the remaining pending trials in frozen order. A fresh stop ends
+   this invocation too. No failed execution is removed, and this explicit
+   recovery does not consume infrastructure retries. Rewrite `report.json`.
 
 An unlocked job cannot be resumed; the command says to resolve a lock.
 
@@ -379,14 +400,15 @@ execution:
 ```
 
 Provider error categories. Add `category` to `LLMStreamError` with the values
-`transient`, `request`, `auth`, and `interrupted`. `llm.py` and
+`transient`, `request`, `auth`, `configuration`, and `interrupted`. `llm.py` and
 `llm_anthropic.py` classify open failures from the SDK exception type:
 
 | Category | SDK failures |
 | --- | --- |
 | `transient` | Rate limit, server error, connection, timeout after the SDK retry budget |
-| `request` | Bad request, not found, unprocessable, context too large |
+| `request` | Bad request, unprocessable, context too large |
 | `auth` | Authentication and permission errors |
+| `configuration` | HTTP 404: unknown model or missing provider endpoint |
 | `interrupted` | Mid-stream failures and truncation (the current `retryable=True`) |
 
 A foreign exception from a duck-typed client stays `unclassified`. The loop
@@ -401,13 +423,13 @@ Classification of a finished execution into a `retry_on` cause:
 | Scratch or state preparation failure | `environment` | yes |
 | Provider `transient` or `interrupted` after the loop's own retries | `provider_transient` | yes |
 | Provider `request` | none | never; agent failure |
-| Provider `auth`, configuration error | none | never; stops scheduling, job incomplete |
+| Provider `auth`/`configuration`, local configuration error | none | stops the invocation; explicit resume can restart it |
 | Agent error, `budget_exceeded`, `timed_out`, completed with any grade | none | never |
 | Cleanup failure | none | never; trial invalid |
 | Interrupted (resume) | none | replaced without using the allowance |
 
 Selection: walk a trial's executions in attempt order and skip interrupted
-ones and retryable infrastructure failures. The first remaining execution is
+ones, stops superseded by a later resume attempt, and retryable infrastructure failures. The first remaining execution is
 selected, whatever its grade. If none remains and retryable failures exceed
 `infrastructure_retries`, the trial is invalid with `retries_exhausted`. The
 runner schedules a retry immediately after a retryable failure while the
@@ -432,6 +454,8 @@ Graders declare the evidence they need:
 Optional case field `evidence.artifacts: [path, …]` collects extra paths for
 graders that do not exist yet. Collection covers the union of declared and
 grader paths, bounded per file by the grader `max_bytes` (default 1 MiB).
+Optional `fixture.files: {relative/path: text}` seeds task inputs in
+each fresh workspace; its contents participate in `input_digest`.
 
 Preflight, in `resolve`, `validate`, and the unlocked run, refuses a
 `tool_policy` with argument predicates under `trace.content: metadata`, and an
@@ -468,11 +492,16 @@ Report schema `lingcore.eval-report.v2`:
 
 - Provenance: `locked`, `lock_digest`, `plan_digest`, `grade_set`.
 - Coverage adds `interrupted`, `replaced`, `retried`, and `retries_exhausted`.
+- `ledger_issues` reports unreadable records; `unassigned_executions` counts
+  directories whose trial identity cannot be read. Their usage is unknown, so
+  all-execution usage coverage remains incomplete even after planned trials finish.
 - Per trial: `attempts: [{execution_id, attempt, status, cause, selected}]`.
 - Usage: `selected` and `all` totals, because retried executions were billed
   too.
 - `served_models`, with `served_model_differs: true` when a provider reported
-  a model other than the lock's.
+  a model outside the configured main/vision models. A trailing ISO date may
+  resolve an unversioned alias; an explicitly dated model still requires an exact
+  match. Reported model strings are preserved verbatim.
 - Scores use selected executions only, and the milestone 1 headline rules are
   unchanged.
 

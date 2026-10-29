@@ -1,4 +1,4 @@
-"""Milestone-one suite, case, trial, and normalized result contracts."""
+"""Native suite, case, trial, and normalized result contracts."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ class Candidate(StrictModel):
     kind: Literal["lingcore"] = "lingcore"
     profile: str
     tool_binding: Literal["builtin"] = "builtin"
+    endpoint_alias: str | None = None
 
 
 class NativeExecutionLimits(ExecutionLimits):
@@ -39,11 +40,19 @@ class NativeExecutionLimits(ExecutionLimits):
     tool_calls: int | None = Field(default=40, ge=0)
 
 
+RetryCause = Literal["runner", "environment", "provider_transient"]
+
+
+def default_retry_on() -> list[RetryCause]:
+    return ["runner", "environment"]
+
+
 class ExecutionConfig(StrictModel):
     runner: Literal["native"] = "native"
     repetitions: int = Field(default=1, ge=1, le=1000)
     concurrency: Literal[1] = 1
-    infrastructure_retries: Literal[0] = 0
+    infrastructure_retries: int = Field(default=0, ge=0, le=5)
+    retry_on: list[RetryCause] = Field(default_factory=default_retry_on)
     state: Literal["fresh_per_execution"] = "fresh_per_execution"
     approval_policy: Literal["deny"] = "deny"
     limits: NativeExecutionLimits = Field(default_factory=NativeExecutionLimits)
@@ -102,6 +111,7 @@ class CaseInput(StrictModel):
 
 class Fixture(StrictModel):
     workspace: Literal["empty"] = "empty"
+    files: dict[str, str] = Field(default_factory=dict)
 
 
 class ArtifactText(StrictModel):
@@ -130,6 +140,10 @@ class ToolPolicy(StrictModel):
 GraderSpec = Annotated[ArtifactText | ToolPolicy, Field(discriminator="kind")]
 
 
+class EvidenceDeclaration(StrictModel):
+    artifacts: list[str] = Field(default_factory=list)
+
+
 class Case(StrictModel):
     schema_version: Literal["lingcore.eval.case.v1"]
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -139,6 +153,7 @@ class Case(StrictModel):
     input: CaseInput
     fixture: Fixture = Field(default_factory=Fixture)
     graders: list[GraderSpec] = Field(min_length=1)
+    evidence: EvidenceDeclaration = Field(default_factory=EvidenceDeclaration)
 
     @model_validator(mode="after")
     def _grader_ids(self) -> Case:
@@ -164,6 +179,7 @@ class GraderResult(StrictModel):
     score: float | None = None
     reason: str | None = None
     error_type: str | None = None
+    version: int = 1
 
 
 class Grade(StrictModel):
@@ -198,7 +214,7 @@ class UsageSummary(StrictModel):
 
 class Comparison(StrictModel):
     track: Literal["development"] = "development"
-    locked: Literal[False] = False
+    locked: bool = False
     benchmark_compatible: Literal[False] = False
 
 
@@ -209,7 +225,12 @@ class TrialResult(StrictModel):
     case_id: str
     case_revision: int | str
     repetition: int
-    locked: Literal[False] = False
+    locked: bool = False
+    attempt: int = Field(default=1, ge=1)
+    lock_digest: str | None = None
+    plan_digest: str | None = None
+    infrastructure_failure: RetryCause | None = None
+    served_models: list[str] = Field(default_factory=list)
     benchmark_compatible: Literal[False] = False
     execution: ExecutionOutcome
     grade: Grade

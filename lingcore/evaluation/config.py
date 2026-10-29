@@ -11,6 +11,7 @@ from pydantic import BaseModel, ValidationError
 
 from lingcore.config import AgentProfile
 from lingcore.errors import ConfigError
+from lingcore.evaluation.graders import evidence_needs
 from lingcore.evaluation.models import ArtifactText, Case, EvaluationDiagnostic, Suite
 from lingcore.sandbox import parse_shell_options
 
@@ -53,14 +54,31 @@ class ResolvedSuite:
     profile: AgentProfile
 
 
-def resolve_suite(path: Path, *, require_credentials: bool = True) -> ResolvedSuite:
+def resolve_suite(
+    path: Path, *, require_credentials: bool = True, allow_locked: bool = False
+) -> ResolvedSuite:
     suite: Suite = load_yaml(path, Suite)
-    if suite.source.lock.required:
+    if suite.source.lock.required and not allow_locked:
         raise EvaluationConfigError(
-            "this suite requires a locked plan; locked execution is milestone 2",
+            "this suite requires a locked plan; use eval resolve and eval run --lock",
             "locked_plan_required",
         )
     cases = tuple(load_yaml(path.parent / item, Case) for item in suite.source.cases)
+    unknown = set(suite.source.lock.capture) - {
+        "tasks",
+        "candidate",
+        "grader",
+        "runtime",
+        "execution",
+        "trace",
+        "grading",
+        "source",
+        "trials",
+    }
+    if unknown:
+        raise EvaluationConfigError(
+            "unknown native lock capture requirement", "lock_capture"
+        )
     if len({case.id for case in cases}) != len(cases):
         raise EvaluationConfigError("case ids must be unique", "duplicate_case_id")
     try:
@@ -86,6 +104,21 @@ def resolve_suite(path: Path, *, require_credentials: bool = True) -> ResolvedSu
                 "sandbox_required",
             )
     for case in cases:
+        if (
+            evidence_needs(case.graders)["content"]
+            and suite.trace.content != "redacted"
+        ):
+            raise EvaluationConfigError(
+                f"case {case.id}: tool_policy argument predicates require redacted trace content",
+                "content_required",
+            )
+        for path in [*case.evidence.artifacts, *case.fixture.files]:
+            raw_path = Path(path)
+            if raw_path.is_absolute() or ".." in raw_path.parts or not raw_path.name:
+                raise EvaluationConfigError(
+                    "evidence and fixture paths must stay inside the workspace",
+                    "artifact_path",
+                )
         missing = set(case.requires.tools) - ceiling
         if missing:
             raise EvaluationConfigError(
@@ -114,6 +147,28 @@ def resolve_suite(path: Path, *, require_credentials: bool = True) -> ResolvedSu
             "tool_bindings",
         ) from None
     if require_credentials:
+        import os
+
+        from lingcore.doctor import required_environment_names
+
+        environment = {**os.environ, **getattr(profile, "_profile_env", {})}
+        missing_environment = sorted(
+            name
+            for name in required_environment_names(profile)
+            if not environment.get(name)
+        )
+        if missing_environment:
+            from lingcore.tracing.config import known_secrets
+            from lingcore.tracing.content import redact_known_secrets
+
+            raise EvaluationConfigError(
+                "required environment variables are unavailable: "
+                + ", ".join(
+                    redact_known_secrets(name, known_secrets(profile))
+                    for name in missing_environment
+                ),
+                "model_credentials",
+            )
         for purpose, cfg in (
             ("main", profile.llm),
             ("vision", profile.media_fallback.image),
