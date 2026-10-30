@@ -1,0 +1,1 @@
+{"atif_reason":null,"metadata":{"execution_id":"execution"},"outcome":{"cause":null,"status":"completed"},"trajectory":null,"type":"finish","usage":{"cached_input_tokens":0,"coverage":"complete","input_tokens":10,"output_tokens":2,"per_model":{"fixture":{"input_tokens":10,"output_tokens":2}},"reasoning_tokens":0,"requests":1}}

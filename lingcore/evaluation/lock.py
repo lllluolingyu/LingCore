@@ -41,6 +41,7 @@ class Lock(PlanIdentity):
             self.suite.path,
             self.candidate.profile.path,
             *(c.path for c in self.source.cases),
+            *([self.source.dataset["path"]] if self.source.kind == "harbor" else []),
         ):
             if (
                 not path
@@ -80,12 +81,15 @@ def make_lock(plan: PlanIdentity, *, created_at: str | None = None) -> Lock:
     )
 
 
-async def resolve(suite_path: Path, lock_path: Path) -> Lock:
+async def resolve(
+    suite_path: Path, lock_path: Path, *, bridge: Path | None = None
+) -> Lock:
     resolved = await asyncio.to_thread(
         resolve_suite,
         suite_path.absolute(),
         require_credentials=False,
         allow_locked=True,
+        bridge=bridge,
     )
     plan = await build_identity(
         resolved, suite_path.absolute(), lock_path.absolute().parent
@@ -173,17 +177,23 @@ def _diff(old: Any, new: Any, prefix: str = "") -> list[Drift]:
     return [Drift(field=prefix, kind="changed")]
 
 
-async def validate(lock: Lock, lock_path: Path) -> list[Drift]:
+async def validate(
+    lock: Lock, lock_path: Path, *, bridge: Path | None = None
+) -> list[Drift]:
     base = lock_path.absolute().parent
     for field, path in [
         ("suite", lock.suite.path),
         ("candidate.profile", lock.candidate.profile.path),
-        *((f"source.cases.{c.id}", c.path) for c in lock.source.cases),
+        *(
+            (f"source.cases.{c.id}", c.path)
+            for c in lock.source.cases
+            if lock.source.kind == "local"
+        ),
     ]:
         if not (base / path).is_file():
             return [Drift(field=field, kind="missing")]
     try:
-        current = await resolve(base / lock.suite.path, lock_path)
+        current = await resolve(base / lock.suite.path, lock_path, bridge=bridge)
     except EvaluationConfigError as exc:
         return [Drift(field="inputs", kind="unreadable", diagnostic=exc.diagnostic)]
     except (ValueError, OSError, PathEscapeError):

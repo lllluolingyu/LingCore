@@ -5,11 +5,51 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      harbor_e2e:
+        description: Run synthetic Harbor Docker integration checks
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
+  harbor-bridge:
+    name: Isolated Harbor bridge (Python 3.12)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: adapters/harbor-bridge
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --locked --python 3.12
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+      - run: uv run mypy
+      - run: uv run pytest -q
+
+  harbor-integration:
+    name: Synthetic Harbor Docker workflow
+    if: github.event_name == 'workflow_dispatch' && inputs.harbor_e2e
+    runs-on: ubuntu-latest
+    env:
+      LINGCORE_HARBOR_E2E: "1"
+      LINGCORE_HARBOR_BRIDGE: ${{ github.workspace }}/adapters/harbor-bridge/.venv/bin/lingcore-harbor-bridge
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+      - run: uv python install 3.12 3.13
+      - run: uv sync --locked --python 3.13
+      - run: uv sync --locked --python 3.12 --project adapters/harbor-bridge
+      - run: uv run --project adapters/harbor-bridge pytest adapters/harbor-bridge/tests -q
+      - run: uv run pytest tests/test_harbor_e2e.py -q
+
   quality:
     name: Lint, format, and typecheck
     runs-on: ubuntu-latest

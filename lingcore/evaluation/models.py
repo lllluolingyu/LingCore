@@ -25,10 +25,54 @@ class LocalSource(StrictModel):
     lock: LockPolicy = Field(default_factory=LockPolicy)
 
 
+class SelectionRequirements(StrictModel):
+    os: Literal["linux"] = "linux"
+    gpus: Literal[0] = 0
+    containers: Literal[1] = 1
+    task_tools: Literal[False] = False
+    max_cpus: int | None = Field(default=None, gt=0)
+    max_memory_mb: int | None = Field(default=None, gt=0)
+    max_storage_mb: int | None = Field(default=None, gt=0)
+
+
+class TaskSelection(StrictModel):
+    policy: Literal["sorted_capability_subset", "explicit"]
+    count: int = Field(ge=1)
+    tasks: list[str] = Field(default_factory=list)
+    required: SelectionRequirements = Field(default_factory=SelectionRequirements)
+
+
+class HarborSource(StrictModel):
+    kind: Literal["harbor"]
+    dataset: str
+    path: str
+    release_source: dict[str, str] = Field(default_factory=dict)
+    training_use: Literal["prohibited", "unspecified"] = "unspecified"
+    selection: TaskSelection
+    lock: LockPolicy = Field(default_factory=lambda: LockPolicy(required=True))
+
+    @property
+    def cases(self) -> list[str]:
+        return []
+
+
+class TimeoutMultipliers(StrictModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+    agent: float = Field(default=1, gt=0)
+    verifier: float = Field(default=1, gt=0)
+    setup: float = Field(default=1, gt=0)
+    build: float = Field(default=1, gt=0)
+
+
+class HarborConfig(StrictModel):
+    pass_env: list[str] = Field(default_factory=list)
+    timeout_multipliers: TimeoutMultipliers = Field(default_factory=TimeoutMultipliers)
+
+
 class Candidate(StrictModel):
     kind: Literal["lingcore"] = "lingcore"
     profile: str
-    tool_binding: Literal["builtin"] = "builtin"
+    tool_binding: Literal["builtin", "harbor-terminal-v1"] = "builtin"
     endpoint_alias: str | None = None
 
 
@@ -47,15 +91,24 @@ def default_retry_on() -> list[RetryCause]:
     return ["runner", "environment"]
 
 
-class ExecutionConfig(StrictModel):
-    runner: Literal["native"] = "native"
+class ExecutionSettings(StrictModel):
     repetitions: int = Field(default=1, ge=1, le=1000)
     concurrency: Literal[1] = 1
     infrastructure_retries: int = Field(default=0, ge=0, le=5)
     retry_on: list[RetryCause] = Field(default_factory=default_retry_on)
     state: Literal["fresh_per_execution"] = "fresh_per_execution"
-    approval_policy: Literal["deny"] = "deny"
     limits: NativeExecutionLimits = Field(default_factory=NativeExecutionLimits)
+
+
+class ExecutionConfig(ExecutionSettings):
+    runner: Literal["native"] = "native"
+    approval_policy: Literal["deny"] = "deny"
+
+
+class HarborExecutionConfig(ExecutionSettings):
+    runner: Literal["harbor"]
+    approval_policy: Literal["benchmark_environment"]
+    harbor: HarborConfig = Field(default_factory=HarborConfig)
 
 
 class TracePolicy(StrictModel):
@@ -63,7 +116,7 @@ class TracePolicy(StrictModel):
     content: Literal["metadata", "redacted"] = "metadata"
     max_bytes: int = Field(default=8388608, ge=4096)
     artifact_max_bytes: int = Field(default=1048576, ge=256)
-    exports: list[str] = Field(default_factory=list, max_length=0)
+    exports: list[Literal["atif"]] = Field(default_factory=list)
 
 
 class GradingPolicy(StrictModel):
@@ -71,8 +124,20 @@ class GradingPolicy(StrictModel):
     success: Literal["all_required"] = "all_required"
 
 
+class RewardPolicy(StrictModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+    name: str = "reward"
+    pass_at: float = 1
+    values: list[float] = Field(default_factory=lambda: [0.0, 1.0], min_length=1)
+
+
+class HarborGradingPolicy(StrictModel):
+    authority: Literal["harbor"]
+    reward: RewardPolicy = Field(default_factory=RewardPolicy)
+
+
 class ReportPolicy(StrictModel):
-    headline: Literal["mean_case_success"] = "mean_case_success"
+    headline: Literal["mean_case_success", "mean_reward"] = "mean_case_success"
     include: list[str] = Field(
         default_factory=lambda: [
             "coverage",
@@ -89,12 +154,27 @@ class Suite(StrictModel):
     schema_version: Literal["lingcore.eval.suite.v1"]
     name: str
     track: Literal["development"] = "development"
-    source: LocalSource
+    source: LocalSource | HarborSource
     agent: Candidate
-    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    execution: ExecutionConfig | HarborExecutionConfig = Field(
+        default_factory=ExecutionConfig
+    )
     trace: TracePolicy = Field(default_factory=TracePolicy)
-    grading: GradingPolicy = Field(default_factory=GradingPolicy)
+    grading: GradingPolicy | HarborGradingPolicy = Field(default_factory=GradingPolicy)
     report: ReportPolicy = Field(default_factory=ReportPolicy)
+
+    @model_validator(mode="after")
+    def _runner_source(self) -> Suite:
+        harbor = self.source.kind == "harbor"
+        if harbor != (self.execution.runner == "harbor") or harbor != (
+            self.grading.authority == "harbor"
+        ):
+            raise ValueError("source, execution and grading must use the same runner")
+        if harbor != (self.agent.tool_binding == "harbor-terminal-v1"):
+            raise ValueError("tool binding must match the runner")
+        if self.trace.exports and (not harbor or self.trace.content != "redacted"):
+            raise ValueError("ATIF requires Harbor and captured content")
+        return self
 
 
 class Requirements(StrictModel):
@@ -241,3 +321,15 @@ class TrialResult(StrictModel):
     cleanup_failed: bool = False
     diagnostics: list[EvaluationDiagnostic] = Field(default_factory=list)
     comparison: Comparison = Field(default_factory=Comparison)
+    rewards: dict[str, float] | None = None
+    reward_valid: bool | None = None
+    harbor_failure_cause: str | None = None
+    harbor_exceptions: list[dict[str, Any]] = Field(default_factory=list)
+    timing: dict[str, Any] = Field(default_factory=dict)
+    harbor_task_digest: str | None = None
+    harbor_trial: str | None = None
+    atif: str | None = None
+    atif_reason: str | None = None
+    environment_cleanup: str | None = None
+    execution_platform: str | None = None
+    unsupported: bool = False

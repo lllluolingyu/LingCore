@@ -108,7 +108,11 @@ class Selection:
 
 
 def infrastructure_cause(result: TrialResult) -> RetryCause | None:
-    if result.cleanup_failed:
+    if (
+        result.cleanup_failed
+        or result.unsupported
+        or result.harbor_failure_cause == "harbor_failed"
+    ):
         return None
     outcome = result.execution
     if outcome.status != "failed":
@@ -124,7 +128,10 @@ def infrastructure_cause(result: TrialResult) -> RetryCause | None:
 
 
 def fatal_reason(result: TrialResult) -> str | None:
-    if result.execution.cause == "configuration":
+    if (
+        result.execution.cause == "configuration"
+        or result.harbor_failure_cause == "harbor_failed"
+    ):
         return "configuration"
     if (
         result.execution.cause == "provider"
@@ -153,6 +160,8 @@ def select(executions: list[ExecutionRecord], policy: RetryPolicy) -> Selection:
             if index < len(ordered) - 1:
                 continue
             return Selection(resolved=True, reason=fatal, stopped=record)
+        if result.unsupported:
+            return Selection(record, True, reason="unsupported")
         if infrastructure_cause(result) in policy.retry_on:
             failures += 1
             if failures > policy.infrastructure_retries:

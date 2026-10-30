@@ -1,0 +1,42 @@
+[project]
+name = "lingcore-harbor-bridge"
+version = "0.1.0"
+description = "Isolated Harbor integration for LingCore evaluation"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = ["harbor==0.25.0"]
+
+[project.scripts]
+lingcore-harbor-bridge = "lingcore_harbor_bridge.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest==9.0.3", "pytest-asyncio==1.4.0", "ruff==0.16.1", "mypy==2.3.0"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/lingcore_harbor_bridge"]
+disallow_untyped_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_return_any = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["harbor", "harbor.*"]
+ignore_missing_imports = true
+

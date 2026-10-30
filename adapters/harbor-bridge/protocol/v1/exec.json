@@ -1,0 +1,1 @@
+{"call_id":"call","capture_bytes":1048576,"command":"printf hello","cwd":"/app","timeout":120.0,"type":"exec"}

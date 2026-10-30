@@ -839,13 +839,13 @@ commitments.
      infrastructure retries, and `eval regrade` over saved evidence. Reports
      include selected and all-attempt usage. See
      [locked evaluation plans](docs/evaluation-locked-plans.md).
-   - Next: the Harbor adapter, regression comparisons, and
-     optional exporters. Architecture and implementation sequence:
-     [Tracing and evaluation design](docs/tracing-and-evaluation.md), with
-     [public Terminal-Bench 4.0 through Harbor](docs/evaluation-terminal-bench.md)
-     and [example suite configurations](docs/examples/evaluation/README.md).
-     The native example is executable; Harbor and later-milestone APIs remain
-     proposed.
+   - Harbor evaluations use an isolated Python 3.12 bridge, local Docker tasks,
+     measured source locks, terminal tools, rewards, resume, separate-verifier
+     regrade, and ATIF export. The synthetic workflow uses fake model clients;
+     public Terminal-Bench runs remain manual. See [the Harbor plan](docs/evaluation-harbor-plan.md)
+     and [example suites](docs/examples/evaluation/README.md).
+   - Next: regression comparisons and optional exporters. See the
+     [tracing and evaluation design](docs/tracing-and-evaluation.md).
 
 6. **Later — Durable workflows**
    - Implemented in LingChat/AgentGUI: server-owned sessions keep turns and

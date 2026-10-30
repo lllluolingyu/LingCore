@@ -22,6 +22,12 @@ if TYPE_CHECKING:
     from lingcore.agent import Agent
 
 
+class RunnerSignal(BaseException):
+    """Execution control failure that ordinary tool handlers must not consume."""
+
+    outcome: ExecutionOutcome | None = None
+
+
 class ExecutionOutcome(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     status: Literal[
@@ -131,8 +137,10 @@ class ScriptedFrontend:
         turns: Sequence[str | UserInput],
         *,
         allow_automatic_turns: bool = False,
+        benchmark_environment: bool = False,
     ) -> None:
         self.agent = agent
+        self.benchmark_environment = benchmark_environment
         self._turns = iter(turns)
         self.supports_background = allow_automatic_turns
         self.stopped = False
@@ -154,9 +162,14 @@ class ScriptedFrontend:
     async def confirm(self, command: str) -> bool:
         self.agent.recorder.event(
             "policy.decision",
-            attributes={"decision": "deny", "policy": "evaluation_deny"},
+            attributes={
+                "decision": "allow" if self.benchmark_environment else "deny",
+                "policy": "benchmark_environment"
+                if self.benchmark_environment
+                else "evaluation_deny",
+            },
         )
-        return False
+        return self.benchmark_environment
 
     @contextmanager
     def interrupt_scope(self, stop: Callable[[], bool]) -> Iterator[None]:
@@ -179,21 +192,33 @@ async def run_headless(
     allow_automatic_turns: bool = False,
     cleanup_seconds: float = 5,
     trace_context: SpanContext | None = None,
+    runner_signal: asyncio.Future[RunnerSignal] | None = None,
+    benchmark_environment: bool = False,
 ) -> HeadlessResult:
     """Driver-owned deadline, normal Stop handshake, bounded cleanup on all exits."""
     from lingcore.io.base import run_session
 
     frontend = ScriptedFrontend(
-        agent, turns, allow_automatic_turns=allow_automatic_turns
+        agent,
+        turns,
+        allow_automatic_turns=allow_automatic_turns,
+        benchmark_environment=benchmark_environment,
     )
 
     # Preserve the Agent's approval instrumentation around the headless policy.
     async def confirm(prompt: str) -> bool:
         with agent.recorder.span(
-            "approval.wait", attributes={"policy": "evaluation_deny"}
+            "approval.wait",
+            attributes={
+                "policy": "benchmark_environment"
+                if benchmark_environment
+                else "evaluation_deny"
+            },
         ) as span:
             allowed = await frontend.confirm(prompt)
-            span.close("denied", decision="deny")
+            span.close(
+                "ok" if allowed else "denied", decision="allow" if allowed else "deny"
+            )
             return allowed
 
     agent.tool_ctx.confirm = confirm
@@ -223,6 +248,19 @@ async def run_headless(
         if budget is not None and budget.deadline is not None
         else None
     )
+    received_signal: RunnerSignal | None = None
+
+    async def monitor_signal() -> None:
+        nonlocal received_signal
+        assert runner_signal is not None
+        received_signal = await asyncio.shield(runner_signal)
+        frontend.stopped = True
+        if not agent.cancel_turn():
+            session.cancel()
+
+    monitor = (
+        asyncio.create_task(monitor_signal()) if runner_signal is not None else None
+    )
     cleanup_failed = False
     interrupted = False
     failure = False
@@ -230,15 +268,20 @@ async def run_headless(
         await session
     except asyncio.CancelledError:
         current = asyncio.current_task()
-        interrupted = not frontend.timed_out or bool(current and current.cancelling())
+        interrupted = (not frontend.timed_out and received_signal is None) or bool(
+            current and current.cancelling()
+        )
         if not session.done():
             session.cancel()
         await asyncio.gather(session, return_exceptions=True)
         if interrupted:
             raise
-    except Exception:
+    except (RunnerSignal, Exception):
         failure = True
     finally:
+        if monitor is not None:
+            monitor.cancel()
+            await asyncio.gather(monitor, return_exceptions=True)
         if timer is not None:
             timer.cancel()
             await asyncio.gather(timer, return_exceptions=True)
@@ -257,6 +300,10 @@ async def run_headless(
             )
         elif interrupted:
             outcome = ExecutionOutcome(status="cancelled", cause="runner")
+        elif received_signal is not None:
+            outcome = received_signal.outcome or ExecutionOutcome(
+                status="failed", cause="runner"
+            )
         elif failure:
             outcome = ExecutionOutcome(status="failed", cause="runner")
         agent.execution_outcome = outcome

@@ -80,7 +80,7 @@ if TYPE_CHECKING:
     from lingcore.modality import MediaAdapter
     from lingcore.sessions import SessionStore
     from lingcore.skills import SkillState
-    from lingcore.tools import ConfirmFn
+    from lingcore.tools import ConfirmFn, EnvironmentBinding
 
 
 # Backoff between stream re-requests (mid-stream failure recovery): capped
@@ -356,6 +356,7 @@ class Agent:
         state_dir: "Path | None" = None,
         tool_registry: ToolRegistry | None = None,
         execution_budget: ExecutionBudget | None = None,
+        environment_binding: EnvironmentBinding | None = None,
     ) -> "Agent":
         """Assemble a runnable Agent from a validated profile.
 
@@ -658,6 +659,7 @@ class Agent:
                 profile_dir=effective_state,
                 environment=dict(getattr(profile, "_profile_env", {})),
                 session_id=sid,
+                environment_binding=environment_binding,
             )
             guardrail = build_guardrail(
                 profile.guardrail.policy, profile.guardrail.options
@@ -1618,6 +1620,8 @@ class Agent:
                 "message",
                 {
                     "role": "assistant",
+                    "request_id": self.request_ledger.last_request_id,
+                    "finish_reason": finish_reason,
                     "content": assistant.content,
                     "tool_calls": [
                         c.model_dump(exclude={"invalid_arguments"})

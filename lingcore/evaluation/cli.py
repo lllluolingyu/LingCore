@@ -59,6 +59,8 @@ def main(argv: list[str]) -> int:
     report = commands.add_parser("report", help="Read an original or regraded report")
     report.add_argument("job", type=Path)
     report.add_argument("--grades", default="original")
+    for subcommand in (freeze, check, run, continuation, rescore):
+        subcommand.add_argument("--bridge", type=Path)
     args = parser.parse_args(argv)
     if args.command == "run" and (args.suite is None) == (args.lock is None):
         parser.error("run accepts exactly one of <suite> or --lock <path>")
@@ -71,7 +73,7 @@ def main(argv: list[str]) -> int:
 
     try:
         if args.command == "resolve":
-            lock = _run(resolve(args.suite, args.lock))
+            lock = _run(resolve(args.suite, args.lock, bridge=args.bridge))
             write_lock(lock, args.lock, replace=args.replace)
             print(f"Lock written: {args.lock}")
             print(f"Planned trials: {len(lock.trials)}")
@@ -86,7 +88,7 @@ def main(argv: list[str]) -> int:
             print("Limitations: " + ", ".join(lock.limitations))
             return 0
         if args.command == "validate":
-            drift = _run(validate(load_lock(args.lock), args.lock))
+            drift = _run(validate(load_lock(args.lock), args.lock, bridge=args.bridge))
             for item in drift:
                 print(item.describe())
             if not drift:
@@ -95,7 +97,9 @@ def main(argv: list[str]) -> int:
         if args.command == "run":
             if args.lock is not None:
                 job, result = _run(
-                    runner.run_locked(args.lock, args.output, on_job=show_job)
+                    runner.run_locked(
+                        args.lock, args.output, on_job=show_job, bridge=args.bridge
+                    )
                 )
             else:
                 job, result = _run(
@@ -104,10 +108,12 @@ def main(argv: list[str]) -> int:
             show_job(job)
         elif args.command == "resume":
             show_job(args.job)
-            result = _run(runner.resume(args.job, lock_path=args.lock))
+            result = _run(
+                runner.resume(args.job, lock_path=args.lock, bridge=args.bridge)
+            )
         elif args.command == "regrade":
             show_job(args.job)
-            result = _run(regrade(args.job, lock_path=args.lock))
+            result = _run(regrade(args.job, lock_path=args.lock, bridge=args.bridge))
         else:
             show_job(args.job)
             result = read_report(args.job, args.grades)

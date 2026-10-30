@@ -1,9 +1,11 @@
 # Tracing and evaluation design
 
-Status: milestones 1 and 2 implemented through 2026-10-30; the broader design
-was reviewed against LingCore v0.5.1 on 2026-10-28. Harbor, ATIF/OpenTelemetry
-export, comparison, retrieval-specific instrumentation, and later-milestone APIs
-remain proposals.
+Status: milestones 1–3 implemented through 2026-10-30. Harbor runs in a
+separate Python environment, with locked local tasks, a supervised terminal
+relay, reward reports, resume, separate-verifier regrade, and ATIF export.
+Synthetic Docker tests use fake model clients; public Terminal-Bench runs
+remain a manual step. Comparison, OpenTelemetry, and the other later APIs
+remain proposals. See the [Harbor implementation plan](evaluation-harbor-plan.md).
 
 The current native subset supports sequential local cases with fresh workspace
 fixtures (optionally seeded by `fixture.files`), scripted text turns,
@@ -868,11 +870,10 @@ CLI exit paths are covered by deterministic tests.
 
 ### Later milestones
 
-3. **Public benchmark adapter.** Implement the
-   [Harbor contract](evaluation-terminal-bench.md), validate ATIF against the
-   pinned package, run a synthetic harness fixture and then a declared small
-   Terminal-Bench subset. Accept: verifier failure is distinguished from
-   reward zero. Steps, formats, and tests are in the
+3. **Public benchmark adapter.** Implemented with an isolated Harbor bridge,
+   locked local sources, terminal relay, reward mapping, resume, separate-verifier
+   regrade, and ATIF. Synthetic Docker runs use fake model clients; the real-model
+   Terminal-Bench subset remains manual. Steps and checks are in the
    [Harbor adapter implementation plan](evaluation-harbor-plan.md).
 4. **Regression comparison.** Add repeated runs, paired reports, uncertainty
    estimates, `eval compare`, and content-aware retrieval/calendar cases. Keep

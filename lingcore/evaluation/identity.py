@@ -25,6 +25,7 @@ from lingcore.evaluation.config import EvaluationConfigError, ResolvedSuite
 from lingcore.evaluation.graders import GRADERS, evidence_needs
 from lingcore.evaluation.models import (
     RetryCause,
+    RewardPolicy,
     StrictModel,
     Suite,
     TracePolicy,
@@ -33,6 +34,7 @@ from lingcore.evaluation.models import (
 )
 from lingcore.evaluation.storage import canonical_json, directory, read_bytes
 from lingcore.plugins.discovery import discover_plugins, engaged_plugins, local_skills
+from lingcore.tools import EnvironmentBinding, ToolRegistry
 from lingcore.tracing import NoopRecorder
 from lingcore.tracing.config import known_secrets
 
@@ -105,6 +107,41 @@ class LocalSourceIdentity(StrictModel):
     cases: list[CaseIdentity]
 
 
+class HarborTaskIdentity(StrictModel):
+    id: str
+    name: str
+    path: str
+    input_digest: Digest
+    verifier_digest: Digest
+    support_digest: Digest
+    harbor_digest: Digest
+    instruction_digest: Digest
+    verifier: dict[str, Any]
+    agent_timeout_sec: float
+    resources: dict[str, Any]
+    images: dict[str, Any]
+
+    @property
+    def revision(self) -> str:
+        return self.input_digest
+
+    @property
+    def graders_digest(self) -> str:
+        return self.verifier_digest
+
+
+class HarborSourceIdentity(StrictModel):
+    kind: Literal["harbor"] = "harbor"
+    digest: Digest
+    dataset: dict[str, Any]
+    selection: dict[str, Any]
+    tasks: list[HarborTaskIdentity]
+
+    @property
+    def cases(self) -> list[HarborTaskIdentity]:
+        return self.tasks
+
+
 class ModelIdentity(StrictModel):
     backend: str
     id: str
@@ -126,6 +163,11 @@ class ToolsIdentity(StrictModel):
     initial: list[str]
 
 
+class BoundToolsIdentity(ToolsIdentity):
+    binding_id: str
+    options: dict[str, Any]
+
+
 class CredentialIdentity(StrictModel):
     name: str
     set: bool
@@ -143,7 +185,7 @@ class CandidateIdentity(StrictModel):
     vision_model: ModelIdentity | None
     sampling: dict[str, Any]
     prompt_digest: Digest
-    tools: ToolsIdentity
+    tools: BoundToolsIdentity | ToolsIdentity
     sources: dict[str, str]
     plugins: dict[str, PluginIdentity] = Field(default_factory=dict)
     credentials: list[CredentialIdentity]
@@ -170,16 +212,32 @@ class RetryPolicy(StrictModel):
     retry_on: list[RetryCause] = Field(default_factory=default_retry_on)
 
 
-class ExecutionIdentity(StrictModel):
+class ExecutionIdentityBase(StrictModel):
     digest: Digest
-    runner: Literal["native"] = "native"
     state: Literal["fresh_per_execution"] = "fresh_per_execution"
-    approval_policy: Literal["deny"] = "deny"
     repetitions: int
     order: Literal["declared"] = "declared"
     concurrency: Literal[1] = 1
     retry: RetryPolicy
     limits: dict[str, Any]
+
+
+class ExecutionIdentity(ExecutionIdentityBase):
+    runner: Literal["native"] = "native"
+    approval_policy: Literal["deny"] = "deny"
+
+
+class HarborExecutionIdentity(ExecutionIdentityBase):
+    runner: Literal["harbor"] = "harbor"
+    approval_policy: Literal["benchmark_environment"] = "benchmark_environment"
+    harness: dict[str, Any]
+    pass_env: list[str]
+
+
+class HarborGradingIdentity(StrictModel):
+    digest: Digest
+    authority: Literal["harbor"] = "harbor"
+    reward: RewardPolicy
 
 
 class GradingIdentity(StrictModel):
@@ -190,12 +248,14 @@ class GradingIdentity(StrictModel):
 
 class PlanIdentity(StrictModel):
     suite: SuiteIdentity
-    source: Annotated[LocalSourceIdentity, Field(discriminator="kind")]
+    source: Annotated[
+        LocalSourceIdentity | HarborSourceIdentity, Field(discriminator="kind")
+    ]
     candidate: CandidateIdentity
     runtime: RuntimeIdentity
-    execution: ExecutionIdentity
+    execution: ExecutionIdentity | HarborExecutionIdentity
     trace: TracePolicy
-    grading: GradingIdentity
+    grading: GradingIdentity | HarborGradingIdentity
     trials: list[TrialSpec]
     limitations: list[str] = Field(default_factory=list)
 
@@ -212,7 +272,9 @@ def identity_body(plan: PlanIdentity) -> dict[str, Any]:
     for credential in value["candidate"]["credentials"]:
         credential.pop("set")
     value["runtime"].pop("git")
-    for case in value["source"]["cases"]:
+    if plan.source.kind == "harbor":
+        value["source"]["dataset"].pop("path")
+    for case in value["source"].get("cases", value["source"].get("tasks", [])):
         case.pop("path")
     return value
 
@@ -299,7 +361,12 @@ class _OfflineClient:
 
 
 async def candidate_identity(
-    profile: AgentProfile, suite: Suite, *, profile_path: Path | None = None
+    profile: AgentProfile,
+    suite: Suite,
+    *,
+    profile_path: Path | None = None,
+    tool_registry: ToolRegistry | None = None,
+    environment_binding: EnvironmentBinding | None = None,
 ) -> CandidateIdentity:
     secrets = known_secrets(profile)
     values = _profile_values(profile, suite)
@@ -379,6 +446,8 @@ async def candidate_identity(
             vision_llm=_OfflineClient(),
             state_dir=Path(temporary) / "state",
             recorder=NoopRecorder(),
+            tool_registry=tool_registry,
+            environment_binding=environment_binding,
         )
         try:
             prompt = await agent.initial_system_prompt()
@@ -395,6 +464,12 @@ async def candidate_identity(
                 ],
                 initial=sorted(agent.initial_tools),
             )
+            if environment_binding is not None:
+                tools = BoundToolsIdentity(
+                    **tools.model_dump(),
+                    binding_id=environment_binding.binding_id,
+                    options=profile.terminal_options.model_dump(mode="json"),
+                )
         finally:
             await agent.aclose()
     model = ModelIdentity(
@@ -492,6 +567,10 @@ async def build_identity(
     resolved: ResolvedSuite, suite_path: Path, base_dir: Path
 ) -> PlanIdentity:
     suite = resolved.suite
+    if suite.source.kind == "harbor":
+        from lingcore.evaluation.harbor.source import build_harbor_identity
+
+        return await build_harbor_identity(resolved, suite_path, base_dir)
     secrets = known_secrets(resolved.profile)
     assert_secret_free(canonical_json(suite.model_dump(mode="json")), secrets)
     cases = []

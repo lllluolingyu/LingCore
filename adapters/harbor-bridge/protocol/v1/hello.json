@@ -1,0 +1,1 @@
+{"bridge":{"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","version":"0.1.0"},"environment":"docker","execution_id":"execution","harbor_version":"0.25.0","instruction":"Write a file.","probe":{"missing":[],"supported":true},"protocol":"lingcore.harbor-bridge.v1","task":"synthetic","type":"hello"}

@@ -99,6 +99,7 @@ def build_job_report(
     plan_digest: str,
     grade_set: str = "original",
     grades: dict[str, Any] | None = None,
+    grade_details: dict[str, dict[str, Any]] | None = None,
     interrupted: bool = False,
 ) -> dict[str, Any]:
     from lingcore.evaluation.jobs import fatal_reason, infrastructure_cause, select
@@ -130,6 +131,8 @@ def build_job_report(
                         )
                     }
                 )
+            if grade_details is not None and result.execution_id in grade_details:
+                result = result.model_copy(update=grade_details[result.execution_id])
             results.append(result)
             invalid += result.grade.status != "valid"
         elif selection.resolved:
@@ -276,6 +279,47 @@ def build_job_report(
     for row in report["cases"]:
         row["started"] = sum(
             t["case_id"] == row["case_id"] and bool(t["attempts"]) for t in trials
+        )
+    if getattr(plan.source, "kind", "local") == "harbor":
+        reward_name = plan.grading.reward.name
+        means = []
+        for row in report["cases"]:
+            values = [
+                float(r.grade.scores[reward_name] or 0)
+                for r in results
+                if r.case_id == row["case_id"]
+                and r.grade.status == "valid"
+                and r.grade.scores.get(reward_name) is not None
+            ]
+            row["mean_reward"] = sum(values) / len(values) if values else None
+            if values:
+                means.append(row["mean_reward"])
+        report.update(
+            mean_reward=sum(means) / len(means) if means else None,
+            harbor_accuracy=sum(
+                r.grade.status == "valid" and r.grade.passed is True for r in results
+            )
+            / len(plan.trials)
+            if plan.trials
+            else None,
+            harness=plan.execution.harness,
+            training_use=plan.source.dataset["training_use"],
+            limitations=sorted(
+                (set(plan.limitations) - {"emulated_platform"})
+                | (
+                    {"emulated_platform"}
+                    if any(
+                        e.result
+                        and e.result.execution_platform not in {None, "x86_64", "amd64"}
+                        for e in state.executions
+                    )
+                    else set()
+                )
+            ),
+            timing={r.execution_id: r.timing for r in results},
+        )
+        report["coverage"]["unsupported"] = sum(
+            bool(e.result and e.result.unsupported) for e in state.executions
         )
     return report
 

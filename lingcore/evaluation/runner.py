@@ -125,6 +125,20 @@ def _write_plan(
 def _write_original_grades(
     job: Path, resolved: ResolvedSuite, plan: PlanIdentity
 ) -> None:
+    if plan.source.kind == "harbor":
+        write_json(
+            job / "grade-sets/original.json",
+            {
+                "schema_version": "lingcore.eval-grades.v1",
+                "id": "original",
+                "created_at": utc_now(),
+                "cases": [
+                    {"id": task.id, "graders_digest": task.verifier_digest}
+                    for task in plan.source.tasks
+                ],
+            },
+        )
+        return
     write_json(
         job / "grade-sets/original.json",
         {
@@ -166,6 +180,19 @@ async def _trial(
     locked: bool,
     lock_digest: str | None,
 ) -> TrialResult:
+    if plan.source.kind == "harbor":
+        from lingcore.evaluation.harbor.runner import run_trial
+
+        return await run_trial(
+            resolved,
+            spec,
+            destination,
+            client_factory,
+            plan=plan,
+            attempt=attempt,
+            locked=locked,
+            lock_digest=lock_digest,
+        )
     case = next(c for c in resolved.cases if c.id == spec.case_id)
     execution_id = str(uuid4())
     result_dir = destination / execution_id
@@ -564,11 +591,11 @@ async def run_suite(
 
 
 async def _checked_lock(
-    path: Path, *, require_credentials: bool
+    path: Path, *, require_credentials: bool, bridge: Path | None = None
 ) -> tuple[Lock, bytes, ResolvedSuite]:
     raw = await asyncio.to_thread(read_bytes, path.absolute())
     lock = parse_lock(raw)
-    drift = await validate(lock, path)
+    drift = await validate(lock, path, bridge=bridge)
     if drift:
         raise EvaluationConfigError(
             "locked plan drift: " + ", ".join(d.describe() for d in drift),
@@ -579,6 +606,7 @@ async def _checked_lock(
         path.absolute().parent / lock.suite.path,
         require_credentials=require_credentials,
         allow_locked=True,
+        bridge=bridge,
     )
     return lock, raw, resolved
 
@@ -589,16 +617,17 @@ async def run_locked(
     *,
     client_factory: ClientFactory | None = None,
     on_job: Callable[[Path], None] | None = None,
+    bridge: Path | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     lock, raw, resolved = await _checked_lock(
-        lock_path, require_credentials=client_factory is None
+        lock_path, require_credentials=client_factory is None, bridge=bridge
     )
     job = _new_job(output, on_job)
     write_json(
         job / "job.json",
         {
             "schema_version": "lingcore.eval-job.v2",
-            "mode": "locked_native",
+            "mode": "locked_" + lock.execution.runner,
             "locked": True,
             "lock_digest": lock.digest,
             "plan_digest": lock.plan_digest,
@@ -625,6 +654,7 @@ async def resume(
     *,
     lock_path: Path | None = None,
     client_factory: ClientFactory | None = None,
+    bridge: Path | None = None,
 ) -> dict[str, Any]:
     job = job.absolute()
     with job_lock(job):
@@ -640,7 +670,7 @@ async def resume(
         saved = parse_lock(read_bytes(job / "lock.json"))
         location = lock_path or Path(meta["lock_location"])
         supplied, _, resolved = await _checked_lock(
-            location, require_credentials=client_factory is None
+            location, require_credentials=client_factory is None, bridge=bridge
         )
         if supplied.digest != saved.digest or saved.digest != meta["lock_digest"]:
             raise EvaluationConfigError(
@@ -652,6 +682,15 @@ async def resume(
                 "job plan does not match its lock", "invalid_job"
             )
         state = await asyncio.to_thread(jobs.scan, job, saved)
+        if saved.source.kind == "harbor":
+            from lingcore.evaluation.harbor.runner import check_harness_stopped
+
+            for record in state.executions:
+                if record.state != "finished":
+                    check_harness_stopped(record.directory)
+            for issue in state.issues:
+                if issue.code == "unreadable_trial":
+                    check_harness_stopped(job / "executions" / issue.execution_id)
         for issue in state.issues:
             if issue.code == "unreadable_trial":
                 await finish_io(jobs.quarantine, job, issue)

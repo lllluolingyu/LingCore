@@ -1,0 +1,301 @@
+{
+  "records": [
+    {
+      "trace_id": "00000000000000000000000000000000",
+      "span_id": "0000000000000000",
+      "parent_span_id": null,
+      "turn_id": "turn",
+      "session_id": null,
+      "trial_id": null,
+      "execution_id": "execution",
+      "links": [],
+      "schema_version": "lingcore.trace.v1",
+      "event_id": "1",
+      "run_id": "execution",
+      "seq": 1,
+      "timestamp": "2026-10-30T00:00:00Z",
+      "elapsed_ns": 1,
+      "kind": "event",
+      "name": "request.usage",
+      "status": null,
+      "attributes": {
+        "request_id": "retry",
+        "model": "fake",
+        "purpose": "main",
+        "availability": "reported",
+        "input_tokens": 4,
+        "output_tokens": 1
+      }
+    },
+    {
+      "trace_id": "00000000000000000000000000000000",
+      "span_id": "0000000000000000",
+      "parent_span_id": null,
+      "turn_id": "turn",
+      "session_id": null,
+      "trial_id": null,
+      "execution_id": "execution",
+      "links": [],
+      "schema_version": "lingcore.trace.v1",
+      "event_id": "2",
+      "run_id": "execution",
+      "seq": 2,
+      "timestamp": "2026-10-30T00:00:00Z",
+      "elapsed_ns": 2,
+      "kind": "event",
+      "name": "retry.backoff",
+      "status": null,
+      "attributes": {
+        "attempt": 1,
+        "delay_seconds": 0.1,
+        "previous_request_id": "retry"
+      }
+    },
+    {
+      "trace_id": "00000000000000000000000000000000",
+      "span_id": "0000000000000000",
+      "parent_span_id": null,
+      "turn_id": "turn",
+      "session_id": null,
+      "trial_id": null,
+      "execution_id": "execution",
+      "links": [],
+      "schema_version": "lingcore.trace.v1",
+      "event_id": "3",
+      "run_id": "execution",
+      "seq": 3,
+      "timestamp": "2026-10-30T00:00:00Z",
+      "elapsed_ns": 3,
+      "kind": "event",
+      "name": "request.usage",
+      "status": null,
+      "attributes": {
+        "request_id": "summary",
+        "model": "summary",
+        "purpose": "summary",
+        "availability": "reported",
+        "input_tokens": 5,
+        "output_tokens": 2
+      }
+    },
+    {
+      "trace_id": "00000000000000000000000000000000",
+      "span_id": "0000000000000000",
+      "parent_span_id": null,
+      "turn_id": "turn",
+      "session_id": null,
+      "trial_id": null,
+      "execution_id": "execution",
+      "links": [],
+      "schema_version": "lingcore.trace.v1",
+      "event_id": "4",
+      "run_id": "execution",
+      "seq": 4,
+      "timestamp": "2026-10-30T00:00:00Z",
+      "elapsed_ns": 4,
+      "kind": "event",
+      "name": "memory.compact",
+      "status": null,
+      "attributes": {
+        "input_messages": 10,
+        "output_messages": 2
+      }
+    },
+    {
+      "trace_id": "00000000000000000000000000000000",
+      "span_id": "0000000000000000",
+      "parent_span_id": null,
+      "turn_id": "turn",
+      "session_id": null,
+      "trial_id": null,
+      "execution_id": "execution",
+      "links": [],
+      "schema_version": "lingcore.trace.v1",
+      "event_id": "5",
+      "run_id": "execution",
+      "seq": 5,
+      "timestamp": "2026-10-30T00:00:00Z",
+      "elapsed_ns": 5,
+      "kind": "event",
+      "name": "request.usage",
+      "status": null,
+      "attributes": {
+        "request_id": "main",
+        "model": "fake",
+        "purpose": "main",
+        "availability": "reported",
+        "input_tokens": 10,
+        "output_tokens": 3,
+        "cached_input_tokens": 2
+      }
+    },
+    {
+      "trace_id": "00000000000000000000000000000000",
+      "span_id": "0000000000000000",
+      "parent_span_id": null,
+      "turn_id": "turn",
+      "session_id": null,
+      "trial_id": null,
+      "execution_id": "execution",
+      "links": [],
+      "schema_version": "lingcore.trace.v1",
+      "event_id": "6",
+      "run_id": "execution",
+      "seq": 6,
+      "timestamp": "2026-10-30T00:00:00Z",
+      "elapsed_ns": 6,
+      "kind": "event",
+      "name": "request.usage",
+      "status": null,
+      "attributes": {
+        "request_id": "missing",
+        "model": "fake",
+        "purpose": "main",
+        "availability": "missing"
+      }
+    },
+    {
+      "trace_id": "00000000000000000000000000000000",
+      "span_id": "0000000000000000",
+      "parent_span_id": null,
+      "turn_id": "turn",
+      "session_id": null,
+      "trial_id": null,
+      "execution_id": "execution",
+      "links": [],
+      "schema_version": "lingcore.trace.v1",
+      "event_id": "7",
+      "run_id": "execution",
+      "seq": 7,
+      "timestamp": "2026-10-30T00:00:00Z",
+      "elapsed_ns": 7,
+      "kind": "event",
+      "name": "content.capture",
+      "status": null,
+      "attributes": {
+        "artifact_id": "content",
+        "content.kind": "turn.committed",
+        "redacted": true,
+        "truncated": false,
+        "omitted_items": 0
+      }
+    },
+    {
+      "trace_id": "00000000000000000000000000000000",
+      "span_id": "0000000000000000",
+      "parent_span_id": null,
+      "turn_id": "turn",
+      "session_id": null,
+      "trial_id": null,
+      "execution_id": "execution",
+      "links": [],
+      "schema_version": "lingcore.trace.v1",
+      "event_id": "8",
+      "run_id": "execution",
+      "seq": 8,
+      "timestamp": "2026-10-30T00:00:00Z",
+      "elapsed_ns": 8,
+      "kind": "event",
+      "name": "turn.rollback",
+      "status": null,
+      "attributes": {
+        "reason": "cancelled"
+      }
+    },
+    {
+      "trace_id": "00000000000000000000000000000000",
+      "span_id": "0000000000000000",
+      "parent_span_id": null,
+      "turn_id": "turn",
+      "session_id": null,
+      "trial_id": null,
+      "execution_id": "execution",
+      "links": [],
+      "schema_version": "lingcore.trace.v1",
+      "event_id": "9",
+      "run_id": "execution",
+      "seq": 9,
+      "timestamp": "2026-10-30T00:00:00Z",
+      "elapsed_ns": 9,
+      "kind": "event",
+      "name": "execution.outcome",
+      "status": null,
+      "attributes": {
+        "status": "timed_out",
+        "cause": "agent",
+        "limit_type": "wall_seconds"
+      }
+    }
+  ],
+  "content": [
+    {
+      "kind": "message",
+      "value": {
+        "role": "user",
+        "content": "Synthetic task."
+      }
+    },
+    {
+      "kind": "prompt",
+      "value": {
+        "system": "Use the terminal.",
+        "tools": []
+      }
+    },
+    {
+      "kind": "message",
+      "value": {
+        "role": "assistant",
+        "content": "Working.",
+        "request_id": "main",
+        "finish_reason": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "a",
+            "name": "terminal_exec",
+            "arguments": {
+              "command": "first"
+            }
+          },
+          {
+            "id": "b",
+            "name": "terminal_exec",
+            "arguments": {
+              "command": "second"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "message",
+      "value": {
+        "role": "tool",
+        "tool_call_id": "b",
+        "content": "second result"
+      }
+    },
+    {
+      "kind": "message",
+      "value": {
+        "role": "tool",
+        "tool_call_id": "a",
+        "content": "first result"
+      }
+    },
+    {
+      "kind": "message",
+      "value": {
+        "role": "assistant",
+        "content": "Partial response.",
+        "request_id": "missing",
+        "finish_reason": "length",
+        "tool_calls": []
+      }
+    },
+    {
+      "kind": "final",
+      "value": "Guarded final."
+    }
+  ]
+}

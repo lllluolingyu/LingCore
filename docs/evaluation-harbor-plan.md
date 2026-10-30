@@ -1,13 +1,15 @@
 # Milestone 3: Harbor benchmark adapter
 
-Status: implementation plan, 2026-10-30. It expands
+Status: steps 3.1–3.9 implemented, 2026-10-30; synthetic Docker acceptance
+verified. The real-model public development subset remains manual. This expands
 [milestone 3 of the tracing and evaluation design](tracing-and-evaluation.md#later-milestones)
 and replaces the in-process adapter proposed in the
 [Terminal-Bench integration design](evaluation-terminal-bench.md). It builds on
 the milestone 2 [locked plans](evaluation-locked-plans.md). Harbor facts were
 read from Harbor 0.25.0 (source commit `ed3f332`, 2026-10-29), and
 Terminal-Bench facts from release v4.0.0 (commit `452bf305`, 66 tasks). Step
-3.1 re-checks each one against the pinned releases.
+3.1 re-checks each one against the pinned releases. Its verified findings are
+recorded below; the implementation keeps Harbor isolated from LingCore.
 
 ## Goal
 
@@ -177,11 +179,19 @@ are parsed by both test suites, so the two definitions cannot drift apart.
 | --- | --- | --- |
 | `hello` | bridge → LingCore | protocol, execution ID, bridge version and digest, Harbor version, task name, instruction, environment type, probe result |
 | `exec` | LingCore → bridge | call ID, command, cwd, timeout, capture bytes |
-| `exec_result` | bridge → LingCore | call ID, exit code, output, total output bytes, truncated, timed out, duration |
+| `exec_result` | bridge → LingCore | call ID, exit code, base64 output, total output bytes (null when the backstop cannot finish counting), truncated, timed out, duration |
+| `interrupt` | LingCore → bridge | Call ID; stop this command and drain its result while retaining the trial connection |
 | `usage` | LingCore → bridge | Running totals and per-model usage, sent after each model request so a harness timeout still leaves them in `AgentContext` |
-| `finish` | LingCore → bridge | Execution outcome, final usage, metadata, optional ATIF trajectory |
+| `finish` | LingCore → bridge | Execution outcome, final usage, metadata, optional ATIF trajectory, absent-export reason |
 | `finished` | bridge → LingCore | Sweep status (`clean` or `failed`) and ATIF status (`written`, `invalid`, or `absent`) |
 | `abort` | either | Reason: `cancelled`, `harness_timeout`, or `protocol_error` |
+
+A dedicated LingCore reader notices bridge-initiated aborts even between tool
+calls and while the model is streaming. A turn deadline interrupts the active
+command, then sends `finish`; only the runner aborts the whole trial on external
+cancellation. A trajectory that would exceed the frame cap is omitted with
+`atif_reason: oversized`, preserving outcome and usage. Oversized commands are
+ordinary tool errors, not retryable protocol failures.
 
 Requests are sequential. Harbor profiles must set `loop.parallel_tools:
 false`, and the binding serializes calls regardless. EOF from LingCore, after
@@ -223,12 +233,15 @@ Command supervision in the bridge agent:
 - Each command runs through a small bash wrapper. Harbor's Docker `exec`
   already requires bash. The wrapper starts the command in a new session,
   captures the first `capture_bytes` while draining the rest, and counts the
-  total bytes. Like `run_shell`, it never blocks the command or sends it
+  total bytes on a separate `tee` branch, so buffered `head` implementations
+  cannot undercount discarded bytes. Like `run_shell`, it never blocks the command or sends it
   SIGPIPE. It enforces `timeout_sec` inside the container by killing the
   command's process group.
 - Harbor's own `exec` timeout is set 30 seconds longer, as a backstop. If the
-  backstop fires, the bridge kills the process group with a second `exec` and
-  checks that it is gone.
+  backstop fires, the bridge kills the process group with a second `exec`.
+  Detached children holding the pipe open yield a bounded prefix with an
+  unknown total byte count; the final sweep confirms no process can change
+  artifacts before verification. Interrupts also bound the reply drain.
 - Before the first command, the agent records the PIDs already present.
   `finish`, `abort`, cancellation, and EOF each kill every process outside that
   baseline, repeat until none remain (bounded), and remove the wrapper's
@@ -237,7 +250,7 @@ Command supervision in the bridge agent:
   shared verifier. A sweep that cannot confirm an empty set reports `failed`,
   which invalidates the trial as a cleanup failure.
 - The setup probe checks for `/proc`, `bash`, `setsid`, `kill`, `head`, `cat`,
-  and `wc`. A missing prerequisite ends the trial as `unsupported` before the
+  `wc`, `base64`, `mkfifo`, `mkdir`, `rm`, `sleep`, and `touch`. A missing prerequisite ends the trial as `unsupported` before the
   agent starts.
 - The wrapper's runtime directory under `/tmp` is visible to the agent while
   it runs. It is removed before verification.
@@ -266,15 +279,19 @@ Preflight for `runner: harbor` refuses:
   for this runner);
 - `trace.exports: [atif]` with `trace.content: metadata`.
 
-It also refuses `limits.wall_seconds` that is not at least 60 seconds below
-every selected task's agent timeout after multipliers, so LingCore's deadline
-ends the turn before Harbor cancels it.
+It also refuses `limits.wall_seconds` that is not at least 150 seconds below
+every selected task's agent timeout after multipliers. This reserves 60 seconds
+for the probe and process baseline, 30 for interrupt/drain, 15 for the sweep,
+30 for trace export, and 15 for transport and scheduling. Harness cancellation
+during finish still waits for the sweep and remains a non-retryable timeout.
 
 Terminal-Bench 4.0 instructions tell the agent it has 28800 seconds. When
-`wall_seconds` is lower, the lock records the `reduced_limits` limitation,
-because the instruction overstates the real budget. The prebuilt images are
+`wall_seconds` is lower than the multiplied task timeout minus this required
+reserve, the lock records the `reduced_limits` limitation. The reserve alone
+does not trigger that flag. The prebuilt images are
 `linux/amd64`. On any other host architecture, Docker emulates them, which is
-slower and changes timing, so reports record `emulated_platform`.
+slower and changes timing, so reports record `emulated_platform` from the
+execution host saved in each result, rather than the machine that made the lock.
 
 ## Task selection
 
@@ -286,7 +303,7 @@ derived properties:
 | --- | --- | --- |
 | `os` | `[environment].os`, or Harbor's default when omitted | All Linux |
 | `gpus` | `[environment].gpus` and `[verifier.environment].gpus`; omitted means 0 | 3 tasks need a GPU |
-| `containers` | Services in `environment/docker-compose.yaml`; otherwise 1 | 11 tasks use compose |
+| `containers` | Union of compose services and Harbor's implicit `main`, taking the maximum across agent and verifier; otherwise 1 | 11 tasks use compose |
 | `cpus`, `memory_mb`, `storage_mb` | `[environment]` | 2–16 CPUs, 4–32 GiB, storage up to 1,024,000 MB |
 | `task_tools` | Non-empty `[environment].mcp_servers` or `skills_dir` | One task has MCP servers, one a skills directory |
 | `steps` | `[[steps]]` | None |
@@ -373,8 +390,8 @@ and `execution` and `grading` gain variants for `runner: harbor` and
       "digest": "sha256:…",
       "harbor": "0.25.0",
       "python": "CPython 3.12.…",
-      "bridge": {"version": "0.1.0", "digest": "sha256:…",
-                 "protocol": "lingcore.harbor-bridge.v1"},
+      "bridge": {"version": "0.1.0", "digest": "sha256:…"},
+      "protocol": "lingcore.harbor-bridge.v1",
       "environment": "docker",
       "error_policy_digest": "sha256:…",
       "atif": "ATIF-v1.7",
@@ -416,7 +433,9 @@ executions/<execution-id>/
   harbor/                  # Harbor --jobs-dir; written only by Harbor
   harbor.lock              # held by the bridge process while it runs
   harbor-summary.json      # the bridge's summary of Harbor's trial; exclusive create
-  regrades/<grade-set>/    # Harbor's regrade output for one pass; written only by Harbor
+  regrades/<grade-set>/
+    harbor/                # regrade output; written only by Harbor
+    harbor-summary.json    # LingCore's normalized summary, outside Harbor's tree
 ```
 
 `evidence.json` indexes the Harbor files with digests and sizes: the trial
@@ -480,6 +499,50 @@ model.
 
 ### 3.1 Harbor environment and bridge package
 
+Implemented in `adapters/harbor-bridge/`, with an independent dependency lock
+and Python 3.12 CI job. The public command provides offline `describe`;
+trial, summarize, and regrade are implemented by the later steps below. The
+bridge agent runs through Harbor's external-agent loader.
+
+Verified against the [Harbor 0.25.0 wheel](https://pypi.org/project/harbor/0.25.0/)
+using CPython 3.12.16 and Docker 29.9.2:
+
+- `harbor.cli.main.app(args=..., standalone_mode=False)` is callable in-process.
+  Harbor's loader constructs `lingcore_harbor_bridge.agent:BridgeAgent`.
+- The deprecated `Task.checksum` uses dirhash SHA-256 with Harbor's
+  `TaskFileFilter`. Its scantree dependency probes git when imported. The
+  durable `TrialLock.task.digest` instead uses
+  `Packager.compute_content_hash`: sorted paths, each encoded as
+  `relative_path + NUL + file_sha256 + newline`, hashed with SHA-256. Describe
+  uses this exact Harbor API and emits the prefixed lock digest. A real Docker
+  trial confirmed the match. It does not import the legacy checksum dependency.
+- Docker `ExecResult.stdout` is UTF-8 text decoded with `errors="replace"`;
+  absent output is `None`. Stderr is merged by Docker exec, as described above.
+- `-k 1` is the attempt count, `-n 1` is concurrency, and `--max-retries 0`
+  disables retries. A synthetic no-op run produced exactly one trial directory
+  and a valid reward of zero. SIGTERM during a separate synthetic holding-agent
+  run removed its task container. These are opt-in Docker tests, without models.
+- All 66 `tasks/*/task.toml` files from
+  [Terminal-Bench v4.0.0](https://github.com/harbor-framework/terminal-bench/releases/tag/v4.0.0)
+  parse through Harbor's `TaskConfig`. There are 3 GPU tasks, 11 compose tasks,
+  2 tasks with supplied tools/skills, 52 eligible under the OS/GPU/container
+  filter, and 66 separate verifiers. Contrary to the initial note, only 5 files
+  declare schema `2.0`; the rest use earlier supported versions. Only metadata
+  files were downloaded for this check, without task data or benchmark runs.
+- A local trial regrade uses `SourceTrialConfig(action="regrade", type="local",
+  path=<source-trial>)` in the new trial's configuration. Harbor's
+  `job regrade <source-job> -p <current-task> --jobs-dir <output>` is the CLI
+  convenience route; the derived job/trial directories live under that output
+  and source records are retained. End-to-end regrade is verified in step 3.7.
+- Harbor supports ATIF v1.0 through v1.8; the planned producer remains v1.7.
+  Describe also measures Harbor's package files and installed direct dependency
+  versions, so harness provenance can detect changes under lower-bound dependencies.
+
+Initial step-3.1 checks: 11 offline tests passed and 2 Docker tests passed;
+bridge Ruff and mypy pass. Tests block LingCore imports and network/subprocess
+operations during a fresh `describe` import and invocation. The base LingCore
+dependencies and lockfile are unchanged.
+
 This step gates the rest. New `adapters/harbor-bridge/` with its own
 `pyproject.toml`: distribution `lingcore-harbor-bridge`, Python ≥3.12,
 `harbor==0.25.0`, and console script `lingcore-harbor-bridge`. Module
@@ -506,8 +569,8 @@ This step implements `describe` and settles the open facts.
   - That `--max-retries 0`, `-k 1`, and `-n 1` produce exactly one trial
     directory.
   - That SIGTERM removes the task container.
-  - That 0.25.0 parses all 66 Terminal-Bench 4.0 task files (most declare
-    `schema_version = "2.0"`) and reproduces the eligibility counts above.
+  - That 0.25.0 parses all 66 Terminal-Bench 4.0 task files (with mixed
+    supported schema versions) and reproduces the eligibility counts above.
   - How a regrade of one local source trial is started (the job
     configuration's `SourceTrialConfig` with `action: regrade`), and where its
     output goes.
@@ -524,6 +587,20 @@ LingCore's own suite installs neither.
 
 ### 3.2 Bridge protocol and terminal binding (LingCore side)
 
+Implemented with independent wire models in each package and shared fixtures
+for all eight message types. The terminal output field contains base64-encoded
+captured bytes, which preserves binary output and keeps JSON expansion bounded;
+tools display UTF-8 text with replacement. Capture is capped at 2 MiB per
+request (default 1 MiB), within the 4 MiB wire limit. Native profile behavior
+and global tool registration remain unchanged.
+
+Tests cover the private socket, first connection and execution ID, malformed
+frames, cancellation, serialized calls, output storage/eviction, foreign handles,
+an independent stdlib bridge subprocess and offline identity assembly. Step
+3.5 tests the actual subprocess environment builder and scans recorded frames
+and job files for a fixture secret. Protocol errors use a typed runner signal that ordinary
+tool-error conversion cannot swallow. The relay and CLI source integration are implemented in steps 3.3–3.5.
+
 New `lingcore/evaluation/harbor/` with `protocol.py` (message models and
 framing), `listener.py` (private directory, one connection, execution ID
 check), `binding.py` (`HarborTerminal`, implementing `EnvironmentBinding`),
@@ -536,7 +613,7 @@ in-memory environment):
 - `display_bytes`, `capture_bytes`, and the store cap hold; evicted, unknown,
   and foreign handles are tool errors.
 - `max_timeout` clamps.
-- Cancellation sends `abort`.
+- Cancellation interrupts the active command, drains its reply, and permits `finish`; external runner cancellation sends `abort`.
 - Oversized, malformed, and unknown frames end the trial as `runner`.
 - A second connection and a wrong execution ID are refused.
 - The socket path stays below the macOS limit.
@@ -633,12 +710,14 @@ steps and records the same grade sets and reports:
 1. Acquire `.lock` and load the current tasks. Refuse, by task ID, any task
    whose `input_digest` changed; a changed `verifier_digest` is the point and
    is recorded.
-2. Refuse, by task ID, any task whose verifier mode is not `separate`. Check
-   that every finished execution has a Harbor trial, then start no regrade
-   until the whole pass is checked.
-3. For each finished execution, run `lingcore-harbor-bridge regrade` with the
+2. Use `jobs.select` to choose attempts. Only selected attempts whose original
+   grade was valid can be regraded; copy every other finished attempt's original
+   grade and rewards into the new grade set unchanged. For eligible attempts,
+   refuse tasks whose verifier mode is not `separate` or whose saved Harbor
+   trial is missing, checking the whole pass before starting any regrade.
+3. For each eligible execution, run `lingcore-harbor-bridge regrade` with the
    source trial and the current task. The output goes to
-   `executions/<id>/regrades/<grade-set>/`. Harbor seeds the saved artifacts
+   `executions/<id>/regrades/<grade-set>/harbor/`. Harbor seeds the saved artifacts
    into a fresh verifier environment, with its no-op agent in place of an
    agent.
 4. Map each regrade summary to a grade with the outcome-mapping rows for
@@ -647,7 +726,10 @@ steps and records the same grade sets and reports:
    milestone 2.
 
 Regrade starts no LingCore Agent, model client, terminal tool, or bridge
-socket. It does need Docker.
+socket. It does need Docker. It forwards the lock's `pass_env` after credential
+filtering. The pinned Harbor regrade command cannot apply timeout multipliers,
+so non-default multipliers are refused with `regrade_timeout_multipliers` before
+any grade output is written.
 
 Tests, with the fake bridge:
 - A corrected test produces a new grade set while every original record stays
@@ -656,14 +738,23 @@ Tests, with the fake bridge:
 - A shared-mode task is refused.
 - A `RegradeError` is refused by task.
 - A factory that raises proves no Agent or model client is built.
+- Unsupported/protocol-failed attempts keep their original grades; a superseded
+  environment failure with no usable trial cannot block a healthy selected attempt.
+- Locked environment forwarding and refusal of unsupported timeout multipliers.
 
 ### 3.8 ATIF export
 
 LingCore builds an `ATIF-v1.7` trajectory from the trace journal, following the
-mapping table in the design doc, and sends it in `finish`. The bridge
+mapping table in the design doc, and sends it in `finish` when it fits. Oversized
+trajectories become `atif: absent` with reason `oversized`, without changing the
+execution outcome or retry selection. The bridge
 validates it with Harbor's own trajectory model before writing
 `agent/trajectory.json`, and declares `AgentCapabilities(atif=True)`. Without
 captured content, no trajectory is sent and the report says `atif: absent`.
+The runner flushes the trace sink before exporting on a worker thread. Export
+errors or the 30-second export deadline yield `atif_reason: incomplete` and
+still send finish. Disabled exports report `disabled` with redacted capture,
+or `metadata_only` with metadata capture.
 
 Tests: LingCore golden trajectories cover parallel calls, compaction,
 transport retries, incomplete responses, cancellation, and missing provider
@@ -690,6 +781,33 @@ shaped like a Terminal-Bench task:
 - Manual step: resolve and run the Terminal-Bench development subset with a
   real model. Inspect every trace and compare the normalized rewards with
   Harbor's originals. This step is not a CI gate.
+
+## Verified implementation checks
+
+Final checks: LingCore 1,617 passed / 16 skipped; LingChat 143 passed;
+the isolated bridge's 37 tests passed across the full Docker-enabled suite
+and the added finish-timeout regression run (32 offline, five Docker cases).
+All six LingCore synthetic Docker cases passed together. Ruff and mypy
+pass in both projects and the bridge. LingCore's dependencies are unchanged.
+The final command-supervision regression additionally verifies that redirected
+background services survive between commands and are gone after the sweep.
+
+- Core tests use a stdlib fake bridge subprocess: lock drift, selection and
+  profile refusals, live aborts, timeout → interrupt → finish, malformed frames
+  through a real Agent, credential filtering and frame/file scanning, resume,
+  harness-lock refusal, outcome mapping, and regrade without Agent construction.
+- Bridge tests cover implicit compose `main` in both environments, safe
+  diagnostics, relay sequencing, usage, cleanup on EOF/abort/malformed input,
+  and shared protocol and ATIF fixtures validated by pinned Harbor models.
+- Real Docker checks cover bounded `yes` output, command timeout/interruption,
+  detached-process sweep, harness timeout during the final sweep, passing and valid-failing locked runs, preserved
+  records during corrected-verifier regrade, Ctrl-C-style cancellation and
+  resume, and a killed LingCore process followed by EOF cleanup and resume.
+  Harbor oracle/no-op reference runs produce rewards 1 and 0.
+- The `SourceTrialConfig` construction check alone is not evidence of regrade;
+  the synthetic separate-verifier Docker test exercises the actual regrade.
+- No public benchmark task or paid model was run. The real-model Terminal-Bench
+  development subset is a manual follow-up, not a completed check.
 
 ## Documentation updates
 

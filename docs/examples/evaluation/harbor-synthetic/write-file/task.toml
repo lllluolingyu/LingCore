@@ -1,0 +1,18 @@
+schema_version = "2.0"
+artifacts = ["/app/"]
+[task]
+name = "lingcore/write-file"
+version = "1.0.0"
+[agent]
+timeout_sec = 180
+[environment]
+docker_image = "python@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f"
+cpus = 1
+memory_mb = 256
+storage_mb = 1024
+[verifier]
+timeout_sec = 30
+environment_mode = "separate"
+[verifier.environment]
+cpus = 1
+memory_mb = 256

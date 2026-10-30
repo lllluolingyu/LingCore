@@ -52,13 +52,22 @@ class ResolvedSuite:
     suite: Suite
     cases: tuple[Case, ...]
     profile: AgentProfile
+    bridge: Path | None = None
+    description: dict[str, Any] | None = None
+    dataset: Path | None = None
 
 
 def resolve_suite(
-    path: Path, *, require_credentials: bool = True, allow_locked: bool = False
+    path: Path,
+    *,
+    require_credentials: bool = True,
+    allow_locked: bool = False,
+    bridge: Path | None = None,
 ) -> ResolvedSuite:
     suite: Suite = load_yaml(path, Suite)
-    if suite.source.lock.required and not allow_locked:
+    if (
+        suite.source.lock.required or suite.source.kind == "harbor"
+    ) and not allow_locked:
         raise EvaluationConfigError(
             "this suite requires a locked plan; use eval resolve and eval run --lock",
             "locked_plan_required",
@@ -88,6 +97,12 @@ def resolve_suite(
             "cannot load the agent profile; run lingcore doctor -p <profile> to inspect its configuration",
             "agent_profile",
         ) from None
+    if suite.source.kind == "harbor":
+        from lingcore.evaluation.harbor.source import resolve_harbor
+
+        return resolve_harbor(
+            suite, profile, path, bridge=bridge, require_credentials=require_credentials
+        )
     ceiling = set(profile.tools)
     if "run_shell" in ceiling or any(name.startswith("process_") for name in ceiling):
         try:

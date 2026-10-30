@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Protocol
@@ -49,6 +49,7 @@ async def closing_stream(
 class RequestLedger:
     def __init__(self) -> None:
         self.records: list[RequestUsage] = []
+        self.on_record: Callable[[], None] | None = None
         self.last_request_id: str | None = None
         self.retry_request_id: str | None = None
 
@@ -178,6 +179,8 @@ class InstrumentedClient:
                     else "partial",
                 )
                 self.ledger.records.append(usage)
+                if self.ledger.on_record is not None:
+                    self.ledger.on_record()
                 if self.budget is not None:
                     self.budget.record_usage(usage)
                 self.recorder.event(

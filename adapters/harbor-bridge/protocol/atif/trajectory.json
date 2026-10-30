@@ -1,0 +1,191 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "session_id": "execution",
+  "agent": {
+    "name": "LingCore",
+    "version": "fixture",
+    "model_name": "fake",
+    "tool_definitions": []
+  },
+  "steps": [
+    {
+      "source": "user",
+      "message": "Synthetic task.",
+      "extra": {
+        "lingcore": {
+          "redacted": true,
+          "turn_id": "turn"
+        }
+      },
+      "step_id": 1
+    },
+    {
+      "source": "system",
+      "message": "Use the terminal.",
+      "extra": {
+        "lingcore": {
+          "prompt": true
+        }
+      },
+      "step_id": 2
+    },
+    {
+      "source": "agent",
+      "message": "Working.",
+      "extra": {
+        "lingcore": {
+          "redacted": true,
+          "turn_id": "turn",
+          "request_id": "main",
+          "finish_reason": "tool_calls"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 10,
+        "completion_tokens": 3,
+        "cached_tokens": 2,
+        "extra": {
+          "availability": "reported"
+        }
+      },
+      "model_name": "fake",
+      "tool_calls": [
+        {
+          "tool_call_id": "a",
+          "function_name": "terminal_exec",
+          "arguments": {
+            "command": "first"
+          }
+        },
+        {
+          "tool_call_id": "b",
+          "function_name": "terminal_exec",
+          "arguments": {
+            "command": "second"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "source_call_id": "b",
+            "content": "second result"
+          },
+          {
+            "source_call_id": "a",
+            "content": "first result"
+          }
+        ]
+      },
+      "step_id": 3
+    },
+    {
+      "source": "agent",
+      "message": "Partial response.",
+      "extra": {
+        "lingcore": {
+          "redacted": true,
+          "turn_id": "turn",
+          "request_id": "missing",
+          "finish_reason": "length",
+          "guarded_final": "Guarded final."
+        }
+      },
+      "metrics": {
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "cached_tokens": null,
+        "extra": {
+          "availability": "missing"
+        }
+      },
+      "model_name": "fake",
+      "step_id": 4
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 19,
+    "total_completion_tokens": 6,
+    "total_cached_tokens": 2,
+    "total_steps": 4
+  },
+  "extra": {
+    "lingcore": {
+      "execution_id": "execution",
+      "trace_complete": true,
+      "redacted": true,
+      "events": [
+        {
+          "name": "retry.backoff",
+          "status": null,
+          "attributes": {
+            "attempt": 1,
+            "delay_seconds": 0.1,
+            "previous_request_id": "retry"
+          }
+        },
+        {
+          "name": "memory.compact",
+          "status": null,
+          "attributes": {
+            "input_messages": 10,
+            "output_messages": 2
+          }
+        },
+        {
+          "name": "turn.rollback",
+          "status": null,
+          "attributes": {
+            "reason": "cancelled"
+          }
+        },
+        {
+          "name": "execution.outcome",
+          "status": null,
+          "attributes": {
+            "status": "timed_out",
+            "cause": "agent",
+            "limit_type": "wall_seconds"
+          }
+        }
+      ],
+      "requests": [
+        {
+          "request_id": "retry",
+          "model": "fake",
+          "purpose": "main",
+          "availability": "reported",
+          "input_tokens": 4,
+          "output_tokens": 1
+        },
+        {
+          "request_id": "summary",
+          "model": "summary",
+          "purpose": "summary",
+          "availability": "reported",
+          "input_tokens": 5,
+          "output_tokens": 2
+        },
+        {
+          "request_id": "main",
+          "model": "fake",
+          "purpose": "main",
+          "availability": "reported",
+          "input_tokens": 10,
+          "output_tokens": 3,
+          "cached_input_tokens": 2
+        },
+        {
+          "request_id": "missing",
+          "model": "fake",
+          "purpose": "main",
+          "availability": "missing"
+        }
+      ],
+      "unattributed_request_ids": [
+        "retry",
+        "summary"
+      ]
+    }
+  }
+}

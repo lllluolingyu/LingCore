@@ -86,10 +86,18 @@ def current_cases(
     return cases, secrets
 
 
-async def regrade(job: Path, *, lock_path: Path | None = None) -> dict[str, Any]:
+async def regrade(
+    job: Path, *, lock_path: Path | None = None, bridge: Path | None = None
+) -> dict[str, Any]:
     job = job.absolute()
     with job_lock(job):
         plan, provenance = _plan_record(job)
+        if plan.source.kind == "harbor":
+            from lingcore.evaluation.harbor.regrade import regrade_harbor
+
+            return await regrade_harbor(
+                job, plan, provenance, lock_path=lock_path, bridge=bridge
+            )
         cases, _ = await asyncio.to_thread(
             current_cases, job, plan, lock_path=lock_path
         )

@@ -1,13 +1,14 @@
 # Terminal-Bench example integration
 
-Status: proposed adapter and evaluation example, researched 2026-10-28.
+Status: historical design, researched 2026-10-28; implemented through the
+separate bridge described in the milestone 3 plan, 2026-10-30.
 This document accompanies the
 [general tracing and evaluation design](tracing-and-evaluation.md).
-No benchmark was run, no score is claimed, and the proposed LingCore commands
-and adapter package are not implemented yet.
+Synthetic Docker runs are verified. No public benchmark score is claimed.
+The plan and current examples define the executable commands and schema.
 
 The [milestone 3 implementation plan](evaluation-harbor-plan.md) (2026-10-30)
-supersedes parts of this design:
+supersedes the architecture and proposed schema below:
 - Harbor runs in its own Python environment, with a bridge that never imports
   LingCore, instead of an in-process adapter.
 - The agent loop and model credentials stay in the LingCore process.

@@ -23,11 +23,19 @@ from typing import Any, Literal
 
 import yaml
 from dotenv import dotenv_values
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 from lingcore.errors import ConfigError
 from lingcore.media_types import FALLBACK_TEXT_MAX_CHARS, NativeModality
 from lingcore.modality import DEFAULT_PDF_MAX_CHARS
+from lingcore.terminal_options import TerminalOptions
 from lingcore.tool_options import (
     parse_network_policy,
     parse_search_options,
@@ -400,6 +408,12 @@ class AgentProfile(BaseModel):
     skills: list[str] = Field(default_factory=list)
     plugins: list[str] = Field(default_factory=list)
     tool_options: dict[str, Any] = Field(default_factory=dict)
+    _terminal_options: TerminalOptions = PrivateAttr(default_factory=TerminalOptions)
+
+    @property
+    def terminal_options(self) -> TerminalOptions:
+        return self._terminal_options
+
     memory: MemoryCfg = Field(default_factory=MemoryCfg)
     loop: LoopCfg = Field(default_factory=LoopCfg)
     guardrail: GuardrailCfg = Field(default_factory=GuardrailCfg)
@@ -449,6 +463,9 @@ class AgentProfile(BaseModel):
             raise ValueError(
                 f"skill_gated_tools {gated_extra} are not listed in tools (the ceiling)"
             )
+        self._terminal_options = TerminalOptions.model_validate(
+            self.tool_options.get("terminal_exec", {})
+        )
         if "run_shell" in self.tool_options:
             # Kept in the sandbox module so direct ToolContext callers and
             # profile loading share one strict, extra-forbid contract.

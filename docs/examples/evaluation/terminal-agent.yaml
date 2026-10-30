@@ -1,4 +1,4 @@
-# Current AgentProfile shape; requires the PROPOSED Harbor tool binding.
+# Agent for locked Harbor evaluations; commands run in the assigned container.
 name: terminal-evaluation
 llm:
   backend: openai
@@ -20,6 +20,12 @@ persona:
     Report what you completed and any unresolved limitations.
   project_instructions: []
 tools: [terminal_exec, terminal_read_output]
+tool_options:
+  terminal_exec:
+    timeout: 120
+    max_timeout: 900
+    capture_bytes: 1048576
+    display_bytes: 16384
 plugins: []
 skills: []
 memory:

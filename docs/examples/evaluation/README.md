@@ -1,12 +1,12 @@
 # Evaluation examples
 
 The native example supports unlocked runs and the complete
-[locked evaluation workflow](../../evaluation-locked-plans.md). Harbor and its
-`terminal_exec` / `terminal_read_output` bindings remain proposed for milestone 3.
+[locked evaluation workflow](../../evaluation-locked-plans.md). The Harbor adapter
+runs locked local exports with a separate Python environment and Docker.
 
 | File | Purpose |
 | --- | --- |
-| [terminal-bench.yaml](terminal-bench.yaml) | Proposed public Terminal-Bench 4.0 development subset through Harbor |
+| [terminal-bench.yaml](terminal-bench.yaml) | Public Terminal-Bench 4.0 development subset through Harbor |
 | [terminal-agent.yaml](terminal-agent.yaml) | Dedicated environment-only agent profile for that adapter |
 | [local.yaml](local.yaml) | Executable native suite with two repetitions of a file-writing task |
 | [local-agent.yaml](local-agent.yaml) | Minimal profile for the native example |
@@ -134,7 +134,43 @@ Run the deterministic acceptance tests without provider calls:
 uv run pytest tests/test_eval_identity.py tests/test_eval_lock.py tests/test_eval_jobs.py tests/test_eval_retries.py tests/test_eval_regrade.py tests/test_eval_cli.py -q
 ```
 
-The Terminal-Bench suite still requires the milestone 3 Harbor adapter and its
-source-specific lock identities (tasks, images, and verifiers). Its reduced
-budgets and alphabetical development selection cannot produce a full benchmark
-score. No tasks have been downloaded or run as part of this implementation.
+Install the bridge separately, export Terminal-Bench, and set `source.path` to
+the export directory containing the task folders:
+
+```sh
+uv tool install --python 3.12 ./adapters/harbor-bridge
+uvx --python 3.12 harbor@0.25.0 download terminal-bench/terminal-bench@4.0.0 --export -o datasets/
+lingcore eval resolve docs/examples/evaluation/terminal-bench.yaml --lock tb.lock.json
+lingcore eval validate --lock tb.lock.json
+lingcore eval run --lock tb.lock.json --output /tmp/lingcore-evals
+lingcore eval resume /tmp/lingcore-evals/<job-id>
+lingcore eval regrade /tmp/lingcore-evals/<job-id>
+```
+
+Use `--bridge /path/to/lingcore-harbor-bridge` or `LINGCORE_HARBOR_BRIDGE` if it
+is not on PATH. Resolve and validate need no Docker or model access. Run,
+resume, and Harbor regrade need Docker; regrade starts no agent or model.
+Harbor retries are always disabled. The local ledger selects attempts
+independently of rewards. A running orphan bridge blocks resume until it
+releases its execution lock.
+
+`mean_reward` averages valid trials per task, then tasks. `harbor_accuracy`
+counts missing and invalid trials as zero over the planned denominator.
+Named rewards, validity, phase timings, harness provenance, training-use
+restrictions, and limitations remain in each report. Correcting a verifier
+creates a new grade set; changing agent input refuses regrade.
+Only selected attempts with valid original grades are reverified; other
+attempts keep their original grades. Regrade forwards the locked `pass_env`.
+Non-default Harbor timeout multipliers currently refuse regrade because the
+pinned Harbor regrade command cannot preserve them.
+
+The [synthetic task](harbor-synthetic/write-file/) exercises separate-verifier
+artifact collection without a public benchmark or paid model. Opt-in checks:
+
+```sh
+LINGCORE_HARBOR_E2E=1 LINGCORE_HARBOR_BRIDGE=/path/to/lingcore-harbor-bridge uv run pytest tests/test_harbor_e2e.py -q
+```
+
+The public suite's reduced budgets and alphabetical selection are development
+checks, not a full benchmark score. Real-model Terminal-Bench runs remain a
+manual step; only metadata and synthetic Docker tasks were used here.
