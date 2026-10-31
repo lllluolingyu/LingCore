@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from lingcore.agent import Agent
-from lingcore.errors import ConfigError, LingCoreError, SessionError, ToolError
+from lingcore.errors import ConfigError, LingCoreError, ToolError
 from lingcore.events import AgentEvent, Error, Final, PluginNotice, TurnCancelled
+from lingcore.integrations.telegram import _commands, _delivery
+from lingcore.integrations.telegram._commands import _RESERVED_COMMANDS
+from lingcore.integrations.telegram._profiles import scoped_profile
 from lingcore.integrations.telegram.config import TelegramConfig
 from lingcore.integrations.telegram.confirmations import ConfirmationManager, Sleep
 from lingcore.integrations.telegram.protocol import (
@@ -24,12 +26,7 @@ from lingcore.integrations.telegram.protocol import (
     TelegramMessage,
     TelegramSender,
 )
-from lingcore.integrations.telegram.rendering import (
-    EMPTY_RESPONSE,
-    TelegramTurnRenderer,
-    chunk_text,
-    error_text,
-)
+from lingcore.integrations.telegram.rendering import TelegramTurnRenderer
 from lingcore.integrations.telegram.state import TelegramStateStore
 from lingcore.media import FILE_MAX_BYTES, IMAGE_MAX_BYTES, attachment_from_bytes
 from lingcore.message import UserInput
@@ -43,31 +40,8 @@ _LOG = logging.getLogger(__name__)
 _UPDATE_CACHE_SIZE = 4_096
 _ALBUM_CACHE_SIZE = 1_024
 _ALBUM_TTL_SECONDS = 300.0
-# (tool_options key, per-user file name, tools that write it)
-_PER_USER_FILES = (
-    ("memory", "memory.md", frozenset({"memory"})),
-    (
-        "calendar",
-        "calendar.ics",
-        frozenset(
-            {"calendar_add", "calendar_update", "calendar_list", "calendar_remove"}
-        ),
-    ),
-)
-
 LLMFactory = Callable[[int], Any]
 
-_HELP = """LingCore Telegram
-
-Send text, one photo, or one document.
-
-/new — start a new session
-/sessions — show your 10 most recent sessions
-/resume <id-prefix> — switch to a stored session
-/stop — cancel your active turn
-/help — show this help"""
-
-_RESERVED_COMMANDS = {"start", "help", "new", "sessions", "resume", "stop"}
 
 _SUPPORTED_INPUT = (
     "Supported input is text (or a caption) with at most one photo or document."
@@ -468,41 +442,14 @@ class TelegramBridge:
         chat_id: int,
         warning_sent: bool,
     ) -> bool:
-        """Best-effort delivery after one renderer operation failed."""
-        if isinstance(event, Final) or (
-            isinstance(event, Error) and event.partial_content is not None
-        ):
-            # Remove stale placeholders/partial chunks where possible before
-            # sending the authoritative response as fresh plain messages.
-            for response_id in renderer.response_message_ids if renderer else ():
-                try:
-                    await sender.delete_message(chat_id, response_id)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    pass
-            await self._best_effort_plain(
-                sender,
-                chat_id,
-                (event.content or EMPTY_RESPONSE)
-                if isinstance(event, Final)
-                else error_text(event),
-            )
-            return True
-        if isinstance(event, Error):
-            await self._best_effort_plain(sender, chat_id, error_text(event))
-            return True
-        if isinstance(event, TurnCancelled):
-            await self._best_effort_plain(sender, chat_id, f"⏹️ {event.reason}")
-            return True
-        if not warning_sent:
-            await self._best_effort_plain(
-                sender,
-                chat_id,
-                "⚠️ Live Telegram updates were interrupted. "
-                "The final response will be sent as a new message if needed.",
-            )
-        return True
+        return await _delivery._fallback_delivery(
+            self,
+            event,
+            renderer=renderer,
+            sender=sender,
+            chat_id=chat_id,
+            warning_sent=warning_sent,
+        )
 
     @staticmethod
     async def _best_effort_plain(
@@ -510,18 +457,7 @@ class TelegramBridge:
         chat_id: int,
         text: str,
     ) -> None:
-        for chunk in chunk_text(text):
-            try:
-                await sender.send_message(chat_id, chunk)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                # Exception strings may contain the bot token.
-                _LOG.warning(
-                    "Telegram fallback delivery failed with %s",
-                    type(exc).__name__,
-                )
-                return
+        await _delivery._best_effort_plain(sender, chat_id, text)
 
     async def _handle_command(
         self,
@@ -531,53 +467,9 @@ class TelegramBridge:
         chat_id: int,
         sender: TelegramSender,
     ) -> None:
-        if command in {"start", "help"}:
-            extra = "\n".join(
-                f"/{c.telegram_name} {c.argument_hint} — {c.description}"
-                for c in self.commands.telegram_commands(reserved=_RESERVED_COMMANDS)
-            )
-            await sender.send_message(
-                chat_id, _HELP + ("\n\n" + extra if extra else "")
-            )
-            return
-        if command == "stop":
-            await self._stop(user_id, chat_id, sender)
-            return
-        if command not in {"new", "sessions", "resume"}:
-            await sender.send_message(chat_id, "Unknown command. Use /help.")
-            return
-        try:
-            runtime = await self.runtime_for(user_id, chat_id, sender)
-        except Exception as exc:
-            await sender.send_message(
-                chat_id,
-                f"Could not start your LingCore runtime: "
-                f"{self._safe_runtime_error(exc)}",
-            )
-            return
-        if command == "sessions":
-            await self._sessions(runtime, chat_id, sender)
-            return
-        active = self._user_tasks.get(user_id)
-        if active is not None and not active.done():
-            await sender.send_message(
-                chat_id, "Cannot switch sessions while a turn is running."
-            )
-            return
-        if command == "new":
-            await self._replace_session(
-                runtime, new_session_id(), chat_id, sender, resumed=False
-            )
-        else:
-            if not argument:
-                await sender.send_message(chat_id, "Usage: /resume <session-id-prefix>")
-                return
-            try:
-                meta = runtime.store.resolve_prefix(argument.lower())
-            except SessionError as exc:
-                await sender.send_message(chat_id, str(exc))
-                return
-            await self._replace_session(runtime, meta.id, chat_id, sender, resumed=True)
+        await _commands._handle_command(
+            self, command, argument, user_id, chat_id, sender
+        )
 
     async def _sessions(
         self,
@@ -689,42 +581,7 @@ class TelegramBridge:
         terminal: AgentEvent | None,
         notices: list[PluginNotice],
     ) -> None:
-        """Deliver captured policy decisions before a cancellation terminal."""
-        renderer = runtime.renderer
-        runtime.renderer = None
-        sender = self._senders.get(runtime.user_id)
-        chat_id = self._chat_ids.get(runtime.user_id)
-        pending = [*getattr(runtime.agent, "drain_usage", lambda: [])(), *notices]
-        if terminal is not None:
-            pending.append(terminal)
-        for event in pending:
-            if renderer is not None:
-                try:
-                    await renderer.handle(event)
-                    continue
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    _LOG.warning(
-                        "Telegram cancellation delivery failed with %s",
-                        type(exc).__name__,
-                    )
-            if sender is None or chat_id is None:
-                continue
-            if isinstance(event, PluginNotice):
-                text = f"Plugin {event.plugin} · {event.hook} · {event.action}: {event.message}"
-            elif isinstance(event, Final | Error | TurnCancelled):
-                await self._fallback_delivery(
-                    event,
-                    renderer=renderer,
-                    sender=sender,
-                    chat_id=chat_id,
-                    warning_sent=False,
-                )
-                continue
-            else:
-                continue
-            await self._best_effort_plain(sender, chat_id, text)
+        await _delivery._deliver_cancelled_events(self, runtime, terminal, notices)
 
     def _build_agent(
         self,
@@ -733,55 +590,7 @@ class TelegramBridge:
         store: SessionStore,
         session_id: str,
     ) -> tuple["AgentProfile", Agent]:
-        scoped = self.profile.model_copy(deep=True)
-        # Be explicit even though pydantic's deep copy currently handles private
-        # mappings: future model changes must not alias mutable tenant options.
-        scoped.tool_options = copy.deepcopy(scoped.tool_options)
-        workspace = user_dir / "workspace"
-        absolute_state = Path(self.config.state_dir).expanduser().is_absolute()
-        source_dir = getattr(scoped, "_source_dir", None)
-        if not absolute_state and source_dir is None:
-            # guarded by Telegram config loading
-            raise ConfigError("Telegram scoped profile has no source directory")
-
-        def configured(name: str) -> str:
-            path = user_dir / name
-            if absolute_state:
-                return str(path)
-            assert source_dir is not None
-            return str(path.relative_to(source_dir.resolve()))
-
-        configured_sessions_path = configured("sessions.db")
-        scoped.workspace = str(workspace)
-        session_updates: dict[str, Any] = {
-            "enabled": True,
-            "path": configured_sessions_path,
-        }
-        if absolute_state:
-            # The state root already passed its single operator-consent gate;
-            # all derived absolute files inherit that consent.
-            session_updates["allow_absolute_path"] = True
-        scoped.sessions = scoped.sessions.model_copy(update=session_updates)
-        if scoped.tracing.enabled:
-            scoped.tracing = scoped.tracing.model_copy(
-                update={
-                    "path": configured("traces"),
-                    "allow_absolute_path": absolute_state,
-                }
-            )
-        # Profile-scoped files each user writes get a per-user path, like the
-        # sessions database: the memory file and the calendar.
-        for key, filename, tools in _PER_USER_FILES:
-            if not tools & set(scoped.tools):
-                continue
-            raw_options = scoped.tool_options.get(key, {})
-            if not isinstance(raw_options, Mapping):
-                raise ConfigError(f"tool_options.{key} must be a mapping")
-            options = copy.deepcopy(dict(raw_options))
-            options["path"] = configured(filename)
-            if absolute_state:
-                options["allow_absolute_path"] = True
-            scoped.tool_options[key] = options
+        scoped = scoped_profile(self.profile, self.config, user_dir)
 
         async def confirm(command: str) -> bool:
             sender = self._senders.get(user_id)

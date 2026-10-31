@@ -137,6 +137,9 @@ only on `Agent` + events.
 - New tests go in `tests/`; drive the loop with `tests/fakes.py:FakeLLMClient` (scripted, no network). `asyncio_mode = "auto"` is set, so no `@pytest.mark.asyncio` needed.
 - Dependency versions in `pyproject.toml` are pinned exactly. Don't loosen them without reason.
 - CI enforces `ruff check`, `ruff format --check`, and package-wide `mypy` in both LingCore and LingChat.
+- Keep repository-owned source and test files below 700 physical lines. Aim for 300–500 lines; split by responsibility before approaching the ceiling. Documentation and lockfiles are outside this limit.
+- Preserve the public module entry points when extracting implementation: `agent.py` delegates to `_agent/`, `sessions.py` to `_sessions/`, `io/cli.py` to `io/_cli/`, and the knowledge tool to `tools/builtin/_knowledge/`. Keep backend configuration and argument construction separate from process supervision, and plugin codecs/models separate from tool entry points.
+- Group larger test suites by feature (`test_sessions_events.py`, `test_calendar_plugin_updates.py`, etc.). Shared fixtures and builders live in `tests/support/`; import fixtures explicitly so pytest can discover them. Keep test logic in the feature modules.
 
 ## Known gaps (post-MVP)
 
