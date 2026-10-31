@@ -886,17 +886,16 @@ commitments.
      `eval run --lock`, immutable attempt records, `eval resume`, bounded
      infrastructure retries, and `eval regrade` over saved evidence. Reports
      include selected and all-attempt usage. See
-     [tracing and evaluation](docs/tracing-and-evaluation.md).
+     [tracing and evaluation](docs/evaluation.md).
    - Harbor evaluations use an isolated Python 3.12 bridge, local Docker tasks,
      measured source locks, terminal tools, rewards, resume, separate-verifier
      regrade, and ATIF export. The synthetic workflow uses fake model clients;
-     public Terminal-Bench runs remain manual. See [the Harbor guide](docs/evaluation-terminal-bench.md)
-     and [example suites](docs/examples/evaluation/README.md).
+     public Terminal-Bench runs remain manual. See the
+     [Harbor setup and suite configuration](docs/evaluation.md#harbor-and-terminal-bench).
    - Implemented: offline `eval compare`, paired per-case changes, case-level
      bootstrap intervals, and a five-case native regression suite covering
      citations, source freshness, calendar recurrence, and multi-turn file work.
-   - Next: optional exporters and additional benchmark capabilities. See the
-     [tracing and evaluation guide](docs/tracing-and-evaluation.md).
+   - Next: optional exporters and additional benchmark capabilities.
 
 6. **Later — Durable workflows**
    - Implemented in LingChat/AgentGUI: server-owned sessions keep turns and

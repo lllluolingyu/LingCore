@@ -32,8 +32,7 @@ def synthetic(tmp_path):
     bridge = Path(os.environ["LINGCORE_HARBOR_BRIDGE"])
     task = tmp_path / "dataset" / ("probe-" + uuid4().hex[:10])
     shutil.copytree(
-        Path(__file__).parents[1]
-        / "docs/examples/evaluation/harbor-synthetic/write-file",
+        Path(__file__).parent / "fixtures/evaluation/harbor-synthetic/write-file",
         task,
     )
     (

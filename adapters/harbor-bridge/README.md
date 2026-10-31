@@ -20,7 +20,7 @@ through a private Unix socket. The relay supervises output and timeouts inside
 the container and sweeps agent processes before verification. `summarize`
 normalizes Harbor's own result and error policy; `regrade` uses a separate
 verifier against preserved artifacts. LingCore owns the model loop, credentials,
-usage, lock, and job ledger. See [the Harbor integration guide](../../docs/evaluation-terminal-bench.md).
+usage, lock, and job ledger. See [the Harbor integration guide](../../docs/evaluation.md#harbor-and-terminal-bench).
 
 Run this package's checks in its own environment:
 

@@ -12,7 +12,7 @@ from lingcore.usage import TokenUsage
 from tests.fakes import FakeLLMClient, ScriptedTurn
 from tests.test_evaluation import example_env
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "docs/examples/evaluation"
+FIXTURES = Path(__file__).resolve().parent / "fixtures/evaluation"
 
 
 def call(name, **arguments):
@@ -118,11 +118,11 @@ def regression_client(spec):
 
 
 def suite_at(path, *, cases=None, repetitions=3):
-    suite = yaml.safe_load((EXAMPLES / "regression.yaml").read_text())
-    suite["agent"]["profile"] = str(EXAMPLES / "regression-agent.yaml")
+    suite = yaml.safe_load((FIXTURES / "regression.yaml").read_text())
+    suite["agent"]["profile"] = str(FIXTURES / "regression-agent.yaml")
     suite["execution"]["repetitions"] = repetitions
     suite["source"]["cases"] = [
-        str(EXAMPLES / p)
+        str(FIXTURES / p)
         for p in suite["source"]["cases"]
         if cases is None or Path(p).stem in cases
     ]

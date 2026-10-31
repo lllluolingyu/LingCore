@@ -12,7 +12,7 @@ from lingcore.message import ToolCall
 from lingcore.usage import TokenUsage
 from tests.fakes import FakeLLMClient, ScriptedTurn
 
-EXAMPLE = Path(__file__).resolve().parents[1] / "docs/examples/evaluation/local.yaml"
+SUITE_FIXTURE = Path(__file__).resolve().parent / "fixtures/evaluation/local.yaml"
 
 
 def greeting_client(spec):
@@ -52,8 +52,8 @@ def example_env(monkeypatch):
 def copied_suite(
     tmp_path, *, suite_changes=None, profile_changes=None, case_changes=None
 ):
-    root = EXAMPLE.parent
-    suite = yaml.safe_load(EXAMPLE.read_text())
+    root = SUITE_FIXTURE.parent
+    suite = yaml.safe_load(SUITE_FIXTURE.read_text())
     profile = yaml.safe_load((root / "local-agent.yaml").read_text())
     case = yaml.safe_load((root / "cases/write-greeting.yaml").read_text())
     suite.update(suite_changes or {})
@@ -70,7 +70,7 @@ def copied_suite(
     return tmp_path / "suite.yaml"
 
 
-async def test_supplied_local_example_runs_with_fake_client_and_fresh_state(
+async def test_local_fixture_runs_with_fake_client_and_fresh_state(
     tmp_path, monkeypatch
 ):
     example_env(monkeypatch)
@@ -103,7 +103,7 @@ async def test_supplied_local_example_runs_with_fake_client_and_fresh_state(
         return agent
 
     monkeypatch.setattr(Agent, "from_profile", classmethod(assemble))
-    job, report = await run_suite(EXAMPLE, tmp_path, client_factory=factory)
+    job, report = await run_suite(SUITE_FIXTURE, tmp_path, client_factory=factory)
     assert exit_code(report) == 0
     assert {
         key: report["coverage"][key]
@@ -177,7 +177,7 @@ async def test_forbidden_call_outside_ceiling_is_still_a_valid_failure(
         )
         return client
 
-    _, report = await run_suite(EXAMPLE, tmp_path, client_factory=factory)
+    _, report = await run_suite(SUITE_FIXTURE, tmp_path, client_factory=factory)
     assert exit_code(report) == 1 and report["coverage"]["valid"] == 2
     assert (
         report["cases"][0]["results"][0]["grade"]["graders"][1]["reason"]
@@ -271,7 +271,7 @@ async def test_symlink_artifact_never_reads_host_file(tmp_path, monkeypatch):
     def client(spec):
         return FakeLLMClient([ScriptedTurn(text="done", usage=TokenUsage("m", 1, 1))])
 
-    _, report = await run_suite(EXAMPLE, tmp_path / "out", client_factory=client)
+    _, report = await run_suite(SUITE_FIXTURE, tmp_path / "out", client_factory=client)
     assert exit_code(report) == 1
     assert report["cases"][0]["results"][0]["grade"]["scores"]["artifact"] == 0
 
@@ -287,7 +287,7 @@ def test_cli_eval_and_trace_commands(tmp_path, monkeypatch, capsys):
         return await original(path, output, client_factory=greeting_client, **kwargs)
 
     monkeypatch.setattr(runner, "run_suite", scripted)
-    assert main(["eval", "run", str(EXAMPLE), "--output", str(tmp_path)]) == 0
+    assert main(["eval", "run", str(SUITE_FIXTURE), "--output", str(tmp_path)]) == 0
     job = next(tmp_path.iterdir())
     assert main(["eval", "report", str(job)]) == 0
     trace = next(job.glob("executions/*/trace"))
@@ -305,7 +305,7 @@ async def test_preflight_interruption_preserves_report(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runner, "load_yaml", cancelled)
     with pytest.raises(asyncio.CancelledError):
-        await run_suite(EXAMPLE, tmp_path)
+        await run_suite(SUITE_FIXTURE, tmp_path)
     job = next(tmp_path.iterdir())
     report = json.loads((job / "report.json").read_text())
     assert exit_code(report) == 130 and not report["complete"]
@@ -319,6 +319,6 @@ async def test_preflight_unexpected_failure_preserves_report(tmp_path, monkeypat
         raise RuntimeError("sensitive failure detail")
 
     monkeypatch.setattr(runner, "load_yaml", broken)
-    job, report = await run_suite(EXAMPLE, tmp_path)
+    job, report = await run_suite(SUITE_FIXTURE, tmp_path)
     assert exit_code(report) == 2
     assert "sensitive failure detail" not in (job / "report.json").read_text()
