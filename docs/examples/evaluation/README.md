@@ -1,7 +1,7 @@
 # Evaluation examples
 
 The native example supports unlocked runs and the complete
-[locked evaluation workflow](../../evaluation-locked-plans.md). The Harbor adapter
+[locked evaluation workflow](../../tracing-and-evaluation.md). The Harbor adapter
 runs locked local exports with a separate Python environment and Docker.
 
 | File | Purpose |
@@ -10,6 +10,9 @@ runs locked local exports with a separate Python environment and Docker.
 | [terminal-agent.yaml](terminal-agent.yaml) | Dedicated environment-only agent profile for that adapter |
 | [local.yaml](local.yaml) | Executable native suite with two repetitions of a file-writing task |
 | [local-agent.yaml](local-agent.yaml) | Minimal profile for the native example |
+| [regression.yaml](regression.yaml) | Five native cases, three repetitions each |
+| [regression-agent.yaml](regression-agent.yaml) | Offline retrieval and calendar tools for the regression suite |
+| [terminal-bench-cpu-10/smoke.yaml](terminal-bench-cpu-10/smoke.yaml) | CPU-10 with bounded agent time, requests, tools, and tokens |
 | [cases/write-greeting.yaml](cases/write-greeting.yaml) | Agent input, required tools, and evaluator-only assertions |
 | [.env.example](.env.example) | Secret-free environment names for both profiles |
 
@@ -137,7 +140,7 @@ uv run pytest tests/test_eval_identity.py tests/test_eval_lock.py tests/test_eva
 For a ready-to-prepare CPU sample, use the
 [ten-task Terminal-Bench subset](terminal-bench-cpu-10/README.md). It pins ten
 packages, runs one trial at a time, defaults to `gpt-6.1-sol`, and uses the relaxed
-task-scale budgets from the successful public-task run. Its downloader fetches
+task-scale budgets. Its downloader fetches
 only those ten packages, and its adjacent dataset path works without editing
 the suite.
 
@@ -205,38 +208,64 @@ LINGCORE_HARBOR_E2E=1 LINGCORE_HARBOR_BRIDGE=/path/to/lingcore-harbor-bridge uv 
 ```
 
 The public suite's reduced budgets and alphabetical selection are development
-checks, not a full benchmark score. A bounded `gpt-6-luna` live smoke exercised
-two public tasks: the initial attempts had interrupted provider streams, and an
-ATRX follow-up reached its five-minute cap with a valid reward of zero. A separate
-90-second synthetic control completed and passed. See the
-[live-run record](../../evaluation-harbor-plan.md#live-model-smoke-2026-10-3031)
-for limits, retries, usage coverage, and trace checks. The complete three-task
-development validation remains a manual follow-up.
-
-A [Terra rerun](../../evaluation-harbor-plan.md#terra-live-model-retry-2026-10-31)
-passed the synthetic control, timed out on ATRX with a valid zero, and completed
-`batched-eval-parity` with a valid zero after verifier-only regrading. That regrade
-required installing the missing Buildx plugin; it made no further model calls and
-preserved the original invalid result. Traces and cleanup checks passed, and the
-temporary credential was absent from saved artifacts.
-
-A [DeepSeek rerun](../../evaluation-harbor-plan.md#deepseek-live-model-retry-2026-10-31)
-passed the synthetic control in 5.7 seconds. The first public attempts reached
-token limits; a separate follow-up increased response and trial token allowances.
-That follow-up still reached the request cap on ATRX and the token cap on
-`batched-eval-parity`, both with valid zero rewards. The record includes the
-verifier failures, both configurations, complete usage, and preserved prior runs.
-
-A [Sol run with task-scale budgets](../../evaluation-harbor-plan.md#sol-with-task-scale-budgets-2026-10-31)
-passed the real `batched-eval-parity` task: all five verifier tests passed after
-33 minutes and 29 model requests. It disabled the smoke-test request/tool/token
-caps and response-length override, and used the task's eight-hour timeout with
-the development runner's 150-second cleanup reserve. ATRX completed with a partial
-report and a valid zero; a separate published-oracle check passed. These results
-show a real model pass without changing benchmark inputs or grading rules. The
-linked record includes the exact settings, usage, verification, and artifact paths.
+checks, not a full benchmark score. Public model runs are manual; CI uses
+scripted clients and synthetic tasks.
 
 Known preflight issue: Harbor dataset paths containing `..` currently raise
 `PathEscapeError`. Until normalization is fixed, set `source.path` to an absolute
 dataset path without symlink components, or place the export beside the suite
 and use `path: dataset`. The example's parent-relative path needs that adjustment.
+
+## Native regression suite
+
+`regression.yaml` runs five cases three times each with fresh state: the file
+smoke, source-cited retrieval with an outdated distractor, source updates across
+two turns, calendar recurrence across a daylight-saving transition, and an
+invoice recalculation across two turns. `regression-agent.yaml` enables the
+offline knowledge grep backend (no embeddings) and calendar tools. Dates and
+timezones are explicit; no live search or clock is required.
+
+The deterministic graders check exact saved artifacts, successful required tool
+calls, and causal ordering. They do not judge free-form prose. The refresh case's
+final artifacts and tool policy measure recovery after a source change; the CI
+fixture additionally checks the actual retrieved text before and after the
+update. Semantic-index evaluation requires an explicitly configured embedding
+provider and is outside this offline suite. Each calendar repetition starts
+with its own empty state. Its policy checks the requested event arguments,
+including duration and recurrence, so a correct agenda cannot hide a wrong event.
+
+```sh
+lingcore eval resolve docs/examples/evaluation/regression.yaml --lock /tmp/regression.lock.json
+lingcore eval run --lock /tmp/regression.lock.json --output /tmp/lingcore-evals
+```
+
+The run uses the model configured in the example environment and makes model
+calls. CI drives the real tools with scripted fake clients and verifies both
+passing cases and incorrect artifacts, without a paid provider. The original
+`local.yaml` remains the small two-trial installation smoke example.
+
+## Compare preserved jobs
+
+Run the same case set and execution policy for each candidate, resolving a new
+lock when the model, profile, or runtime changes. Then compare the saved jobs:
+
+```sh
+lingcore eval compare /tmp/lingcore-evals/<baseline> /tmp/lingcore-evals/<candidate> \
+  --output /tmp/comparison.json
+lingcore eval compare /tmp/lingcore-evals/<baseline> /tmp/lingcore-evals/<candidate> \
+  --baseline-grades latest --candidate-grades latest
+```
+
+Comparison is offline and still works if the original suite files have moved.
+Cases, inputs/revisions, repetitions, execution/trace settings, and selected
+graders must agree. Model/profile/runtime changes are allowed and recorded.
+Reports separate missing/invalid pairs, and suppress the aggregate delta and
+uncertainty when incomplete. Usage includes all attempts separately from the
+selected attempts; unknown usage deltas remain null. The bootstrap resamples
+cases rather than treating repeated attempts as independent tasks.
+
+Exit status 1 means at least one case's mean score decreased, including when
+other cases improved. Status 2 means incompatible or incomplete evidence;
+otherwise it is 0. A comparison is a development regression check, not a new
+public benchmark eligibility claim. `--output` refuses an existing file;
+omit it for JSON on stdout. No source job records are rewritten.

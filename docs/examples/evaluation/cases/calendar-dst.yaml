@@ -1,0 +1,40 @@
+schema_version: lingcore.eval.case.v1
+id: calendar-dst
+revision: 1
+tags: [calendar, recurrence, timezone]
+requires:
+  tools: [calendar_add, calendar_list, write_file]
+input:
+  turns:
+    - user: |
+        In the America/New_York calendar, add a 30-minute event titled Standup
+        at 09:00 on 2026-10-31, repeating daily for exactly two occurrences.
+        Use one calendar_add call with one event: start "2026-10-31T09:00",
+        duration_minutes 30, and repeat with frequency "daily" and count 2.
+        Leave the other event fields at their defaults.
+        List 2026-10-31 through 2026-11-01. Write agenda.txt, one occurrence
+        per line in chronological order, as YYYY-MM-DDTHH:MM±HH:MM|title.
+        Use the actual UTC offset for each occurrence and a final newline.
+graders:
+  - id: dst-occurrences
+    kind: artifact_text
+    path: agenda.txt
+    equals: "2026-10-31T09:00-04:00|Standup\n2026-11-01T09:00-05:00|Standup\n"
+  - id: calendar-policy
+    kind: tool_policy
+    require:
+      - tool: calendar_add
+        arguments:
+          events:
+            - title: Standup
+              start: "2026-10-31T09:00"
+              end: null
+              duration_minutes: 30
+              location: null
+              description: null
+              reminders: []
+              repeat: {frequency: daily, interval: 1, count: 2, until: null}
+      - {tool: calendar_list, arguments: {start: "2026-10-31", end: "2026-11-01"}}
+      - {tool: write_file, arguments: {path: agenda.txt}}
+    causal_order: [[calendar_add, calendar_list], [calendar_list, write_file]]
+    forbid: [run_shell, terminal_exec, fetch_url, search_web]

@@ -230,6 +230,7 @@ async def test_empty_reply_is_not_replayed_live_or_after_resume(
         ]
 
         if resume:
+            await agent.aclose()
             agent = Agent.from_profile(
                 profile,
                 llm=client,

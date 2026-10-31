@@ -296,6 +296,17 @@ uv run lingcore -p my-agent --resume 3ca5       # resume by unique id prefix
 uv run lingcore -p my-agent --list-sessions     # see what's stored
 ```
 
+Each session admits one attached agent across CLI and web processes. Close the
+current frontend before resuming elsewhere, or use the frontend's fork action
+(`SessionStore.fork_session` in Python) to continue a separate branch. Idle agents
+renew ownership every 15 seconds; after a crash, ownership expires within
+60 seconds of the last heartbeat. Stale agents cannot write or roll back a new
+owner's messages. Edit releases the previous working set and rebuilds the agent.
+Session schema v3 migrates existing history automatically; stop existing
+frontends before upgrading. Library callers must close agents with `aclose()`
+(or use `async with`) before attaching a replacement. Direct `attach_session`
+callers release ownership with the returned memory's `close()`.
+
 History lands in `<profile>/sessions.db` — delete the file to wipe it. Checkout
 profiles live at the repo root (`profiles/`); wheel templates are copied into
 writable user state by `lingcore profile init`. Both therefore keep history
@@ -368,6 +379,43 @@ A cut-off tool batch never runs. Continue
 explicitly after reviewing the partial reply, or adjust the profile's output
 budget/context; these limits do not trigger transport retries. Malformed tool
 arguments are returned as failed tool results so the model can correct them.
+
+### Native OpenAI Responses
+
+Select `backend: openai-responses` for the native `/v1/responses` API:
+
+```yaml
+llm:
+  backend: openai-responses
+  model: gpt-6.1-sol
+  api_key_env: OPENAI_API_KEY
+  sampling:
+    reasoning:
+      effort: high
+    max_output_tokens: 32000
+```
+
+The default endpoint is `https://api.openai.com/v1`; a custom `base_url` must
+support Responses. Existing `backend: openai` profiles keep Chat Completions.
+The common `sampling.reasoning_effort` and `sampling.max_tokens` (or
+`max_completion_tokens`) aliases are translated; conflicting native values
+are rejected. Other sampling options use the Responses API's names.
+
+LingCore sends `store: false` and replays completed output items from local
+conversation history, including encrypted reasoning and function calls in
+their original order. This state survives session resume, follows local
+rollback/compaction, and is excluded from trace content. `preserve_reasoning`
+is not required for this native replay. API-side continuation through
+`previous_response_id` or `conversation` is not used. Registered tools retain
+their optional arguments (`strict: false` unless explicitly specified).
+
+Streaming supports text/refusals, function tools, images/PDFs, and reported
+input/output/cache/reasoning usage. Output limits discard the entire tool
+batch and preserve the incomplete-response diagnostic. Hosted OpenAI tools
+are not registered by this backend. `stream_usage` controls Chat Completions'
+usage request; Responses usage is read from its terminal response.
+See the official [reasoning-state guidance](https://developers.openai.com/api/docs/guides/reasoning)
+and [function-calling guide](https://developers.openai.com/api/docs/guides/function-calling).
 
 ### Native Anthropic, caching, and thinking
 
@@ -827,32 +875,36 @@ commitments.
      notes.
 
 5. **In progress — Tracing and evaluations**
-   - Implemented milestone 1: opt-in local JSONL traces, request usage,
+   - Implemented: opt-in local JSONL traces, request usage,
      tool/hook/approval timings, bounded redacted content, and
      `lingcore trace show <run-directory>`. Tracing remains disabled by default.
    - Implemented: execution budgets, typed outcomes, separate profile state,
      a scripted frontend, and `lingcore eval run <suite> --output <directory>`
      with fresh state, deterministic artifact/tool-policy graders, and per-case
      reports. Direct suite runs are unlocked development evaluations.
-   - Implemented milestone 2: offline `eval resolve` / `eval validate`,
+   - Implemented: offline `eval resolve` / `eval validate`,
      `eval run --lock`, immutable attempt records, `eval resume`, bounded
      infrastructure retries, and `eval regrade` over saved evidence. Reports
      include selected and all-attempt usage. See
-     [locked evaluation plans](docs/evaluation-locked-plans.md).
+     [tracing and evaluation](docs/tracing-and-evaluation.md).
    - Harbor evaluations use an isolated Python 3.12 bridge, local Docker tasks,
      measured source locks, terminal tools, rewards, resume, separate-verifier
      regrade, and ATIF export. The synthetic workflow uses fake model clients;
-     public Terminal-Bench runs remain manual. See [the Harbor plan](docs/evaluation-harbor-plan.md)
+     public Terminal-Bench runs remain manual. See [the Harbor guide](docs/evaluation-terminal-bench.md)
      and [example suites](docs/examples/evaluation/README.md).
-   - Next: regression comparisons and optional exporters. See the
-     [tracing and evaluation design](docs/tracing-and-evaluation.md).
+   - Implemented: offline `eval compare`, paired per-case changes, case-level
+     bootstrap intervals, and a five-case native regression suite covering
+     citations, source freshness, calendar recurrence, and multi-turn file work.
+   - Next: optional exporters and additional benchmark capabilities. See the
+     [tracing and evaluation guide](docs/tracing-and-evaluation.md).
 
 6. **Later — Durable workflows**
    - Implemented in LingChat/AgentGUI: server-owned sessions keep turns and
      background processes alive across browser disconnects. Reconnect restores
      progress and pending approvals; backend shutdown interrupts all runtimes
      and reaps their processes before closing stores.
-   - Next: durable job checkpoints and cross-process leases so work can recover
+   - Implemented: cross-process session leases fence stale writes and prevent
+     concurrent attachment. Next: durable job checkpoints so work can recover
      across backend restarts, beyond the current process-lifetime ownership.
    - Extend edit/fork flows with regenerate-without-edit and merge/export controls.
    - Add schema-validated results and an optional Responses API backend behind

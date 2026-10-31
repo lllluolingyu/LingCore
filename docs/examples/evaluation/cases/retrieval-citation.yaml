@@ -1,0 +1,37 @@
+schema_version: lingcore.eval.case.v1
+id: retrieval-citation
+revision: 1
+tags: [retrieval, citation]
+requires:
+  tools: [knowledge, read_file, write_file]
+fixture:
+  files:
+    notes/current.md: |
+      # Current Orion release
+      Release owner: Mira Chen
+      Cutover: 2026-11-02
+    notes/archive.md: |
+      # Archived Orion release, superseded
+      Release owner: Jonas Reed
+      Cutover: 2025-05-01
+input:
+  turns:
+    - user: |
+        Use knowledge to search the saved notes for the current Orion
+        release owner. Check the source file to verify the citation. Write
+        owner.txt with the owner's name on line 1 and the workspace-relative
+        source path plus colon and exact line number on line 2. End both lines
+        with a newline. The archived release is superseded.
+graders:
+  - id: answer-and-citation
+    kind: artifact_text
+    path: owner.txt
+    equals: "Mira Chen\nnotes/current.md:2\n"
+  - id: retrieval-policy
+    kind: tool_policy
+    require:
+      - {tool: knowledge, arguments: {action: query}}
+      - {tool: read_file, arguments: {path: notes/current.md}}
+      - {tool: write_file, arguments: {path: owner.txt}}
+    causal_order: [[knowledge, write_file], [read_file, write_file]]
+    forbid: [run_shell, terminal_exec, fetch_url, search_web]

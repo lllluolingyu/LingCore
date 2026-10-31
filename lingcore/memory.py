@@ -132,7 +132,13 @@ class WindowMemory:
                     value = block.get(key)
                     if isinstance(value, str):
                         anthropic_tokens += self._text_tokens(value)
-        n += max(reasoning_tokens, anthropic_tokens)
+        responses_tokens = 0
+        for item in message.responses_content or []:
+            if item.get("type") == "reasoning":
+                # Opaque bytes still consume retained memory. This is a local
+                # eviction estimate, never a claim about provider billing.
+                responses_tokens += self._text_tokens(json.dumps(item))
+        n += max(reasoning_tokens, anthropic_tokens, responses_tokens)
         for attachment in message.attachments:
             # Floors reflect the wire cost a fallback can't capture: a native
             # image/PDF part (no fallback_text but real tokens), versus text

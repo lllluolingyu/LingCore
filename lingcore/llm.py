@@ -125,6 +125,8 @@ class LLMChunk:
     tool-call fragments have been assembled and their arguments parsed.
     ``anthropic_content`` carries a complete signed-thinking response on the
     terminal chunk so the loop can persist and replay its ordered blocks.
+    ``responses_content`` likewise carries completed Responses output items,
+    including encrypted reasoning, independently of readable reasoning deltas.
     """
 
     text_delta: str = ""
@@ -132,6 +134,7 @@ class LLMChunk:
     tool_calls: list[ToolCall] | None = None
     finish_reason: str | None = None
     anthropic_content: list[dict[str, Any]] | None = None
+    responses_content: list[dict[str, Any]] | None = None
 
 
 @dataclass

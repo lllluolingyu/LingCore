@@ -158,6 +158,7 @@ async def test_todos_persist_and_restore_on_resume(tmp_path: Path):
         sid = agent.memory.session_id  # type: ignore[attr-defined]
         assert [i.content for i in store.latest_todos(sid)] == ["plan"]
 
+        await agent.aclose()
         resumed = Agent.from_profile(
             profile, llm=FakeLLMClient([]), session_store=store, session_id=sid
         )

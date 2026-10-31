@@ -124,11 +124,9 @@ class LLMCfg(BaseModel):
 
     model: str
     api_key_env: str | None = None
-    # SDK backend type: "openai" (default) uses OpenAI chat completions via
-    # AsyncOpenAI, "anthropic" uses native Anthropic Messages API via
-    # AsyncAnthropic. Set to "anthropic" for models that don't work through
-    # OpenAI-compatible gateways.
-    backend: Literal["openai", "anthropic"] = "openai"
+    # Explicit transport selection; never infer an API from a model alias.
+    # "openai" retains Chat Completions for compatible providers.
+    backend: Literal["openai", "openai-responses", "anthropic"] = "openai"
     base_url: str = Field(
         default_factory=lambda data: (
             "https://api.anthropic.com"
@@ -190,6 +188,8 @@ class LLMCfg(BaseModel):
     # For Anthropic this also retains readable thinking as reasoning_content;
     # signed content blocks are always kept for valid tool/session replay.
     # Enable thinking separately through sampling.thinking.
+    # Responses always retains native encrypted reasoning for replay,
+    # independently of this Chat Completions/readable-thinking switch.
     preserve_reasoning: bool = False
 
     @field_validator("modalities")

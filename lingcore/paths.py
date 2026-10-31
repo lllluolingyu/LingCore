@@ -28,6 +28,10 @@ class PathEscapeError(Exception):
     """Raised when a candidate path escapes or cannot be opened safely."""
 
 
+class ReadLimitError(PathEscapeError):
+    """A confined regular file exceeds the caller's byte limit."""
+
+
 def resolve_confined(base: Path, rel: str | Path) -> Path:
     """Resolve ``rel`` under ``base``, rejecting anything that escapes it."""
     base_resolved = base.resolve()
@@ -313,14 +317,14 @@ class ConfinedDirectory:
             if not stat.S_ISREG(info.st_mode):
                 raise PathEscapeError(f"confined entry is not a regular file: {leaf!r}")
             if info.st_size > max_bytes:
-                raise PathEscapeError(
+                raise ReadLimitError(
                     f"confined entry exceeds the {max_bytes}-byte read limit: {leaf!r}"
                 )
             with os.fdopen(fd, "rb") as fh:
                 fd = -1
                 payload = fh.read(max_bytes + 1)
             if len(payload) > max_bytes:
-                raise PathEscapeError(
+                raise ReadLimitError(
                     f"confined entry changed beyond the {max_bytes}-byte read "
                     f"limit: {leaf!r}"
                 )

@@ -5,6 +5,54 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+### Added
+
+- Native OpenAI Responses backend (`llm.backend: openai-responses`) with
+  streamed text/function calls, encrypted reasoning replay across tools and
+  session resume, image/PDF inputs, and provider-reported token usage.
+- Opt-in local tracing with request usage, tool/hook/approval spans, bounded
+  redacted content, and `lingcore trace show` for offline inspection.
+- Native evaluation suites with fresh workspaces and profile state, scripted
+  turns, execution budgets, deterministic artifact/tool-policy graders, and
+  reports that distinguish execution failures from grading failures.
+- Offline `eval resolve` and `eval validate`, locked execution plans,
+  interrupted-job recovery with `eval resume`, and evidence-only `eval regrade`.
+  Attempts remain immutable; infrastructure retries are independent of scores,
+  and reports account for selected and all-attempt usage separately.
+- An isolated Harbor 0.25.0 bridge for Docker terminal tasks, with supervised
+  command execution, cleanup, reward reports, separate-verifier regrading, and
+  ATIF trajectory export. Harbor remains outside the base installation.
+- Publisher-verified Terminal-Bench 4 task packages and a pinned ten-task CPU
+  development subset. Full benchmark eligibility requires the complete release
+  and its repetition/reward policy; the subset is not a leaderboard result.
+- Nightly synthetic Harbor Docker integration checks at 03:17 UTC, also
+  available through manual CI dispatch. These use fake model clients; the
+  nightly schedule does not run the unrelated CI matrix or paid benchmarks.
+- A five-case native regression suite with three repetitions, covering files,
+  source citations, retrieval after source updates, calendar DST recurrence,
+  and multi-turn invoice updates. A separate CPU-10 smoke preset bounds agent
+  wall time, requests, tool calls, and reported tokens without changing the
+  relaxed suite.
+- Offline `eval compare` for compatible preserved jobs, including selected
+  regrades, per-case regressions/improvements, paired latency and usage deltas,
+  and deterministic case-level bootstrap intervals. Incomplete evidence
+  suppresses aggregate scores and uncertainty; stale report summaries are
+  reconciled against the execution ledger without rewriting the source jobs.
+
+### Fixed
+
+- Oversized Harbor artifacts are recorded as `oversized` in the evidence
+  manifest without invalidating a verifier result. Confined reads distinguish
+  byte-limit failures from unsafe-path errors, which still fail collection.
+- Concurrent frontends can no longer attach agents to the same stored session.
+  Schema v3 adds renewable leases with owner tokens and monotonically increasing
+  epochs. Writes, runtime events, Stop, Edit, and deletion check ownership in a
+  SQLite write transaction, preventing interleaved transcripts and stale
+  rollbacks from removing another agent's work. Edit invalidates the previous
+  working set; closing an old agent cannot release its replacement's lease.
+  A crashed owner's lease expires after 60 seconds; live owners renew every
+  15 seconds. Close existing frontends before upgrading the session database.
+
 ## [0.5.1] - 2026-10-26
 
 ### Fixed

@@ -23,8 +23,8 @@ CPU/RAM figures are the larger of each task's declared agent and verifier
 requirements, per environment. All ten require no GPUs, Linux, a single task
 container per environment, no task tools, and no multi-step workflow. The agent
 and separate verifier may overlap; their combined requests reach up to 8 CPUs
-or 16 GiB RAM, depending on the task. Leave room for the host as well. The current
-Linux x86_64, 22-CPU, 32-GiB machine meets those requests. Docker images, build
+or 16 GiB RAM, depending on the task. Leave room for the host as well. Your host
+must meet those requests. Docker images, build
 caches, and retained job artifacts need additional disk space. Each environment
 requests at most 10 GiB storage, which Docker does not enforce as a disk quota.
 Harbor can also start its own network helper containers.
@@ -69,6 +69,24 @@ lock (or `resolve --replace` before starting a new job).
 
 ## Run
 
+For a bounded development smoke, resolve `smoke.yaml` into a separate lock:
+
+```sh
+uv run lingcore eval resolve docs/examples/evaluation/terminal-bench-cpu-10/smoke.yaml \
+  --lock docs/examples/evaluation/terminal-bench-cpu-10/smoke.lock.json
+uv run lingcore eval run \
+  --lock docs/examples/evaluation/terminal-bench-cpu-10/smoke.lock.json \
+  --output docs/examples/evaluation/terminal-bench-cpu-10/jobs
+```
+
+The smoke uses the same ten tasks and agent, with per-trial limits of 600 agent
+seconds, 20 model requests, 40 tool calls, and 64,000 reported tokens. Missing
+usage stops admission. Setup/build/verifier deadlines remain task-defined.
+Token admission is checked between requests, so the last response can exceed
+the token threshold; these limits are not a monetary cap. Model calls are paid
+in both presets. Keep the smoke results separate from the relaxed suite below:
+they have different execution policies and are not directly comparable scores.
+
 This command makes paid model calls:
 
 ```sh
@@ -94,13 +112,6 @@ memory compacts within 128,000 tokens and 2,000 messages. Terminal commands defa
 to 15 minutes and may request up to eight hours, bounded by the trial deadline.
 Traces allow 256 MiB, with 64 MiB per trace artifact.
 
-These are the relaxed settings used for the successful Sol `batched-eval-parity`
-run. At the observed approximately ¥0.2 for that one trial, ten similar trials
-would be approximately ¥2, but task length, retries, and cache hits vary; this
-suite has no monetary spending cap. Preparation and lock validation do not
+Cost depends on the configured provider, task length, retries, and cache hits;
+this suite has no monetary spending cap. Preparation and lock validation do not
 establish that every container will start or that the model will pass every task.
-
-Offline preparation was checked on 2026-10-31 using Harbor 0.25.0: all ten
-downloaded packages matched the publisher catalogue, both agent and verifier
-resource requests met the CPU-only bounds above, and resolving and validating
-the ten-trial plan reported zero drift. No model calls were made for this check.

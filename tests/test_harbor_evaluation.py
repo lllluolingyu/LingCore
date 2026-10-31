@@ -197,6 +197,70 @@ async def test_regrade_preserves_original_records_and_never_constructs_agent(
     assert all(p.read_bytes() == value for p, value in before.items())
 
 
+@pytest.mark.parametrize("command,passed", [("write", True), ("fail", False)])
+async def test_oversized_checkpoint_preserves_verifier_grade(
+    harbor_plan, monkeypatch, command, passed
+):
+    from lingcore.evaluation.harbor import runner
+    from lingcore.evaluation.identity import digest
+
+    collect = runner.collect_evidence
+
+    def with_checkpoint(root, limit):
+        # Match the CPU-10 failure without allocating a large in-memory fixture.
+        with (root / "harbor/model.safetensors").open("wb") as stream:
+            stream.truncate(186721248)
+        (root / "harbor/at-limit.bin").write_bytes(b"x" * limit)
+        collect(root, limit)
+
+    monkeypatch.setattr(runner, "collect_evidence", with_checkpoint)
+    lock, path, bridge = await frozen(harbor_plan)
+    job, report = await run_locked(
+        path, path.parent / "jobs", bridge=bridge, client_factory=client(command)
+    )
+    assert report["complete"] and report["coverage"]["valid"] == 1
+    result_path = next(job.glob("executions/*/result.json"))
+    result = json.loads(result_path.read_bytes())
+    assert result["grade"]["passed"] is passed
+    assert result["grade"]["scores"]["reward"] == float(passed)
+    manifest = json.loads((result_path.parent / "evidence.json").read_bytes())
+    files = {row["path"]: row for row in manifest["files"]}
+    assert files["harbor/model.safetensors"] == {
+        "path": "harbor/model.safetensors",
+        "status": "oversized",
+    }
+    boundary = files["harbor/at-limit.bin"]
+    assert boundary["status"] == "captured"
+    assert boundary["bytes"] == lock.trace.artifact_max_bytes
+    assert boundary["digest"] == digest(b"x" * boundary["bytes"])
+    assert files["harbor/summary.json"]["status"] == "captured"
+    assert (result_path.parent / "harbor/model.safetensors").stat().st_size == 186721248
+
+
+def test_evidence_does_not_misclassify_unsafe_read_as_oversized(tmp_path, monkeypatch):
+    from lingcore.evaluation.harbor import runner
+    from lingcore.paths import PathEscapeError, ReadLimitError
+
+    harbor = tmp_path / "harbor"
+    harbor.mkdir()
+    target = harbor / "artifact"
+    target.write_bytes(b"safe")
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"must not read")
+    read = runner.read_bytes
+
+    def swap_then_read(path, *, max_bytes):
+        target.unlink()
+        target.symlink_to(outside)
+        return read(path, max_bytes=max_bytes)
+
+    monkeypatch.setattr(runner, "read_bytes", swap_then_read)
+    with pytest.raises(PathEscapeError) as error:
+        runner.collect_evidence(tmp_path, 4)
+    assert not isinstance(error.value, ReadLimitError)
+    assert not (tmp_path / "evidence.json").exists()
+
+
 async def test_resume_refuses_running_harness(harbor_plan):
     import fcntl
 

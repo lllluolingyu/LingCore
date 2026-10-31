@@ -1,4 +1,4 @@
-# Task-scale settings from the successful gpt-6.1-sol public-task run.
+# Task-scale settings for the CPU development subset.
 name: terminal-bench-cpu-10
 llm:
   backend: openai

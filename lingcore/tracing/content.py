@@ -14,6 +14,8 @@ _EXCLUDED = {
     "reasoning_content",
     "reasoning_delta",
     "anthropic_content",
+    "responses_content",
+    "encrypted_content",
     "thinking",
     "signature",
     "headers",

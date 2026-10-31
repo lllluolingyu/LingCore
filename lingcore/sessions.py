@@ -31,9 +31,11 @@ Design notes:
   prefix and the runtime events anchored inside it into a fresh session. Event
   cursors are reminted (never shared between sessions), while provenance in
   ``sessions.meta`` records the immediate parent, root, and source boundary.
+- **Exclusive ownership:** attached agents hold renewable SQLite leases. Each
+  mutation checks its owner token and epoch in the same write transaction.
+  Expired owners cannot write after takeover; Edit fences the old working set.
 - **Still deliberately ephemeral:** per-session "allow always" shell patterns
-  are not persisted (re-approval after resume is the conservative default),
-  and attach-exclusivity is enforced per process, not across processes.
+  are not persisted (re-approval after resume is the conservative default).
 """
 
 from __future__ import annotations
@@ -44,7 +46,8 @@ import re
 import sqlite3
 import threading
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +58,7 @@ from pydantic import BaseModel, Field
 from lingcore.errors import ConfigError, SessionError
 from lingcore.events import Compacted
 from lingcore.message import Message
+from lingcore.session_leases import LEASE_DDL, SessionLease, SessionLeases
 from lingcore.todos import TodoItem, todos_from_payload, todos_payload
 from lingcore.usage import TurnStats, turn_stats_from_payload, turn_stats_payload
 
@@ -65,7 +69,7 @@ if TYPE_CHECKING:
 # The installed package root — a sessions.db inside it is refused (gracefully).
 _PACKAGE_DIR = Path(__file__).parent.resolve()
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _TITLE_LIMIT = 60
 _ID_RE = re.compile(r"[0-9a-f]{32}")
 _PREFIX_RE = re.compile(r"[0-9a-f]{1,32}")
@@ -74,6 +78,7 @@ _SESSION_EVENT_KINDS = frozenset(
 )
 
 _DDL = [
+    LEASE_DDL,
     """
     CREATE TABLE IF NOT EXISTS sessions (
       id           TEXT PRIMARY KEY,
@@ -386,7 +391,9 @@ class SessionStore:
         self.db_path = db_path
         self._profile_name = profile_name
         self._lock = threading.Lock()
+        self._closed = False
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self._leases = SessionLeases(self._conn, self._lock)
         try:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
@@ -399,6 +406,7 @@ class SessionStore:
                 )
             if version < _SCHEMA_VERSION:
                 with self._conn:
+                    self._conn.execute("BEGIN IMMEDIATE")
                     for stmt in _DDL:
                         self._conn.execute(stmt)
                     self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
@@ -406,13 +414,63 @@ class SessionStore:
             self._conn.close()
             raise
 
+    @contextmanager
+    def _write(
+        self,
+        session_id: str,
+        lease: SessionLease | None = None,
+        *,
+        detach: bool = False,
+    ) -> Iterator[None]:
+        with self._lock:
+            with self._conn:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._leases.check_locked(session_id, lease)
+                yield
+                if detach:
+                    self._conn.execute(
+                        "UPDATE session_leases SET owner_token=NULL, heartbeat=0 WHERE session_id=?",
+                        (session_id,),
+                    )
+            if detach:
+                self._leases.owned.pop(session_id, None)
+
+    def acquire_session(self, session_id: str) -> SessionLease:
+        """Acquire before hydration; release after the agent has stopped."""
+        if not is_session_id(session_id):
+            raise SessionError(f"invalid session id: {session_id!r}")
+        with self._lock:
+            with self._conn:
+                self._conn.execute("BEGIN IMMEDIATE")
+                lease = self._leases.acquire_locked(session_id)
+            self._leases.owned[session_id] = lease
+            self._leases.start_heartbeat()
+        return lease
+
+    def heartbeat_session(self, lease: SessionLease) -> None:
+        """Validate ownership, including expiry, and renew its heartbeat."""
+        with self._write(lease.session_id, lease):
+            pass
+
+    def release_session(self, lease: SessionLease) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            with self._conn:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._leases.release_locked(lease)
+            if self._leases.owned.get(lease.session_id) == lease:
+                del self._leases.owned[lease.session_id]
+
     # -- write ----------------------------------------------------------
-    def append(self, session_id: str, message: Message) -> int:
+    def append(
+        self, session_id: str, message: Message, *, lease: SessionLease | None = None
+    ) -> int:
         """Append one message and return its exact committed sequence."""
         if not is_session_id(session_id):
             raise SessionError(f"invalid session id: {session_id!r}")
         now = _utcnow()
-        with self._lock, self._conn:
+        with self._write(session_id, lease):
             self._conn.execute(
                 "INSERT OR IGNORE INTO sessions (id, title, profile_name, created_at, updated_at)"
                 " VALUES (?, '', ?, ?, ?)",
@@ -446,6 +504,7 @@ class SessionStore:
         message_seq: int,
         kind: str,
         payload: dict[str, Any],
+        lease: SessionLease | None = None,
     ) -> SessionEvent:
         """Append one replayable runtime event and return its monotonic cursor."""
         if not is_session_id(session_id):
@@ -475,7 +534,7 @@ class SessionStore:
             raise SessionError("session event payload must be an object")
 
         now = _utcnow()
-        with self._lock, self._conn:
+        with self._write(session_id, lease):
             anchor = self._conn.execute(
                 "SELECT 1 FROM messages WHERE session_id = ? AND seq = ?",
                 (session_id, message_seq),
@@ -571,6 +630,7 @@ class SessionStore:
         before_tokens: int,
         after_tokens: int,
         turn_index: int | None = None,
+        lease: SessionLease | None = None,
     ) -> SessionEvent:
         """Persist a compacted working set at the current transcript watermark."""
         message_seq = self.next_sequence(session_id) - 1
@@ -617,6 +677,7 @@ class SessionStore:
             session_id,
             message_seq=message_seq,
             kind="compaction",
+            lease=lease,
             payload={
                 "messages": [message.model_dump(mode="json") for message in messages],
                 "turn_index": turn_index,
@@ -634,6 +695,7 @@ class SessionStore:
         activated: list[str],
         deactivated: list[str],
         approved_high_risk: dict[str, list[str]] | None = None,
+        lease: SessionLease | None = None,
     ) -> SessionEvent:
         """Persist the complete dynamic-skill state plus its visible transition."""
         message_seq = self.next_sequence(session_id) - 1
@@ -670,6 +732,7 @@ class SessionStore:
             session_id,
             message_seq=message_seq,
             kind="skill_state",
+            lease=lease,
             payload={
                 "active": active_names,
                 "activated": list(dict.fromkeys(activated)),
@@ -679,7 +742,11 @@ class SessionStore:
         )
 
     def save_todo_state(
-        self, session_id: str, todos: Sequence[TodoItem]
+        self,
+        session_id: str,
+        todos: Sequence[TodoItem],
+        *,
+        lease: SessionLease | None = None,
     ) -> SessionEvent:
         """Persist the complete todo checklist, anchored to the latest message.
 
@@ -694,11 +761,17 @@ class SessionStore:
             session_id,
             message_seq=message_seq,
             kind="todo_state",
+            lease=lease,
             payload=todos_payload(todos),
         )
 
     def save_turn_stats(
-        self, session_id: str, message_seq: int, stats: TurnStats
+        self,
+        session_id: str,
+        message_seq: int,
+        stats: TurnStats,
+        *,
+        lease: SessionLease | None = None,
     ) -> SessionEvent:
         """Persist one turn's usage and timing, anchored to its user message.
 
@@ -709,6 +782,7 @@ class SessionStore:
             session_id,
             message_seq=message_seq,
             kind="turn_stats",
+            lease=lease,
             payload=turn_stats_payload(stats),
         )
 
@@ -1063,9 +1137,11 @@ class SessionStore:
         assert forked is not None
         return forked
 
-    def rename(self, session_id: str, title: str) -> SessionMeta:
+    def rename(
+        self, session_id: str, title: str, *, lease: SessionLease | None = None
+    ) -> SessionMeta:
         title = " ".join(title.split())[:200]
-        with self._lock, self._conn:
+        with self._write(session_id, lease):
             cur = self._conn.execute(
                 "UPDATE sessions SET title = ? WHERE id = ?", (title, session_id)
             )
@@ -1075,9 +1151,9 @@ class SessionStore:
         assert meta is not None
         return meta
 
-    def delete(self, session_id: str) -> bool:
+    def delete(self, session_id: str, *, lease: SessionLease | None = None) -> bool:
         """Delete a session and (via cascade) its messages."""
-        with self._lock, self._conn:
+        with self._write(session_id, lease, detach=True):
             cur = self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             return cur.rowcount > 0
 
@@ -1323,9 +1399,11 @@ class SessionStore:
         """Latest persisted dynamic-skill names, preserving activation order."""
         return self.active_skill_state(session_id).active
 
-    def discard_events_from_message_seq(self, session_id: str, seq: int) -> int:
+    def discard_events_from_message_seq(
+        self, session_id: str, seq: int, *, lease: SessionLease | None = None
+    ) -> int:
         """Discard runtime events anchored at or after a removed branch point."""
-        with self._lock, self._conn:
+        with self._write(session_id, lease):
             cur = self._conn.execute(
                 "DELETE FROM session_events WHERE session_id = ? AND message_seq >= ?",
                 (session_id, seq),
@@ -1341,13 +1419,15 @@ class SessionStore:
             ).fetchone()
         return int(row[0])
 
-    def truncate_after(self, session_id: str, seq: int) -> int:
+    def truncate_after(
+        self, session_id: str, seq: int, *, lease: SessionLease | None = None
+    ) -> int:
         """Delete messages after ``seq`` and return the number removed.
 
         This is the stop/cancel cleanup primitive: the current user message is
         kept while any partially committed assistant/tool tail is discarded.
         """
-        with self._lock, self._conn:
+        with self._write(session_id, lease):
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ? AND seq > ?",
                 (session_id, seq),
@@ -1363,16 +1443,20 @@ class SessionStore:
                 )
             return cur.rowcount
 
-    def rewind_to_user_message(self, session_id: str, seq: int) -> Message:
+    def rewind_to_user_message(
+        self, session_id: str, seq: int, *, lease: SessionLease | None = None
+    ) -> Message:
         """Delete ``seq`` and the later tail, returning the edited user message.
 
         Only an ordinary user message is a valid branch point. Synthetic user
         messages (tool-media hoists and compaction summaries) cannot be edited.
         The returned attachments let a frontend preserve them on regeneration.
+        Success releases the lease: the old working set is invalid and the
+        frontend must attach a new agent before regenerating the edited turn.
         """
         if seq < 0:
             raise SessionError("message sequence must be non-negative")
-        with self._lock, self._conn:
+        with self._write(session_id, lease, detach=True):
             row = self._conn.execute(
                 "SELECT payload FROM messages WHERE session_id = ? AND seq = ?",
                 (session_id, seq),
@@ -1418,8 +1502,20 @@ class SessionStore:
 
     # -- lifecycle ------------------------------------------------------
     def close(self) -> None:
+        self._leases.stop.set()
+        if self._leases.thread is not None:
+            self._leases.thread.join()
         with self._lock:
-            self._conn.close()
+            if self._closed:
+                return
+            try:
+                with self._conn:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    for lease in self._leases.owned.values():
+                        self._leases.release_locked(lease)
+            finally:
+                self._closed = True
+                self._conn.close()
 
     def __enter__(self) -> "SessionStore":
         return self
@@ -1454,17 +1550,29 @@ class SessionMemory:
     """
 
     def __init__(
-        self, inner: "ShortTermMemory", store: SessionStore, session_id: str
+        self,
+        inner: "ShortTermMemory",
+        store: SessionStore,
+        session_id: str,
+        *,
+        lease: SessionLease | None = None,
     ) -> None:
         self._inner = inner
         self._store = store
         self._session_id = session_id
+        self.lease = lease if lease is not None else store.acquire_session(session_id)
         self._compaction_turn_index: int | None = None
         self._last_sequence: int | None = None
 
     def add(self, message: Message) -> None:
+        self._last_sequence = self._store.append(
+            self._session_id, message, lease=self.lease
+        )
         self._inner.add(message)
-        self._last_sequence = self._store.append(self._session_id, message)
+
+    def close(self) -> None:
+        """Release ownership after the driver has stopped using this memory."""
+        self._store.release_session(self.lease)
 
     def replace(self, messages: list[Message]) -> None:
         # Working-set repair must not append/rewrite the durable transcript;
@@ -1499,6 +1607,7 @@ class SessionMemory:
                 before_tokens=event.before_tokens,
                 after_tokens=event.after_tokens,
                 turn_index=turn_index,
+                lease=self.lease,
             )
         return event
 
@@ -1568,6 +1677,17 @@ def attach_session(
     the count restores ``Agent._turn_index``.
     """
     sid = session_id or new_session_id()
+    lease = store.acquire_session(sid)
+    try:
+        return _hydrate_session(inner, store, sid, lease)
+    except BaseException:
+        store.release_session(lease)
+        raise
+
+
+def _hydrate_session(
+    inner: "ShortTermMemory", store: SessionStore, sid: str, lease: SessionLease
+) -> tuple[SessionMemory, str, int]:
     snapshot = store.latest_compaction(sid)
     if snapshot is None:
         replayed = trim_dangling(store.messages(sid))
@@ -1588,7 +1708,9 @@ def attach_session(
             1 for message in tail if message.role == "assistant"
         )
     inner.replace(replayed)  # never re-append replayed state to the durable store
-    return SessionMemory(inner, store, sid), sid, turn_index
+    # Long hydration must not hand a caller a working set whose lease expired.
+    store.heartbeat_session(lease)
+    return SessionMemory(inner, store, sid, lease=lease), sid, turn_index
 
 
 def open_store(

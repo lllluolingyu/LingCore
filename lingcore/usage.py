@@ -112,6 +112,21 @@ def usage_from_openai(model: str, usage: Any) -> TokenUsage | None:
     )
 
 
+def usage_from_responses(model: str, usage: Any) -> TokenUsage | None:
+    """Responses uses inclusive input/output counts with nested cache details."""
+    if usage is None:
+        return None
+    return usage_from_openai(
+        model,
+        {
+            "prompt_tokens": _field(usage, "input_tokens"),
+            "completion_tokens": _field(usage, "output_tokens"),
+            "prompt_tokens_details": _field(usage, "input_tokens_details"),
+            "completion_tokens_details": _field(usage, "output_tokens_details"),
+        },
+    )
+
+
 def usage_from_anthropic(model: str, usage: Any) -> TokenUsage | None:
     """Parse Anthropic usage (SDK model or dict) into inclusive token counts.
 

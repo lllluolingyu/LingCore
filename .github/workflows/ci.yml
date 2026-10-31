@@ -5,6 +5,8 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       harbor_e2e:
@@ -17,6 +19,7 @@ permissions:
 
 jobs:
   harbor-bridge:
+    if: github.event_name != 'schedule'
     name: Isolated Harbor bridge (Python 3.12)
     runs-on: ubuntu-latest
     defaults:
@@ -36,8 +39,9 @@ jobs:
 
   harbor-integration:
     name: Synthetic Harbor Docker workflow
-    if: github.event_name == 'workflow_dispatch' && inputs.harbor_e2e
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.harbor_e2e)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       LINGCORE_HARBOR_E2E: "1"
       LINGCORE_HARBOR_BRIDGE: ${{ github.workspace }}/adapters/harbor-bridge/.venv/bin/lingcore-harbor-bridge
@@ -51,6 +55,7 @@ jobs:
       - run: uv run pytest tests/test_harbor_e2e.py -q
 
   quality:
+    if: github.event_name != 'schedule'
     name: Lint, format, and typecheck
     runs-on: ubuntu-latest
     steps:
@@ -65,6 +70,7 @@ jobs:
       - run: uv run mypy
 
   test:
+    if: github.event_name != 'schedule'
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:
@@ -81,6 +87,7 @@ jobs:
       - run: uv run --python ${{ matrix.python-version }} pytest -q
 
   lingchat-compatibility:
+    if: github.event_name != 'schedule'
     name: LingChat main compatibility
     runs-on: ubuntu-latest
     steps:
@@ -102,6 +109,7 @@ jobs:
         working-directory: LingChat
 
   package:
+    if: github.event_name != 'schedule'
     name: Build package
     runs-on: ubuntu-latest
     steps:
@@ -118,6 +126,7 @@ jobs:
         run: uv run python -c 'import os, lingcore; expected = f"v{lingcore.__version__}"; actual = os.environ["RELEASE_TAG"]; assert actual == expected, f"tag {actual} does not match package {expected}"'
 
   base-wheel:
+    if: github.event_name != 'schedule'
     name: Base wheel stays Telegram-optional
     runs-on: ubuntu-latest
     steps:

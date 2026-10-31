@@ -1,0 +1,37 @@
+schema_version: lingcore.eval.case.v1
+id: invoice-update
+revision: 1
+tags: [files, arithmetic, multi-turn]
+requires:
+  tools: [read_file, write_file]
+fixture:
+  files:
+    orders.csv: "sku,quantity,unit_cents\nred,3,125\nblue,2,250\n"
+input:
+  turns:
+    - user: |
+        Read orders.csv and calculate each line total in integer cents. Write
+        invoice.txt using sku=total_cents lines sorted by sku, followed by
+        total=grand_total_cents. End every line with a newline. Read it back.
+    - user: |
+        Change the red quantity to 4 in orders.csv, preserving the CSV header
+        and row order. Recalculate invoice.txt using the same format, and
+        read it back to verify the update.
+graders:
+  - id: updated-input
+    kind: artifact_text
+    path: orders.csv
+    equals: "sku,quantity,unit_cents\nred,4,125\nblue,2,250\n"
+  - id: totals
+    kind: artifact_text
+    path: invoice.txt
+    equals: "blue=500\nred=500\ntotal=1000\n"
+  - id: file-policy
+    kind: tool_policy
+    require:
+      - {tool: read_file, arguments: {path: orders.csv}}
+      - {tool: write_file, arguments: {path: orders.csv}}
+      - {tool: write_file, arguments: {path: invoice.txt}}
+      - {tool: read_file, arguments: {path: invoice.txt}}
+    causal_order: [[read_file, write_file], [write_file, read_file]]
+    forbid: [run_shell, terminal_exec, fetch_url, search_web]

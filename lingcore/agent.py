@@ -64,6 +64,7 @@ from lingcore.plugins import (
 )
 from lingcore.plugins.commands import CommandCatalog
 from lingcore.plugins.hooks import HookRunner, TurnRolledBackEvent
+from lingcore.session_leases import SessionLease
 from lingcore.todos import TodoItem, TodoState
 from lingcore.tools import Tool, ToolContext, ToolOutput, ToolRegistry
 from lingcore.tracing import NoopRecorder, SpanScope, TraceRecorder
@@ -235,12 +236,16 @@ class Agent:
         # into ``agent.usage_meter`` itself.
         self.usage_meter = usage_meter or UsageMeter()
         self._session_store = session_store
+        self._session_lease: SessionLease | None = getattr(self.memory, "lease", None)
         self._owned_session_store: SessionStore | None = None
         if session_store is not None and (
-            session_id is None or not hasattr(self.memory, "last_sequence")
+            session_id is None
+            or not hasattr(self.memory, "last_sequence")
+            or not isinstance(self._session_lease, SessionLease)
+            or self._session_lease.session_id != session_id
         ):
             raise ValueError(
-                "session_store requires a session id and sequence-reporting memory"
+                "session_store requires a session id and leased, sequence-reporting memory"
             )
         self._turn_index: int = 0
         # Explicit frontend cancellation is a two-step contract: cancel the
@@ -375,6 +380,7 @@ class Agent:
         from lingcore.config import LLMCfg
         from lingcore.llm import LLMClient
         from lingcore.llm_anthropic import AnthropicLLMClient
+        from lingcore.llm_responses import ResponsesLLMClient
         from lingcore.tools import REGISTRY, ToolContext
 
         # One meter per agent: the main client doubles as the compaction and
@@ -396,6 +402,8 @@ class Agent:
             }
             if cfg.backend == "anthropic":
                 return AnthropicLLMClient(**kwargs, prompt_caching=cfg.prompt_caching)
+            if cfg.backend == "openai-responses":
+                return ResponsesLLMClient(**kwargs)
             return LLMClient(**kwargs)
 
         client = llm if llm is not None else make_client(profile.llm)
@@ -525,6 +533,7 @@ class Agent:
             else build_recorder(profile, workspace, state_dir)
         )
         owns_store = False
+        session_lease: SessionLease | None = None
         try:
             ledger = RequestLedger()
             raw_client = client
@@ -639,6 +648,7 @@ class Agent:
                 memory, sid, restored_turn_index = attach_session(
                     memory, session_store, session_id
                 )
+                session_lease = memory.lease
             # Prompt-cache routing key: bind same-session requests to one warm node.
             # Set post-construction now that the session id is known; only on a real
             # LLMClient we built (a test-injected fake is left untouched).
@@ -856,8 +866,12 @@ class Agent:
             return agent
         except BaseException:
             recorder.abort()
-            if owns_store and session_store is not None:
-                session_store.close()
+            try:
+                if session_store is not None and session_lease is not None:
+                    session_store.release_session(session_lease)
+            finally:
+                if owns_store and session_store is not None:
+                    session_store.close()
             raise
 
     async def __aenter__(self) -> Agent:
@@ -880,10 +894,17 @@ class Agent:
             try:
                 await self.recorder.aclose()
             finally:
-                owned = getattr(self, "_owned_session_store", None)
-                if owned is not None:
-                    owned.close()
-                    self._owned_session_store = None
+                try:
+                    if (
+                        self._session_store is not None
+                        and self._session_lease is not None
+                    ):
+                        self._session_store.release_session(self._session_lease)
+                finally:
+                    owned = getattr(self, "_owned_session_store", None)
+                    if owned is not None:
+                        owned.close()
+                        self._owned_session_store = None
 
     def drain_usage(self) -> list[UsageReported]:
         """Return usage recorded but not yet emitted by ``run``.
@@ -1004,7 +1025,9 @@ class Agent:
             ):
                 message_seq = self._turn_message_seq
                 try:
-                    self._session_store.truncate_after(self._session_id, message_seq)
+                    self._session_store.truncate_after(
+                        self._session_id, message_seq, lease=self._session_lease
+                    )
                 except BaseException:
                     self._pending_turn_message_seq = message_seq
                     raise
@@ -1067,7 +1090,9 @@ class Agent:
             and self._session_id is not None
         ):
             try:
-                self._session_store.save_turn_stats(self._session_id, seq, stats)
+                self._session_store.save_turn_stats(
+                    self._session_id, seq, stats, lease=self._session_lease
+                )
             except Exception:
                 pass
         return stats
@@ -1104,7 +1129,9 @@ class Agent:
             return
         if self._session_store is None or self._session_id is None:
             raise RuntimeError("pending turn cleanup has no session store")
-        self._session_store.truncate_after(self._session_id, message_seq)
+        self._session_store.truncate_after(
+            self._session_id, message_seq, lease=self._session_lease
+        )
         self._pending_turn_message_seq = None
 
     async def run(
@@ -1122,6 +1149,8 @@ class Agent:
             yield Error("another turn is already running")
             return
         try:
+            if self._session_store is not None and self._session_lease is not None:
+                self._session_store.heartbeat_session(self._session_lease)
             self._retry_pending_turn_cleanup()
         except Exception as exc:
             yield Error(
@@ -1495,6 +1524,7 @@ class Agent:
                 finish_detail: str | None = None
                 dropped_tool_calls = 0
                 anthropic_content: list[dict[str, Any]] | None = None
+                responses_content: list[dict[str, Any]] | None = None
                 try:
                     async with closing_stream(
                         self.llm.stream(messages, tools=schemas)
@@ -1513,6 +1543,10 @@ class Agent:
                                 snapshot := getattr(chunk, "anthropic_content", None)
                             ) is not None:
                                 anthropic_content = snapshot
+                            if (
+                                snapshot := getattr(chunk, "responses_content", None)
+                            ) is not None:
+                                responses_content = snapshot
                     break
                 except LLMStreamError as e:
                     if e.finish_reason in INCOMPLETE_FINISH_REASONS:
@@ -1612,6 +1646,7 @@ class Agent:
                 tool_calls=[] if incomplete else tool_calls,
                 reasoning_content="".join(reasoning_parts) or None,
                 anthropic_content=None if incomplete else anthropic_content,
+                responses_content=None if incomplete else responses_content,
                 finish_reason=finish_reason,
                 finish_detail=finish_detail,
             )
@@ -1735,6 +1770,7 @@ class Agent:
                 ):
                     self._session_store.save_skill_state(
                         self._session_id,
+                        lease=self._session_lease,
                         active=list(self.skill_state.active),
                         activated=activated,
                         deactivated=deactivated,
@@ -1755,7 +1791,9 @@ class Agent:
             if self.todo_state is not None and self.todo_state.items != before_todos:
                 if self._session_store is not None and self._session_id is not None:
                     self._session_store.save_todo_state(
-                        self._session_id, self.todo_state.items
+                        self._session_id,
+                        self.todo_state.items,
+                        lease=self._session_lease,
                     )
                 yield TodoUpdated(todos=self.todo_state.items)
 

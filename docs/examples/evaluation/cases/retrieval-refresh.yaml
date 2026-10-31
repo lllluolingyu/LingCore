@@ -1,0 +1,31 @@
+schema_version: lingcore.eval.case.v1
+id: retrieval-refresh
+revision: 1
+tags: [retrieval, freshness, multi-turn]
+requires:
+  tools: [knowledge, write_file]
+fixture:
+  files:
+    notes/launch.md: "Launch code: AMBER\n"
+input:
+  turns:
+    - user: |
+        Retrieve the launch code from notes/launch.md using knowledge, and
+        save only that code followed by a newline in before.txt.
+    - user: |
+        Replace notes/launch.md with "Launch code: COBALT" followed by a newline.
+        Query knowledge again and use the current source, not the old answer
+        from the conversation. Save the newly retrieved code followed by a
+        newline in after.txt. Keep before.txt.
+graders:
+  - {id: before, kind: artifact_text, path: before.txt, equals: "AMBER\n"}
+  - {id: after, kind: artifact_text, path: after.txt, equals: "COBALT\n"}
+  - {id: source, kind: artifact_text, path: notes/launch.md, equals: "Launch code: COBALT\n"}
+  - id: refresh-policy
+    kind: tool_policy
+    require:
+      - {tool: knowledge, arguments: {action: query}}
+      - {tool: write_file, arguments: {path: notes/launch.md}}
+      - {tool: write_file, arguments: {path: after.txt}}
+    causal_order: [[knowledge, write_file], [write_file, knowledge]]
+    forbid: [run_shell, terminal_exec, fetch_url, search_web]

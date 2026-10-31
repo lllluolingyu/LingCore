@@ -54,6 +54,7 @@ from lingcore.execution import (
     RunnerSignal,
     run_headless,
 )
+from lingcore.paths import ReadLimitError
 from lingcore.tracing import TraceHealth, TraceRecorder
 from lingcore.tracing.config import known_secrets
 from lingcore.tracing.content import redact_known_secrets
@@ -175,7 +176,7 @@ def collect_evidence(root: Path, limit: int) -> None:
                         "status": "captured",
                     }
                 )
-            except ValueError:
+            except ReadLimitError:
                 files.append({"path": relative, "status": "oversized"})
     write_json(
         root / "evidence.json",

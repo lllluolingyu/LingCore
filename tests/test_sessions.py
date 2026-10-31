@@ -911,6 +911,7 @@ def test_attach_session_fresh_and_resume(store: SessionStore):
     mem.add(Message.user("q"))
     mem.add(Message.assistant(content="a"))
 
+    mem.close()
     mem2, sid2, turn2 = attach_session(WindowMemory(), store, sid)
     assert sid2 == sid and turn2 == 1
     assert [m.content for m in mem2.messages] == ["q", "a"]
@@ -1042,19 +1043,19 @@ async def test_agent_contains_session_append_failure_and_remains_usable(
         failed = False
         rollback_failed = False
 
-        def fail_first_assistant(session_id, message):
+        def fail_first_assistant(session_id, message, **kwargs):
             nonlocal failed
             if message.role == "assistant" and not failed:
                 failed = True
                 raise sqlite3.OperationalError("database is locked")
-            return original_append(session_id, message)
+            return original_append(session_id, message, **kwargs)
 
-        def fail_first_rollback(session_id, seq):
+        def fail_first_rollback(session_id, seq, **kwargs):
             nonlocal rollback_failed
             if not rollback_failed:
                 rollback_failed = True
                 raise sqlite3.OperationalError("database is still locked")
-            return original_truncate(session_id, seq)
+            return original_truncate(session_id, seq, **kwargs)
 
         monkeypatch.setattr(store, "append", fail_first_assistant)
         monkeypatch.setattr(store, "truncate_after", fail_first_rollback)
@@ -1110,12 +1111,12 @@ async def test_agent_retries_failed_durable_rollback_before_next_turn(
         original_truncate = store.truncate_after
         rollback_failed = False
 
-        def fail_first_rollback(session_id, seq):
+        def fail_first_rollback(session_id, seq, **kwargs):
             nonlocal rollback_failed
             if not rollback_failed:
                 rollback_failed = True
                 raise sqlite3.OperationalError("database is locked")
-            return original_truncate(session_id, seq)
+            return original_truncate(session_id, seq, **kwargs)
 
         monkeypatch.setattr(store, "truncate_after", fail_first_rollback)
         agent = Agent.from_profile(
@@ -1219,6 +1220,7 @@ tools:
 
         assert [message.role for message in agent.memory.messages] == ["user"]
         assert [message.role for message in store.messages(sid)] == ["user"]
+        await agent.aclose()
         resumed, _, turns = attach_session(WindowMemory(), store, sid)
         assert [message.role for message in resumed.messages] == ["user"]
         assert turns == 0
@@ -1237,6 +1239,7 @@ async def test_agent_resume_sees_history_and_turn_index(tmp_path: Path):
         sid = a1.memory.session_id
 
         fake2 = FakeLLMClient([ScriptedTurn(text="answer two")])
+        await a1.aclose()
         a2 = Agent.from_profile(
             profile, llm=fake2, base_dir=tmp_path, session_store=store, session_id=sid
         )
@@ -1320,6 +1323,7 @@ async def test_agent_compaction_snapshot_survives_rebuild(tmp_path: Path):
         assert snapshot.before_tokens > snapshot.after_tokens
         assert any("durable compact summary" in m.content for m in snapshot.messages)
 
+        await first.aclose()
         resumed = Agent.from_profile(
             profile,
             llm=FakeLLMClient([ScriptedTurn(text="unused")]),
@@ -1376,6 +1380,7 @@ initial_tools:
         assert store.active_skills(sid) == ("code-review",)
 
         second_llm = FakeLLMClient([ScriptedTurn(text="still active")])
+        await first.aclose()
         resumed = Agent.from_profile(
             profile,
             llm=second_llm,
@@ -1396,7 +1401,7 @@ initial_tools:
         assert {"activate_skill", "read_file", "search"} <= names
 
 
-def test_skill_restore_refuses_unapproved_high_risk_grant_drift(tmp_path: Path):
+async def test_skill_restore_refuses_unapproved_high_risk_grant_drift(tmp_path: Path):
     profile = _profile(
         tmp_path,
         """
@@ -1447,6 +1452,7 @@ initial_tools:
             deactivated=[],
             approved_high_risk={"code-review": ["run_shell"]},
         )
+        await resumed.aclose()
         approved = Agent.from_profile(
             profile,
             llm=FakeLLMClient([ScriptedTurn(text="unused")]),

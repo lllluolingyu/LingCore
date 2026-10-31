@@ -59,6 +59,16 @@ def main(argv: list[str]) -> int:
     report = commands.add_parser("report", help="Read an original or regraded report")
     report.add_argument("job", type=Path)
     report.add_argument("--grades", default="original")
+    comparison = commands.add_parser(
+        "compare", help="Compare preserved jobs without running agents"
+    )
+    comparison.add_argument("baseline", type=Path)
+    comparison.add_argument("candidate", type=Path)
+    comparison.add_argument("--baseline-grades", default="original")
+    comparison.add_argument("--candidate-grades", default="original")
+    comparison.add_argument("--bootstrap-samples", type=int, default=2000)
+    comparison.add_argument("--seed", type=int, default=0)
+    comparison.add_argument("--output", type=Path)
     for subcommand in (freeze, check, run, continuation, rescore):
         subcommand.add_argument("--bridge", type=Path)
     args = parser.parse_args(argv)
@@ -72,6 +82,22 @@ def main(argv: list[str]) -> int:
             print(f"Evaluation artifacts: {job}", flush=True)
 
     try:
+        if args.command == "compare":
+            from lingcore.evaluation.compare import compare_jobs
+            from lingcore.evaluation.storage import write_json
+
+            result = compare_jobs(
+                args.baseline,
+                args.candidate,
+                baseline_grades=args.baseline_grades,
+                candidate_grades=args.candidate_grades,
+                bootstrap_samples=args.bootstrap_samples,
+                seed=args.seed,
+            )
+            if args.output is not None:
+                write_json(args.output.absolute(), result)
+            print(json.dumps(result, indent=2))
+            return int(result["exit_code"])
         if args.command == "resolve":
             lock = _run(resolve(args.suite, args.lock, bridge=args.bridge))
             write_lock(lock, args.lock, replace=args.replace)

@@ -184,6 +184,9 @@ class Message(BaseModel):
     # content beside the SDK-independent text/tool projections. Other backends
     # ignore this state; legacy messages have no snapshot.
     anthropic_content: list[dict[str, Any]] | None = None
+    # Ordered Responses API output items, including opaque encrypted reasoning.
+    # Persist with the turn so replay survives resume, rollback and eviction.
+    responses_content: list[dict[str, Any]] | None = None
     # Provider completion metadata, persisted but never sent as a request field.
     finish_reason: str | None = None
     # Complete incomplete-response diagnostic, including provider hints/counts.
@@ -226,6 +229,7 @@ class Message(BaseModel):
         *,
         reasoning_content: str | None = None,
         anthropic_content: list[dict[str, Any]] | None = None,
+        responses_content: list[dict[str, Any]] | None = None,
         finish_reason: str | None = None,
         finish_detail: str | None = None,
     ) -> Message:
@@ -235,6 +239,7 @@ class Message(BaseModel):
             tool_calls=tool_calls or [],
             reasoning_content=reasoning_content,
             anthropic_content=anthropic_content,
+            responses_content=responses_content,
             finish_reason=finish_reason,
             finish_detail=finish_detail,
         )
@@ -249,6 +254,55 @@ class Message(BaseModel):
         )
 
     # --- wire format --------------------------------------------------
+    def to_responses(
+        self, *, attachment_modalities: frozenset[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Render ordered Responses input items, replaying native output intact."""
+        if self.role == "assistant" and self.responses_content is not None:
+            return deepcopy(self.responses_content)
+        if self.role == "tool":
+            return [
+                {
+                    "type": "function_call_output",
+                    "call_id": self.tool_call_id,
+                    "output": self.content,
+                }
+            ]
+
+        # Reuse modality selection/fallbacks without duplicating ingest policy.
+        content = self.to_openai(attachment_modalities=attachment_modalities)["content"]
+        if isinstance(content, list):
+            parts: list[dict[str, Any]] = []
+            for part in content:
+                if part["type"] == "text":
+                    parts.append({"type": "input_text", "text": part["text"]})
+                elif part["type"] == "image_url":
+                    parts.append(
+                        {
+                            "type": "input_image",
+                            "image_url": part["image_url"]["url"],
+                            "detail": part["image_url"].get("detail", "auto"),
+                        }
+                    )
+                elif part["type"] == "file":
+                    parts.append({"type": "input_file", **part["file"]})
+            content = parts
+        items: list[dict[str, Any]] = []
+        if content or self.role != "assistant":
+            items.append({"role": self.role, "content": content})
+        for call in self.tool_calls:
+            items.append(
+                {
+                    "type": "function_call",
+                    "call_id": call.id,
+                    "name": call.name,
+                    "arguments": call.invalid_arguments
+                    if call.invalid_arguments is not None
+                    else json.dumps(call.arguments),
+                }
+            )
+        return items
+
     def to_anthropic(
         self,
         *,
