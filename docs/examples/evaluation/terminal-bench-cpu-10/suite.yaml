@@ -1,0 +1,71 @@
+# Ten pinned CPU tasks, one trial each. See README.md for preparation and commands.
+schema_version: lingcore.eval.suite.v1
+name: terminal-bench-4-cpu-10
+track: development
+source:
+  kind: harbor
+  dataset: terminal-bench/terminal-bench@4.0.0
+  path: dataset
+  release_source:
+    repository: https://github.com/harbor-framework/terminal-bench
+    commit: 452bf305c6daa62fc59061d22133a7cbc7c1572e
+  training_use: prohibited
+  selection:
+    policy: explicit
+    count: 10
+    tasks:
+      - batched-eval-parity
+      - bun-sourcemap-leak
+      - embedding-drift-monitor
+      - fin-saccr-rwa
+      - foodstuff-beta-activity
+      - html-js-filter
+      - mp-checkpoint-consolidation
+      - production-planning
+      - session-window-debug
+      - wal-recovery-ordering
+    required:
+      os: linux
+      gpus: 0
+      containers: 1
+      task_tools: false
+      max_cpus: 4
+      max_memory_mb: 8192
+      max_storage_mb: 10240
+  lock:
+    required: true
+agent:
+  kind: lingcore
+  profile: agent.yaml
+  tool_binding: harbor-terminal-v1
+execution:
+  runner: harbor
+  repetitions: 1
+  concurrency: 1
+  infrastructure_retries: 0
+  retry_on: [runner, environment]
+  state: fresh_per_execution
+  approval_policy: benchmark_environment
+  harbor:
+    pass_env: []
+    timeout_multipliers: {agent: 1, verifier: 1, setup: 1, build: 1}
+  limits:
+    # Every selected task allows 8 hours; reserve 150 seconds for bridge cleanup.
+    wall_seconds: 28650
+    model_requests: null
+    tool_calls: null
+    reported_tokens: null
+    usage_missing: ignore
+    automatic_turns: 0
+trace:
+  required: true
+  content: redacted
+  max_bytes: 268435456
+  artifact_max_bytes: 67108864
+  exports: [atif]
+grading:
+  authority: harbor
+  reward: {name: reward, pass_at: 1, values: [0, 1]}
+report:
+  headline: mean_reward
+  include: [coverage, rewards, failures, latency, usage, trace_health]

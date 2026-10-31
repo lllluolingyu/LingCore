@@ -1,7 +1,9 @@
 # Milestone 3: Harbor benchmark adapter
 
 Status: steps 3.1–3.9 implemented, 2026-10-30; synthetic Docker acceptance
-verified. The real-model public development subset remains manual. This expands
+verified. A bounded real-model smoke was run on 2026-10-30–31; its results and
+remaining preflight issue are recorded below. The full three-task development
+validation remains incomplete. This expands
 [milestone 3 of the tracing and evaluation design](tracing-and-evaluation.md#later-milestones)
 and replaces the in-process adapter proposed in the
 [Terminal-Bench integration design](evaluation-terminal-bench.md). It builds on
@@ -22,8 +24,13 @@ infrastructure retries, attempt selection, traces, and reports.
 Out of scope: Harbor installed agents, environment providers other than local
 Docker, parallel trials, GPU, multi-container, and multi-step tasks, a
 persistent PTY, a direct `harbor run -a …` route without `lingcore eval`, the
-five-repetition benchmark track, leaderboard submission, and `eval compare`
+leaderboard submission, and `eval compare`
 (milestone 4).
+
+The benchmark policy and offline release provenance are implemented as a
+follow-up to milestone 3. The complete Terminal-Bench suite still refuses
+resolution with the current CPU/single-container/no-task-tools capabilities.
+See [benchmark eligibility](#benchmark-eligibility-and-release-provenance).
 
 ## Vocabulary
 
@@ -279,7 +286,7 @@ Preflight for `runner: harbor` refuses:
   for this runner);
 - `trace.exports: [atif]` with `trace.content: metadata`.
 
-It also refuses `limits.wall_seconds` that is not at least 150 seconds below
+Development resolution also refuses `limits.wall_seconds` that is not at least 150 seconds below
 every selected task's agent timeout after multipliers. This reserves 60 seconds
 for the probe and process baseline, 30 for interrupt/drain, 15 for the sweep,
 30 for trace export, and 15 for transport and scheduling. Harness cancellation
@@ -378,7 +385,10 @@ and `execution` and `grading` gain variants for `runner: harbor` and
       "harbor_digest": "sha256:…",
       "verifier": {"mode": "separate", "timeout_sec": 1800, "artifacts": ["/app/"]},
       "agent_timeout_sec": 28800,
-      "resources": {"cpus": 2, "memory_mb": 4096, "storage_mb": 10240},
+      "resources": {
+        "agent": {"cpus": 2, "memory_mb": 4096, "storage_mb": 10240},
+        "verifier": {"cpus": 2, "memory_mb": 4096, "storage_mb": null}
+      },
       "images": {"agent": {"kind": "image", "pinned": true},
                  "verifier": {"kind": "image", "pinned": true}}
     }]
@@ -412,12 +422,14 @@ Unchanged sections (`suite`, `candidate`, `runtime`, `trace`, the rest of
 | Field | Contents and drift meaning |
 | --- | --- |
 | `source.dataset.path` | Relative to the lock, like case paths |
-| `source.dataset.release_source` | Informational. An export cannot be proven offline to match the release commit, so `limitations` records `release_unverified` |
+| `source.dataset.release_source` | Checked against the bundled publisher release linkage for known datasets; unknown releases remain `release_unverified` |
+| `source.dataset.provenance` | Reviewed manifest digest, immutable Hub version, published membership, verified local membership, and comparison policy. A partial export is `verified_subset` |
 | `source.tasks[].input_digest` | What shapes the agent's run: `instruction.md`, `environment/`, and Harbor's parsed task configuration without `[verifier]` and `artifacts`. File sets are sorted `(relative path, file digest)` pairs; configuration is canonical JSON, with deprecated fields migrated as the bridge prints it |
 | `source.tasks[].verifier_digest` | `tests/`, the parsed `[verifier]` section, and `artifacts` (what is collected for the verifier) |
 | `source.tasks[].support_digest` | Every other file, such as `solution/`, `README.md`, and licences. The agent never sees them, but they belong to the task |
 | `source.tasks[].harbor_digest` | Harbor's own task digest, as the bridge reports it. Each trial's Harbor lock is compared with it after the run |
 | `source.tasks[].images` | For the agent and verifier environments, `kind` is `dockerfile`, `compose`, or `image`. `pinned` is true only for an image reference with a `sha256` digest; an unpinned task adds the `image_unpinned` limitation |
+| `source.tasks[].resources` | Safe resolved agent and separate-verifier resource requests; a shared verifier uses the agent environment. No environment variable values are copied into this field |
 | `execution.harness` | Everything the bridge reports about itself and Harbor. Any change is drift |
 | `grading.reward` | The named reward that decides success, its pass threshold, and the allowed values. Any other value makes the grade invalid |
 
@@ -710,11 +722,13 @@ steps and records the same grade sets and reports:
 1. Acquire `.lock` and load the current tasks. Refuse, by task ID, any task
    whose `input_digest` changed; a changed `verifier_digest` is the point and
    is recorded.
-2. Use `jobs.select` to choose attempts. Only selected attempts whose original
-   grade was valid can be regraded; copy every other finished attempt's original
-   grade and rewards into the new grade set unchanged. For eligible attempts,
-   refuse tasks whose verifier mode is not `separate` or whose saved Harbor
-   trial is missing, checking the whole pass before starting any regrade.
+2. Use `jobs.select` to choose attempts. Regrade selected attempts whose original
+   grade was valid or invalid with reason `verifier_failed` or `reward_invalid`.
+   Copy every other finished attempt's original grade and rewards unchanged,
+   including cleanup, provider, protocol, unsupported, harness, evidence, and
+   digest failures. For eligible attempts, refuse tasks whose verifier mode is
+   not `separate`, checking the whole pass before starting any regrade. A missing
+   saved Harbor trial skips only that attempt.
 3. For each eligible execution, run `lingcore-harbor-bridge regrade` with the
    source trial and the current task. The output goes to
    `executions/<id>/regrades/<grade-set>/harbor/`. Harbor seeds the saved artifacts
@@ -722,25 +736,29 @@ steps and records the same grade sets and reports:
    agent.
 4. Map each regrade summary to a grade with the outcome-mapping rows for
    verification. A Harbor `RegradeError` (a verifier input that was never
-   collected) refuses that task, as a missing evidence need does in
-   milestone 2.
+   collected) skips only that attempt and preserves its original grade and
+   rewards. Missing evidence appears in the grade record's `regrade_skip_reason`,
+   the grade-set header's `skipped`, and the report's `regrade_skipped`. Other
+   eligible attempts continue.
 
 Regrade starts no LingCore Agent, model client, terminal tool, or bridge
 socket. It does need Docker. It forwards the lock's `pass_env` after credential
 filtering. The pinned Harbor regrade command cannot apply timeout multipliers,
-so non-default multipliers are refused with `regrade_timeout_multipliers` before
-any grade output is written.
+so non-default verifier, setup, or build multipliers are refused with
+`regrade_timeout_multipliers` before any grade output is written. The agent
+multiplier is allowed because regrade does not run the agent.
 
 Tests, with the fake bridge:
 - A corrected test produces a new grade set while every original record stays
   byte-identical.
-- A changed instruction is refused.
-- A shared-mode task is refused.
-- A `RegradeError` is refused by task.
+- Corrected verifiers can repair `verifier_failed` and `reward_invalid` grades.
+- A missing trial or `RegradeError` carries that attempt forward and does not
+  prevent another eligible attempt from being regraded.
 - A factory that raises proves no Agent or model client is built.
 - Unsupported/protocol-failed attempts keep their original grades; a superseded
   environment failure with no usable trial cannot block a healthy selected attempt.
-- Locked environment forwarding and refusal of unsupported timeout multipliers.
+- Locked environment forwarding, agent multiplier acceptance, and refusal of
+  verifier, setup, and build multipliers.
 
 ### 3.8 ATIF export
 
@@ -778,16 +796,62 @@ shaped like a Terminal-Bench task:
   - Correcting the test and running `eval regrade` changes only the new grade
     set.
   - Ctrl-C mid-command leaves no container.
+  - An injected environment failure after Docker starts causes an automatic
+    infrastructure retry. The first attempt stays byte-identical; the retry
+    gets another container, cannot see the first attempt's marker, passes the
+    verifier, and leaves no container behind.
 - Manual step: resolve and run the Terminal-Bench development subset with a
   real model. Inspect every trace and compare the normalized rewards with
   Harbor's originals. This step is not a CI gate.
 
+## Benchmark eligibility and release provenance
+
+`track: benchmark` uses the reviewed release catalog in
+[`lingcore/evaluation/harbor/releases/`](../lingcore/evaluation/harbor/releases/README.md).
+Resolve verifies local Harbor package hashes against the catalog and records
+the manifest digest and publisher's Git-release/Hub linkage. It does not claim
+that Git Dockerfile exports equal the published prebuilt-image packages.
+Changing any published task requires a different local dataset name for a
+development run. Regrade still allows corrected verifiers, since it preserves
+the original execution and writes a separate grade set.
+
+Benchmark resolution requires every published task, five repetitions, the
+release reward policy, default timeout multipliers, pinned images, required
+traces, and `training_use: prohibited`. Evaluator wall/request/tool/token caps
+must be explicitly `null`, `usage_missing: ignore`, and `automatic_turns: 0`.
+Harbor enforces each task's own agent timeout; the development-only 150-second
+reserve does not shorten benchmark runs. Existing capability checks still
+apply. The [full-plan example](examples/evaluation/terminal-bench-benchmark.yaml)
+therefore refuses the current unsupported tasks instead of silently dropping
+them. The CPU development example remains executable with a matching export.
+
+Reports expose `benchmark_eligibility` reasons and withhold `benchmark_score`
+unless the locked benchmark is complete, all selected grades and required
+traces are valid, cleanup succeeded, no reproducibility limitation remains,
+and the grade set is original. Development and regraded reports cannot claim
+benchmark compatibility. Eligibility is derived for the whole job; immutable
+single-attempt records alone never claim it. The score uses the complete
+planned denominator, equivalent to mean reward for this binary, equally
+repeated release. This is local policy eligibility, not leaderboard approval.
+Credential availability when resolving a lock remains informational: adding a
+key before execution does not disqualify a completed run. Runner diagnostics
+are applied before deriving completeness, score scope, and benchmark eligibility;
+an incomplete job cannot retain an eligible score. Resuming after a transient
+ledger error can restore eligibility without rerunning completed trials.
+
+Reports also expose locked resource requests for every planned case, including
+unstarted cases, and each task's agent/verifier limits. Separate-verifier
+resources are resolved through Harbor. CPU and memory use explicit `limit`
+policies; Docker does not enforce the requested storage quota, which the
+report states separately. These are requested resources, not measured usage.
+New Harbor metadata changes Harbor locks; native lock serialization is unchanged.
+
 ## Verified implementation checks
 
-Final checks: LingCore 1,617 passed / 16 skipped; LingChat 143 passed;
-the isolated bridge's 37 tests passed across the full Docker-enabled suite
-and the added finish-timeout regression run (32 offline, five Docker cases).
-All six LingCore synthetic Docker cases passed together. Ruff and mypy
+Final checks: LingCore 1,649 passed / 17 skipped; LingChat 143 passed;
+the isolated bridge's 39 tests passed in the full Docker-enabled suite
+(34 offline, five Docker cases).
+All seven LingCore synthetic Docker cases passed together. Ruff, format, and mypy
 pass in both projects and the bridge. LingCore's dependencies are unchanged.
 The final command-supervision regression additionally verifies that redirected
 background services survive between commands and are gone after the sweep.
@@ -796,6 +860,12 @@ background services survive between commands and are gone after the sweep.
   profile refusals, live aborts, timeout → interrupt → finish, malformed frames
   through a real Agent, credential filtering and frame/file scanning, resume,
   harness-lock refusal, outcome mapping, and regrade without Agent construction.
+  Benchmark checks cover complete, incomplete, development, and regraded
+  reports; release/policy drift; full membership; ignored extra files;
+  credentials supplied after offline resolve; final runner diagnostics and
+  recovery without rerunning completed trials; and resource reporting for
+  both executed and unstarted cases. The built
+  wheel also loads the bundled 66-task release catalog successfully.
 - Bridge tests cover implicit compose `main` in both environments, safe
   diagnostics, relay sequencing, usage, cleanup on EOF/abort/malformed input,
   and shared protocol and ATIF fixtures validated by pinned Harbor models.
@@ -803,11 +873,199 @@ background services survive between commands and are gone after the sweep.
   detached-process sweep, harness timeout during the final sweep, passing and valid-failing locked runs, preserved
   records during corrected-verifier regrade, Ctrl-C-style cancellation and
   resume, and a killed LingCore process followed by EOF cleanup and resume.
+  An automatic retry after a real environment-start failure preserves the
+  failed attempt, uses a different container without its marker, and cleans
+  both containers. Harbor's saved config confirms CPU/memory `limit` policies.
   Harbor oracle/no-op reference runs produce rewards 1 and 0.
 - The `SourceTrialConfig` construction check alone is not evidence of regrade;
   the synthetic separate-verifier Docker test exercises the actual regrade.
-- No public benchmark task or paid model was run. The real-model Terminal-Bench
-  development subset is a manual follow-up, not a completed check.
+- The automated checks above use synthetic tasks and fake clients. The separate
+  live-model smoke below is a partial development check, not a benchmark score.
+
+### Live-model smoke, 2026-10-30–31
+
+Used `gpt-6-luna` through an OpenAI-compatible gateway on local x86_64 Docker.
+Both public task exports matched the bundled Terminal-Bench 4.0.0 package
+digests, including the complete package file set. Locks recorded
+`verified_subset` and `training_use: prohibited`.
+
+The public runs used one repetition, a 300-second agent cap, 20 model requests,
+40 tool calls, and 150,000 reported tokens per trial. Sampling used low reasoning
+effort and a 4,096 completion-token cap. The initial run disabled stream retries
+and stopped on missing usage. The follow-up allowed one stream retry and missing
+usage, retaining the other caps. Each follow-up used a separate lock and job;
+earlier records were retained unchanged.
+
+| Task / check | Execution | Grade | Model requests |
+| --- | --- | --- | ---: |
+| `atrx-vep-crispr`, initial | Provider stream interrupted | Invalid, `provider_failed` | 3 |
+| `batched-eval-parity`, initial | Provider stream interrupted | Invalid, `provider_failed` | 7 |
+| Synthetic write-file, 30 seconds | Agent wall-time limit | Valid, reward 0 | 3 |
+| Synthetic write-file, 90 seconds, stream retry enabled | Completed; recovered two interrupted streams | Valid, reward 1 | 6 |
+| `atrx-vep-crispr`, follow-up | Agent wall-time limit | Valid, reward 0 | 10 |
+
+The 90-second synthetic check used agent timeout multiplier 2 to preserve the
+harness reserve, at most six requests, ten tool calls, and 30,000 reported tokens.
+It allowed missing usage so an interrupted stream could be retried. All observed
+served-model IDs were `gpt-6-luna`.
+
+All five traces were complete, with each span closing once. Original Harbor
+rewards and token totals matched the normalized records. All task containers
+were removed. Three written ATIF trajectories validated against Harbor 0.25.0;
+the two timed-out executions reported `atif: absent`, reason `incomplete`.
+The 29 recorded model requests reported 172,229 input and 5,148 output tokens.
+These totals are lower bounds: interrupted/cancelled requests lacked usage, and
+cost remains unknown. A scan of the saved outputs found no temporary key material.
+
+One unresolved implementation issue surfaced during follow-up preflight:
+`source.path: ../dataset` raised `PathEscapeError` while hashing the task tree.
+`resolve_harbor` keeps lexical `..` components with `Path.absolute()`, which
+`confined_directory` refuses. The run used an unchanged local copy of the pinned
+task with `source.path: dataset`. Parent-relative dataset paths, including the
+example's `../../../datasets/terminal-bench`, need normalization that preserves
+the symlink refusal policy before the default example can be validated as written.
+
+### Terra live-model retry, 2026-10-31
+
+Repeated the synthetic control and the same two pinned public tasks with
+`gpt-6.1-terra`, using the same gateway and temporary credential. All observed
+served-model IDs matched the requested model. The profile matched the retry-enabled
+Luna follow-up except for the model ID: one stream retry, low reasoning effort,
+4,096 completion tokens, and the limits recorded above. Each task ran once in a
+fresh environment, with no infrastructure retries. No stream retries occurred.
+
+| Task | Execution | Final grade | Model requests |
+| --- | --- | --- | ---: |
+| Synthetic write-file | Completed in 23 seconds | Valid, reward 1 | 4 |
+| `atrx-vep-crispr` | Agent wall-time limit at 300 seconds | Valid, reward 0 | 13 |
+| `batched-eval-parity` | Completed in 113 seconds | Valid, reward 0 after regrade | 6 |
+
+The initial `batched-eval-parity` grade was `reward_invalid`: the host lacked
+Docker Buildx, which Harbor needs to build its verifier network-control helper.
+Installed the official checksum-verified Buildx v0.38.1 CLI plugin, then regraded
+the preserved artifacts with network restrictions intact and no new model calls.
+The verifier finished with four failed tests and one passing test. The new public
+grade set is complete, with two valid task failures and `mean_reward: 0.0`.
+ATRX's missing output artifact prevented regrading that attempt, so its original
+valid zero was carried forward with `regrade_skip_reason: missing_evidence`.
+All 85 pre-existing public-job files remained byte-for-byte unchanged; the
+original invalid grade remains available alongside the new grade set.
+
+All three traces were complete, each span closed once, Harbor usage matched the
+normalized records, and both written ATIF trajectories passed schema validation.
+The timed-out ATRX run recorded `atif: absent`, reason `incomplete`. All test and
+verifier containers were removed. The 23 model requests reported 193,227 input
+and 5,192 output tokens; usage is incomplete because the timed-out request lacks
+final usage, and cost remains unknown. A scan of 272 saved files found no copy
+of the temporary credential.
+
+Local evidence is under `/tmp/lingcore-tb-live-gpt61-terra-dgq4dfil`, including
+`verification.json`, `regrade-verification.json`, the original jobs, and public
+grade set `regrade-fd0c0c68789142319ba888985b9e913b`. These are bounded development
+checks with reduced limits, not a full-suite benchmark result. The parent-relative
+dataset-path issue above remains unresolved.
+
+### DeepSeek live-model retry, 2026-10-31
+
+Requested `deepseek-v4.1-flash` through the same gateway and temporary credential;
+the gateway reported `deepseek-v4-1-flash-261017` on every observed response.
+The first synthetic/public runs matched the Terra profiles and limits except for
+the model ID. The synthetic control passed in 5.7 seconds with two requests.
+The public runs hit token limits before the five-minute deadline: ATRX crossed
+150,000 reported tokens, and the evaluator task exhausted its 4,096-token response
+allowance entirely on reasoning in its fourth request.
+
+One fresh public follow-up increased the response allowance to 16,384 tokens and
+the trial allowance to 300,000 reported tokens. It retained the 300-second,
+20-request, and 40-tool-call caps. Both jobs, their locks, and all earlier attempts
+remain available; no result was replaced or automatically retried.
+
+| Task / check | Execution | Grade | Model requests |
+| --- | --- | --- | ---: |
+| Synthetic write-file | Completed in 5.7 seconds | Valid, reward 1 | 2 |
+| `atrx-vep-crispr`, initial | Reported-token cap at 76 seconds | Valid, reward 0 | 12 |
+| `batched-eval-parity`, initial | Response length exhausted at 35 seconds | Invalid, `provider_failed`, category `length` | 4 |
+| `atrx-vep-crispr`, follow-up | Model-request cap at 190 seconds | Valid, reward 0 | 20 |
+| `batched-eval-parity`, follow-up | Reported-token cap at 202 seconds | Valid, reward 0 | 12 |
+
+Both ATRX attempts lacked `/app/output/mutation.report.json`; all 16 verifier
+checks failed at their shared output-existence check. The evaluator follow-up
+failed all five tests with `KeyError` for support records. Its final recorded
+usage was 294,339 input and 29,298 output tokens: the cumulative limit can be
+crossed by the request that reports usage. The follow-up report is complete with
+two valid failures and `mean_reward: 0.0`, but both executions were budget-stopped.
+These observations do not establish unrestricted task performance.
+
+Across all five executions, 50 requests reported 721,731 input and 65,856 output
+tokens, including 53,469 reasoning tokens within the output total. Usage coverage
+was complete; cost remains unknown. No stream retries occurred. All traces were
+complete with each span closing once; Harbor usage matched the normalized records.
+Both written ATIF trajectories passed schema validation; the three budget-stopped
+turns recorded absent/incomplete trajectories. All test and verifier containers
+were removed, 277 snapshotted prior-run files remained unchanged, and a scan of
+338 saved files found no temporary credential material.
+
+Local evidence is under `/tmp/lingcore-tb-live-deepseek-v41-flash-ijh803vh`, including
+`verification.json` and separate `synthetic`, `public`, and `public-followup` jobs.
+No source code or benchmark task inputs changed for these runs.
+
+### Sol with task-scale budgets, 2026-10-31
+
+The first `gpt-6.1-sol` requests failed before generation: the gateway returned
+HTTP 503, code `model_not_found`, because the key's routing group had no channel
+for that model. After the user corrected the key settings, a minimal SDK request
+succeeded and reported `gpt-6.1-sol`. Both public tasks then ran in fresh, separate
+jobs. All observed served-model IDs matched `gpt-6.1-sol`.
+
+Removed the smoke-test request, tool-call, and cumulative-token caps with explicit
+`null` values. Neither `max_tokens` nor `max_completion_tokens` was sent. The
+development runner still requires a cleanup reserve, so `wall_seconds` was 28,650
+within each task's native 28,800-second Harbor agent timeout. The profile used
+high reasoning effort, a 1,000,000-iteration ceiling, a 600-second API inactivity
+timeout, and three transport/stream retries. Terminal commands defaulted to 900
+seconds with a 28,800-second maximum; capture/display allowances were 2 MiB/64 KiB.
+The context window was 128,000 estimated tokens with compaction enabled. Original
+task inputs, CPU/memory requests, network restrictions, verifier timeouts, and
+grading rules were unchanged. Infrastructure retries remained disabled.
+
+| Real task | Agent execution | Verifier | Grade | Model requests |
+| --- | --- | --- | --- | ---: |
+| `batched-eval-parity` | Completed in 1,990.749 seconds (33m 11s) | All 5 tests passed, including the fixed 55-second runtime test | Valid, reward 1 | 29 |
+| `atrx-vep-crispr` | Completed in 321.427 seconds (5m 21s) | 6 tests passed, 10 failed | Valid, reward 0 | 18 |
+
+The evaluator's successful execution used 1,254,148 input and 53,926 output tokens,
+including 1,118,080 cached input and 40,927 reasoning tokens. It performed public
+checks across batch sizes, padding modes, shuffled inputs, duplicate IDs, output
+schemas, metrics, and shared-prefix runtime before finishing. Harbor's independent
+verifier passed all five tests in 223.12 seconds; the full verifier phase took
+240.19 seconds. The old five-minute, 20-request, and 300,000-token caps would each
+have stopped this execution before it finished.
+
+ATRX now produced its report, but used inconsistent variant coordinates and left
+the selected-variant and downstream fields null. Its final reply explicitly
+described a partial report. A separate, credential-free run of the published ATRX
+oracle earned reward 1, confirming that the task/verifier could succeed locally.
+That reference run made no model calls and was not supplied to either agent; it
+is diagnostic evidence, not a model success. The evaluator pass above was produced
+by the real Sol agent without changing the task or verifier.
+
+Both real jobs are complete with valid grades. Their 47 model requests reported
+1,651,920 input and 65,902 output tokens with complete usage coverage; cost remains
+unknown. No stream retries occurred. Both traces were complete with every span
+closing once, both ATIF trajectories validated against Harbor 0.25.0, and Harbor
+usage/rewards matched the normalized records. Both locks revalidated without
+drift. All agent, verifier, and oracle containers were removed. All 429 snapshotted
+earlier files remained unchanged; a scan of 350 files across these runs and the
+initial Sol diagnostics found no temporary credential material.
+
+The initial access-failure records remain under
+`/tmp/lingcore-tb-live-gpt61-sol-bv6jbq7t`. The successful retry's profiles, suites,
+locks, reports, trajectories, `verification.json`, `input-validation.json`, and
+isolated oracle diagnostic are under
+`/tmp/lingcore-tb-live-gpt61-sol-retry-n7aajhm3`. The passing report is
+`batched-eval-parity/jobs/job-10379ea4fab643cb8b37cc08a42ba4d0/report.json` there.
+These are development results over two public tasks; the full three-task
+development acceptance run and full-suite validation remain outstanding.
 
 ## Documentation updates
 

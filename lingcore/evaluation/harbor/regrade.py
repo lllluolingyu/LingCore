@@ -44,9 +44,10 @@ async def regrade_harbor(
         and isinstance(plan.grading, HarborGradingIdentity)
         and isinstance(plan.execution, HarborExecutionIdentity)
     )
-    if any(v != 1 for v in plan.execution.harness["timeout_multipliers"].values()):
+    multipliers = plan.execution.harness["timeout_multipliers"]
+    if any(multipliers[name] != 1 for name in ("verifier", "setup", "build")):
         raise EvaluationConfigError(
-            "Harbor regrade cannot preserve non-default timeout multipliers",
+            "Harbor regrade cannot preserve non-default verifier, setup, or build timeout multipliers",
             "regrade_timeout_multipliers",
         )
     meta = read_json(job / "job.json")
@@ -73,8 +74,13 @@ async def regrade_harbor(
         selected = jobs.select(
             state.for_trial(trial.trial_id), plan.execution.retry
         ).selected
-        if selected and selected.result and selected.result.grade.status == "valid":
-            eligible[selected.trial.execution_id] = selected
+        if selected and selected.result:
+            original_grade = selected.result.grade
+            if original_grade.status == "valid" or (
+                original_grade.status == "invalid"
+                and original_grade.reason in {"verifier_failed", "reward_invalid"}
+            ):
+                eligible[selected.trial.execution_id] = selected
     cases = {r.trial.case_id for r in eligible.values()}
     description = await asyncio.to_thread(
         invoke, executable, ["describe", "--dataset", str(dataset)], env
@@ -102,19 +108,16 @@ async def regrade_harbor(
             )
         current[task.id] = identity
     sources = {}
+    skipped: dict[str, str] = {}
     for record in eligible.values():
         assert record.result is not None
         if not record.result.harbor_trial:
-            raise EvaluationConfigError(
-                f"task {record.trial.case_id}: Harbor trial is missing",
-                "missing_evidence",
-            )
+            skipped[record.trial.execution_id] = "missing_evidence"
+            continue
         source = resolve_confined(record.directory, record.result.harbor_trial)
         if not (source / "result.json").is_file():
-            raise EvaluationConfigError(
-                f"task {record.trial.case_id}: Harbor trial is missing",
-                "missing_evidence",
-            )
+            skipped[record.trial.execution_id] = "missing_evidence"
+            continue
         sources[record.trial.execution_id] = source
     grade_id = "regrade-" + uuid4().hex
     grades: dict[str, Grade] = {}
@@ -124,74 +127,68 @@ async def regrade_harbor(
     try:
         for record in finished:
             assert record.result is not None
-            if record.trial.execution_id not in eligible:
-                # Invalid and superseded attempts keep their original evidence
-                # and grade. They must never be promoted by a new verifier.
-                grade = record.result.grade
-                details = {
-                    "rewards": record.result.rewards,
-                    "reward_valid": record.result.reward_valid,
-                }
+            # Preserve excluded attempts and attempts with missing evidence.
+            # A new verifier may repair only a selected, eligible execution.
+            execution_id = record.trial.execution_id
+            grade = record.result.grade
+            details = {
+                "rewards": record.result.rewards,
+                "reward_valid": record.result.reward_valid,
+            }
+            if execution_id in sources:
+                task = current[record.trial.case_id]
+                output = record.directory / "regrades" / grade_id / "harbor"
+                summary = await invoke_cancellable(
+                    executable,
+                    [
+                        "regrade",
+                        "--source",
+                        str(sources[execution_id]),
+                        "--task",
+                        str(dataset / task.path),
+                        "--output",
+                        str(output),
+                    ],
+                    env,
+                    timeout=task.verifier["timeout_sec"] + 4200,
+                )
                 await finish_io(
-                    write_json,
-                    record.directory / "grades" / (grade_id + ".json"),
-                    {
-                        "schema_version": "lingcore.eval-grade.v1",
-                        "grade_set": grade_id,
-                        "execution_id": record.trial.execution_id,
-                        "grade": grade.model_dump(mode="json"),
-                        **details,
-                    },
+                    write_json, output.parent / "harbor-summary.json", summary
                 )
-                grades[record.trial.execution_id] = grade
-                grade_details[record.trial.execution_id] = details
-                continue
-            task = current[record.trial.case_id]
-            output = record.directory / "regrades" / grade_id / "harbor"
-            summary = await invoke_cancellable(
-                executable,
-                [
-                    "regrade",
-                    "--source",
-                    str(sources[record.trial.execution_id]),
-                    "--task",
-                    str(dataset / task.path),
-                    "--output",
-                    str(output),
-                ],
-                env,
-                timeout=task.verifier["timeout_sec"] + 4200,
-            )
-            await finish_io(write_json, output.parent / "harbor-summary.json", summary)
-            if any(e["type"] == "RegradeError" for e in summary.get("exceptions", [])):
-                raise EvaluationConfigError(
-                    f"task {task.id}: verifier requires evidence that was not collected",
-                    "missing_evidence",
-                )
-            _, grade = map_outcome(
-                summary,
-                record.result.execution,
-                plan.grading.reward,
-                hello=True,
-                cleanup_failed=record.result.cleanup_failed,
-            )
+                if any(
+                    e["type"] == "RegradeError" for e in summary.get("exceptions", [])
+                ):
+                    skipped[execution_id] = "missing_evidence"
+                else:
+                    _, grade = map_outcome(
+                        summary,
+                        record.result.execution,
+                        plan.grading.reward,
+                        hello=True,
+                        cleanup_failed=record.result.cleanup_failed,
+                    )
+                    details = {
+                        "rewards": summary["rewards"],
+                        "reward_valid": summary["reward_valid"],
+                    }
             await finish_io(
                 write_json,
                 record.directory / "grades" / (grade_id + ".json"),
                 {
                     "schema_version": "lingcore.eval-grade.v1",
                     "grade_set": grade_id,
-                    "execution_id": record.trial.execution_id,
+                    "execution_id": execution_id,
                     "grade": grade.model_dump(mode="json"),
-                    "rewards": summary["rewards"],
-                    "reward_valid": summary["reward_valid"],
+                    **details,
+                    **(
+                        {"regrade_skip_reason": skipped[execution_id]}
+                        if execution_id in skipped
+                        else {}
+                    ),
                 },
             )
-            grades[record.trial.execution_id] = grade
-            grade_details[record.trial.execution_id] = {
-                "rewards": summary["rewards"],
-                "reward_valid": summary["reward_valid"],
-            }
+            grades[execution_id] = grade
+            grade_details[execution_id] = details
         complete = True
     except asyncio.CancelledError:
         interrupted = True
@@ -209,6 +206,15 @@ async def regrade_harbor(
             interrupted=interrupted,
         )
         report["complete"] &= complete
+        skipped_records = [
+            {
+                "execution_id": execution_id,
+                "case_id": eligible[execution_id].trial.case_id,
+                "reason": reason,
+            }
+            for execution_id, reason in skipped.items()
+        ]
+        report["regrade_skipped"] = skipped_records
         await finish_io(
             write_json,
             job / "grade-sets" / (grade_id + ".json"),
@@ -219,6 +225,7 @@ async def regrade_harbor(
                 "complete": complete,
                 "harness": {k: v for k, v in description.items() if k != "tasks"},
                 "executions": list(grades),
+                "skipped": skipped_records,
                 "cases": [
                     {"id": t.id, "graders_digest": t.verifier_digest}
                     for t in current.values()

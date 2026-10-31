@@ -13,6 +13,7 @@ from lingcore.config import AgentProfile
 from lingcore.evaluation.config import EvaluationConfigError, ResolvedSuite
 from lingcore.evaluation.harbor.binding import RefusingTerminal
 from lingcore.evaluation.harbor.process import bridge_environment, find_bridge, invoke
+from lingcore.evaluation.harbor.provenance import check_benchmark, verify_release
 from lingcore.evaluation.harbor.tools import terminal_registry
 from lingcore.evaluation.identity import (
     HarborExecutionIdentity,
@@ -156,14 +157,19 @@ def resolve_harbor(
         raise EvaluationConfigError(
             "unsupported Harbor bridge protocol or version", "bridge_version"
         )
+    provenance = verify_release(suite.source, description)
     selected, _ = select(suite.source, description)
+    check_benchmark(suite, provenance, selected)
     wall = suite.execution.limits.wall_seconds
-    if wall is None or any(
-        wall
-        > t["config"]["agent"]["timeout_sec"]
-        * suite.execution.harbor.timeout_multipliers.agent
-        - HARNESS_MARGIN_SECONDS
-        for t in selected
+    if suite.track == "development" and (
+        wall is None
+        or any(
+            wall
+            > t["config"]["agent"]["timeout_sec"]
+            * suite.execution.harbor.timeout_multipliers.agent
+            - HARNESS_MARGIN_SECONDS
+            for t in selected
+        )
     ):
         raise EvaluationConfigError(
             f"wall_seconds must end at least {HARNESS_MARGIN_SECONDS} seconds before every Harbor agent timeout",
@@ -241,9 +247,8 @@ def task_identity(
             "artifacts": artifacts,
         },
         agent_timeout_sec=config["agent"]["timeout_sec"],
-        resources={
-            k: task["properties"][k] for k in ("cpus", "memory_mb", "storage_mb")
-        },
+        resources=task.get("resources")
+        or {k: task["properties"][k] for k in ("cpus", "memory_mb", "storage_mb")},
         images=task["environments"],
     )
 
@@ -283,11 +288,12 @@ async def build_harbor_identity(
         "included": [t.id for t in tasks],
         "excluded": excluded,
     }
-    dataset = {
+    dataset: dict[str, Any] = {
         "ref": suite.source.dataset,
         "path": os.path.relpath(resolved.dataset, base_dir),
         "release_source": suite.source.release_source,
         "training_use": suite.source.training_use,
+        "provenance": verify_release(suite.source, resolved.description),
     }
     source_fields: dict[str, Any] = dict(
         dataset=dataset, selection=selection, tasks=tasks
@@ -327,10 +333,14 @@ async def build_harbor_identity(
             "retry_on": suite.execution.retry_on,
         },
     )
-    limitations = ["release_unverified"] if suite.source.release_source else []
+    limitations = (
+        ["release_unverified"]
+        if dataset["provenance"]["status"] == "unverified"
+        else []
+    )
     if any(not env["pinned"] for task in tasks for env in task.images.values() if env):
         limitations.append("image_unpinned")
-    if any(
+    if suite.track == "development" and any(
         (suite.execution.limits.wall_seconds or 0) + HARNESS_MARGIN_SECONDS
         < t.agent_timeout_sec * suite.execution.harbor.timeout_multipliers.agent
         for t in tasks

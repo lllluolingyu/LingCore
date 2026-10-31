@@ -136,6 +136,8 @@ def describe_task(path: Path) -> dict[str, Any]:
     gpu_counts = [config.environment.gpus or 0]
     if verifier:
         gpu_counts.append(verifier.config.gpus or 0)
+    package_hash, package_files = Packager.compute_content_hash(path)
+    packaged = set(package_files)
     return {
         "id": path.name,
         "path": path.name,
@@ -143,8 +145,18 @@ def describe_task(path: Path) -> dict[str, Any]:
         "name": task.name,
         "config": config.model_dump(mode="json"),
         "instruction_digest": digest(task.instruction.encode("utf-8")),
-        "harbor_digest": "sha256:" + Packager.compute_content_hash(path)[0],
+        "harbor_digest": "sha256:" + package_hash,
+        # Publisher hashes exclude ignored/unrecognized files. An export with
+        # extra local files is not an exact published package, even when its
+        # Harbor digest matches (Docker COPY could still consume those files).
+        "package_complete": all(
+            file.resolve() in packaged for file in path.rglob("*") if file.is_file()
+        ),
         "environments": {"agent": agent_env, "verifier": verifier_env},
+        "resources": {
+            "agent": resource_request(config.environment),
+            "verifier": resource_request(verifier.config) if verifier else None,
+        },
         "properties": {
             "os": config.environment.os.value,
             "gpus": max(gpu_counts),
@@ -162,6 +174,25 @@ def describe_task(path: Path) -> dict[str, Any]:
             "verifier_mode": resolve_task_verifier_mode(config).value,
         },
     }
+
+
+def resource_request(config: EnvironmentConfig) -> dict[str, Any]:
+    # Deliberately exclude env, MCP configuration, and other possible secrets.
+    result: dict[str, Any] = config.model_dump(
+        mode="json",
+        include={
+            "os",
+            "cpus",
+            "memory_mb",
+            "storage_mb",
+            "gpus",
+            "gpu_types",
+            "tpu",
+            "network_mode",
+            "build_timeout_sec",
+        },
+    )
+    return result
 
 
 def describe(dataset: Path) -> dict[str, Any]:
@@ -215,6 +246,11 @@ def describe(dataset: Path) -> dict[str, Any]:
     result = {
         "schema_version": "lingcore.harbor-description.v1",
         "protocol": PROTOCOL,
+        "resource_policy": {
+            "cpus": "limit",
+            "memory_mb": "limit",
+            "storage_mb": "not_enforced",
+        },
         "bridge": {
             "version": __version__,
             "digest": package_digest(Path(__file__).parent),

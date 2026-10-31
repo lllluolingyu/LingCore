@@ -7,7 +7,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from typing import Any
 
-from lingcore.evaluation.models import TrialResult
+from lingcore.evaluation.models import EvaluationDiagnostic, TrialResult
 
 
 def build_report(
@@ -101,6 +101,7 @@ def build_job_report(
     grades: dict[str, Any] | None = None,
     grade_details: dict[str, dict[str, Any]] | None = None,
     interrupted: bool = False,
+    diagnostics: Sequence[EvaluationDiagnostic] = (),
 ) -> dict[str, Any]:
     from lingcore.evaluation.jobs import fatal_reason, infrastructure_cause, select
 
@@ -184,8 +185,16 @@ def build_job_report(
         grade_set=grade_set,
         trials=trials,
         interrupted=interrupted,
+        track=plan.suite.track,
     )
-    report["complete"] = valid == len(plan.trials) and invalid == 0 and not interrupted
+    if diagnostics:
+        report["diagnostics"] = [d.model_dump(mode="json") for d in diagnostics]
+    report["complete"] = (
+        valid == len(plan.trials)
+        and invalid == 0
+        and not interrupted
+        and not diagnostics
+    )
     report["score_scope"] = (
         "complete_development" if report["complete"] else "valid_only_descriptive"
     )
@@ -284,6 +293,12 @@ def build_job_report(
         reward_name = plan.grading.reward.name
         means = []
         for row in report["cases"]:
+            task = next(t for t in plan.source.tasks if t.id == row["case_id"])
+            row["resources"] = task.resources
+            row["task_limits"] = {
+                "agent_timeout_sec": task.agent_timeout_sec,
+                "verifier": task.verifier,
+            }
             values = [
                 float(r.grade.scores[reward_name] or 0)
                 for r in results
@@ -304,6 +319,15 @@ def build_job_report(
             else None,
             harness=plan.execution.harness,
             training_use=plan.source.dataset["training_use"],
+            dataset_provenance=plan.source.dataset.get(
+                "provenance", {"status": "unverified", "reason": "legacy_lock"}
+            ),
+            resources={
+                "meaning": "locked_task_requests",
+                "environment": plan.execution.harness["environment"],
+                "enforcement": plan.execution.harness.get("resource_policy", {}),
+                "tasks": {t.id: t.resources for t in plan.source.tasks},
+            },
             limitations=sorted(
                 (set(plan.limitations) - {"emulated_platform"})
                 | (
@@ -321,7 +345,52 @@ def build_job_report(
         report["coverage"]["unsupported"] = sum(
             bool(e.result and e.result.unsupported) for e in state.executions
         )
+        _benchmark_eligibility(report, plan, results)
     return report
+
+
+def _benchmark_eligibility(
+    report: dict[str, Any], plan: Any, results: Sequence[TrialResult]
+) -> None:
+    """A comparable score is a job property, never a single-attempt claim."""
+    reasons = []
+    if plan.suite.track != "benchmark":
+        reasons.append("development_track")
+    if not report["locked"]:
+        reasons.append("unlocked")
+    provenance = report["dataset_provenance"]
+    if provenance["status"] != "verified":
+        reasons.append("release_unverified_or_partial")
+    if set(provenance.get("verified_tasks", [])) != {t.id for t in plan.source.tasks}:
+        reasons.append("partial_selection")
+    if plan.execution.repetitions != provenance.get("policy", {}).get("repetitions"):
+        reasons.append("release_repetitions")
+    if not report["complete"] or any(r.cleanup_failed for r in results):
+        reasons.append("incomplete")
+    if not plan.trace.required or any(not r.trace.complete for r in results):
+        reasons.append("trace_incomplete")
+    if report["grade_set"] != "original":
+        reasons.append("regraded")
+    # Credential availability at resolve time is informational. A successful
+    # execution may use credentials supplied after the offline lock was made.
+    reasons.extend(r for r in report["limitations"] if r != "credential_unset")
+    compatible = not reasons
+    report["benchmark_compatible"] = compatible
+    report["benchmark_eligibility"] = {
+        "eligible": compatible,
+        "reasons": sorted(set(reasons)),
+        "policy": provenance.get("policy"),
+        "manifest_digest": provenance.get("manifest_digest"),
+    }
+    report["benchmark_score"] = report["harbor_accuracy"] if compatible else None
+    for row in report["cases"]:
+        for result in row["results"]:
+            result["benchmark_compatible"] = compatible
+            result["comparison"]["benchmark_compatible"] = compatible
+    if plan.suite.track == "benchmark":
+        report["score_scope"] = (
+            "complete_benchmark" if compatible else "benchmark_ineligible_descriptive"
+        )
 
 
 def _model_matches(served: str, configured: set[str]) -> bool:

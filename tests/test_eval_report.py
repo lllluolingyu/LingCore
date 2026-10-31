@@ -12,6 +12,7 @@ from tests.test_eval_retries import record
 
 def report(executions, *, model="gpt-4o", vision="vision-model"):
     plan = SimpleNamespace(
+        suite=SimpleNamespace(track="development"),
         trials=[TrialSpec(trial_id="one", case_id="one", repetition=1)],
         source=SimpleNamespace(cases=[SimpleNamespace(id="one")]),
         candidate=SimpleNamespace(

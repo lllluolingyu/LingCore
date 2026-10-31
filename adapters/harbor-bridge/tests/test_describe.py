@@ -184,3 +184,39 @@ def test_compose_implicit_main_is_counted(dataset, folder):
     value = describe(dataset)["tasks"][0]
     assert value["status"] == "ok"
     assert value["properties"]["containers"] == 2
+
+
+def test_resolved_agent_and_verifier_resources_exclude_environment_values(dataset):
+    task = dataset / "tiny"
+    with (task / "task.toml").open("a") as file:
+        file.write("""
+[environment.env]
+SECRET = "not-reportable"
+[verifier]
+environment_mode = "separate"
+[verifier.environment]
+docker_image = "fixture"
+cpus = 4
+memory_mb = 8192
+storage_mb = 20480
+""")
+    value = describe(dataset)["tasks"][0]
+    assert value["status"] == "ok"
+    resources = value["resources"]
+    assert resources["agent"]["cpus"] == 2
+    assert resources["verifier"]["cpus"] == 4
+    assert resources["verifier"]["memory_mb"] == 8192
+    assert resources["verifier"]["storage_mb"] == 20480
+    assert "not-reportable" not in json.dumps(resources)
+    assert "env" not in resources["agent"]
+
+
+def test_published_digest_cannot_hide_extra_ignored_files(dataset):
+    original = describe(dataset)["tasks"][0]
+    assert original["package_complete"]
+    extra = dataset / "tiny/environment/__pycache__/extra.pyc"
+    extra.parent.mkdir()
+    extra.write_bytes(b"extra container input ignored by the publisher")
+    changed = describe(dataset)["tasks"][0]
+    assert changed["harbor_digest"] == original["harbor_digest"]
+    assert not changed["package_complete"]

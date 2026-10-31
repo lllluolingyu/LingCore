@@ -225,3 +225,4 @@ style.css
 
 # One-off local implementation guides may contain live provider credentials.
 /temporary-guide.md
+/temp-api-key.txt

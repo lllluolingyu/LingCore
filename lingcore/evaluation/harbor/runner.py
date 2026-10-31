@@ -530,7 +530,7 @@ async def run_trial(
             if agent_elapsed is not None
             else round((time.monotonic() - started) * 1000),
             cleanup_failed=cleanup_failed,
-            comparison=Comparison(locked=locked),
+            comparison=Comparison(locked=locked, track=plan.suite.track),
             served_models=sorted(
                 {
                     redact_known_secrets(u.model, secrets)

@@ -28,6 +28,7 @@ def describe():
             id=path.name,
             path=path.name,
             name="synthetic/" + path.name,
+            package_complete=task.get("package_complete", True),
             instruction_digest=digest((path / "instruction.md").read_bytes()),
             harbor_digest=digest(
                 b"".join(p.read_bytes() for p in sorted(path.rglob("*")) if p.is_file())
@@ -38,6 +39,11 @@ def describe():
         protocol="lingcore.harbor-bridge.v1",
         bridge={"version": "0.1.0", "digest": "sha256:" + "a" * 64},
         harbor={"version": "0.25.0"},
+        resource_policy={
+            "cpus": "limit",
+            "memory_mb": "limit",
+            "storage_mb": "not_enforced",
+        },
         python={"version": "fake"},
         error_policy={"digest": "sha256:" + "b" * 64},
         atif_versions=["ATIF-v1.7"],
@@ -167,6 +173,10 @@ async def trial():
         summary["exceptions"] = [{"type": "AgentTimeoutError"}]
     if scenario == "digest_mismatch":
         summary["task_digest"] = "sha256:" + "f" * 64
+    if scenario == "verifier_failed":
+        summary.update(failure_cause="verifier_failed", rewards={}, reward_valid=False)
+    elif scenario == "reward_invalid":
+        summary["rewards"] = {"reward": 2.0}
     (trial_dir / "result.json").write_text(json.dumps(summary))
     (trial_dir / "frames.json").write_text(json.dumps(frames))
     (output / "summary.json").write_text(json.dumps(summary))
@@ -183,7 +193,19 @@ elif kind == "summarize":
 elif kind == "regrade":
     source = Path(args["--source"])
     summary = json.loads((source / "result.json").read_text())
-    summary["rewards"] = {"reward": 1.0}
+    summary.update(
+        rewards={"reward": 1.0}, reward_valid=True, failure_cause=None, exceptions=[]
+    )
+    if (
+        os.environ.get("FIXTURE_SCENARIO") == "regrade_missing_first"
+        and Path(args["--task"]).name == "tiny"
+    ):
+        summary.update(
+            rewards={},
+            reward_valid=False,
+            failure_cause="verifier_failed",
+            exceptions=[{"type": "RegradeError"}],
+        )
     output = Path(args["--output"])
     output.mkdir(parents=True)
     (output / "environment.json").write_text(

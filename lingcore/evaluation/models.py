@@ -153,7 +153,7 @@ class ReportPolicy(StrictModel):
 class Suite(StrictModel):
     schema_version: Literal["lingcore.eval.suite.v1"]
     name: str
-    track: Literal["development"] = "development"
+    track: Literal["development", "benchmark"] = "development"
     source: LocalSource | HarborSource
     agent: Candidate
     execution: ExecutionConfig | HarborExecutionConfig = Field(
@@ -166,6 +166,8 @@ class Suite(StrictModel):
     @model_validator(mode="after")
     def _runner_source(self) -> Suite:
         harbor = self.source.kind == "harbor"
+        if self.track == "benchmark" and not harbor:
+            raise ValueError("benchmark track requires a supported Harbor release")
         if harbor != (self.execution.runner == "harbor") or harbor != (
             self.grading.authority == "harbor"
         ):
@@ -293,9 +295,9 @@ class UsageSummary(StrictModel):
 
 
 class Comparison(StrictModel):
-    track: Literal["development"] = "development"
+    track: Literal["development", "benchmark"] = "development"
     locked: bool = False
-    benchmark_compatible: Literal[False] = False
+    benchmark_compatible: bool = False
 
 
 class TrialResult(StrictModel):
@@ -311,7 +313,7 @@ class TrialResult(StrictModel):
     plan_digest: str | None = None
     infrastructure_failure: RetryCause | None = None
     served_models: list[str] = Field(default_factory=list)
-    benchmark_compatible: Literal[False] = False
+    benchmark_compatible: bool = False
     execution: ExecutionOutcome
     grade: Grade
     usage: UsageSummary

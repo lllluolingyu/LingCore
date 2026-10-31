@@ -296,3 +296,100 @@ async def test_wall_deadline_interrupts_and_finishes_for_grading(synthetic):
     assert not subprocess.check_output(
         ["docker", "ps", "-q", "--filter", "name=" + task.name]
     ).strip()
+
+
+async def test_automatic_environment_retry_has_fresh_container(synthetic):
+    """Fail real setup after Docker starts; exercise the scheduler, not resume."""
+    root, task, bridge = synthetic
+    wrapper = root / "retry-bridge"
+    wrapper.write_text(
+        "#!"
+        + str(bridge.parent / "python")
+        + "\n"
+        + r"""
+import json
+import sys
+from pathlib import Path
+from lingcore_harbor_bridge.cli import main
+
+if sys.argv[1] == "trial":
+    from harbor.environments.docker.docker import DockerEnvironment
+    from harbor.trial.errors import EnvironmentStartTimeoutError
+
+    output = Path(sys.argv[sys.argv.index("--output") + 1]).parent
+    attempt = json.loads((output / "trial.json").read_bytes())["attempt"]
+    original = DockerEnvironment.start
+    seen = False
+
+    async def start(self, force_build):
+        global seen
+        await original(self, force_build)
+        if seen:  # Leave the separate verifier unchanged.
+            return
+        seen = True
+        container = await self._run_docker_compose_command(["ps", "-q", "main"])
+        assert container.stdout.strip()
+        probe = await self.exec("test ! -e /tmp/previous-execution-marker")
+        record = {"container": container.stdout.strip(), "fresh": probe.return_code == 0}
+        (output / "retry-probe.json").write_text(json.dumps(record))
+        if attempt == 1:
+            mark = await self.exec("touch /tmp/previous-execution-marker")
+            assert mark.return_code == 0
+            raise EnvironmentStartTimeoutError("injected after real Docker start")
+
+    DockerEnvironment.start = start
+
+raise SystemExit(main())
+"""
+    )
+    wrapper.chmod(0o700)
+    suite_path = root / "suite.yaml"
+    suite = yaml.safe_load(suite_path.read_text())
+    suite["execution"]["infrastructure_retries"] = 1
+    suite_path.write_text(yaml.safe_dump(suite))
+    path = await freeze(root, wrapper)
+    first_files = {}
+
+    def retry_client(profile):
+        # No model is constructed until setup of attempt two succeeds.
+        results = list((root / "jobs").glob("*/executions/*/result.json"))
+        assert len(results) == 1
+        first = results[0].parent
+        first_files.update({p: p.read_bytes() for p in first.rglob("*") if p.is_file()})
+        return client(
+            "test ! -e /tmp/previous-execution-marker && mkdir -p /app && echo harbor-ok > /app/answer.txt"
+        )(profile)
+
+    job, report = await run_locked(
+        path, root / "jobs", bridge=wrapper, client_factory=retry_client
+    )
+    assert report["complete"] and report["mean_reward"] == 1
+    assert report["coverage"]["retried"] == 1
+    results = [
+        (json.loads(p.read_bytes()), p.parent)
+        for p in job.glob("executions/*/result.json")
+    ]
+    results.sort(key=lambda item: item[0]["attempt"])
+    assert len(results) == 2
+    first, second = [r for r, _ in results]
+    assert first["execution"]["cause"] == "environment"
+    assert first["harbor_failure_cause"] == "sandbox_failed"
+    assert first["grade"]["status"] == "not_run"
+    assert any(
+        e["type"] == "EnvironmentStartTimeoutError" for e in first["harbor_exceptions"]
+    )
+    assert second["grade"]["passed"]
+    assert first_files and all(
+        p.read_bytes() == data for p, data in first_files.items()
+    )
+    probes = [
+        json.loads((directory / "retry-probe.json").read_bytes())
+        for _, directory in results
+    ]
+    assert all(p["fresh"] for p in probes)
+    assert probes[0]["container"] != probes[1]["container"]
+    assert not subprocess.check_output(
+        ["docker", "ps", "-aq", "--filter", "name=" + task.name]
+    ).strip()
+    for _, directory in results:
+        check_harness_stopped(directory)

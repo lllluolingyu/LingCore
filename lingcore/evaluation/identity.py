@@ -202,7 +202,7 @@ class RuntimeIdentity(StrictModel):
 
 class SuiteIdentity(StrictModel):
     name: str
-    track: str
+    track: Literal["development", "benchmark"]
     path: str
     digest: Digest
 

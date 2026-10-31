@@ -5,6 +5,16 @@ separate bridge described in the milestone 3 plan, 2026-10-30.
 This document accompanies the
 [general tracing and evaluation design](tracing-and-evaluation.md).
 Synthetic Docker runs are verified. No public benchmark score is claimed.
+
+The current implementation also has offline publisher-package provenance,
+benchmark eligibility policy, automatic Docker retry/fresh-environment coverage,
+and locked resource reporting. Real-model checks exercised two public tasks and
+a synthetic control. With task-scale budgets, `gpt-6.1-sol` passed all five verifier
+tests on `batched-eval-parity`; ATRX completed with a valid task failure. See the
+[Sol run record](evaluation-harbor-plan.md#sol-with-task-scale-budgets-2026-10-31).
+The full three-task development validation remains incomplete.
+Full-suite GPU, multi-container, and task-tool support remain outstanding; see the
+[implemented Harbor plan](evaluation-harbor-plan.md#benchmark-eligibility-and-release-provenance).
 The plan and current examples define the executable commands and schema.
 
 The [milestone 3 implementation plan](evaluation-harbor-plan.md) (2026-10-30)

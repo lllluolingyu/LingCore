@@ -485,11 +485,8 @@ async def _execute_job(
             lock_digest=lock_digest,
             plan_digest=value_digest(identity_body(plan)),
             interrupted=interrupted,
+            diagnostics=(diagnostic,) if diagnostic else (),
         )
-        if diagnostic:
-            report.update(
-                complete=False, diagnostics=[diagnostic.model_dump(mode="json")]
-            )
         try:
             await finish_io(write_json, job / "report.json", report, replace=True)
         except Exception as exc:
