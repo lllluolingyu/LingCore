@@ -84,7 +84,29 @@ jobs:
           enable-cache: true
       - run: uv python install ${{ matrix.python-version }}
       - run: uv sync --locked --all-extras --python ${{ matrix.python-version }}
-      - run: uv run --python ${{ matrix.python-version }} pytest -q
+      - name: Run tests
+        id: pytest
+        run: uv run --python ${{ matrix.python-version }} pytest -q --junitxml="${{ runner.temp }}/pytest.xml"
+      - name: Annotate test failures
+        if: failure() && steps.pytest.outcome == 'failure'
+        env:
+          TEST_REPORT: ${{ runner.temp }}/pytest.xml
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          report = Path(os.environ["TEST_REPORT"])
+          if report.exists():
+              for case in ET.parse(report).iter("testcase"):
+                  for failure in [*case.findall("failure"), *case.findall("error")]:
+                      name = f"{case.get('classname')}.{case.get('name')}"
+                      detail = failure.text or failure.get("message", "")
+                      message = (name + "\n" + detail)[-16000:]
+                      message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                      print(f"::error::{message}")
+          PY
 
   lingchat-compatibility:
     if: github.event_name != 'schedule'
