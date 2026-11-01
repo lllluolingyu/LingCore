@@ -79,7 +79,12 @@ def process(path, sid):
         yield task, parent
     finally:
         if task.is_alive():
-            parent.send("close")
+            try:
+                parent.send("close")
+            except BrokenPipeError:
+                # The busy worker may close its pipe before is_alive() observes
+                # process exit. Joining below still owns its cleanup.
+                pass
         task.join(3)
         if task.is_alive():
             task.terminate()
