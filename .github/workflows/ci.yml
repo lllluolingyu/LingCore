@@ -149,7 +149,7 @@ jobs:
 
   base-wheel:
     if: github.event_name != 'schedule'
-    name: Base wheel stays Telegram-optional
+    name: Base wheel keeps chat SDKs optional
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -162,7 +162,7 @@ jobs:
         run: |
           uv venv --python 3.13 /tmp/lingcore-base
           uv pip install --python /tmp/lingcore-base/bin/python dist/*.whl
-      - name: Verify base imports, CLI, doctor, and Telegram dependency error
+      - name: Verify base imports, CLI, doctor, and channel dependency errors
         run: |
           /tmp/lingcore-base/bin/python -c 'import lingcore'
           /tmp/lingcore-base/bin/lingcore --help
@@ -191,3 +191,18 @@ jobs:
             exit 1
           fi
           grep -F 'pip install "lingcore[telegram]"' "$output"
+          printf '%s\n' 'allowed_user_ids: [ou_ci]' > "$profile/lark.yaml"
+          set +e
+          /tmp/lingcore-base/bin/lingcore doctor \
+            --lark-config "$profile/lark.yaml"
+          lark_doctor_status=$?
+          set -e
+          test "$lark_doctor_status" -eq 1
+          for channel in lark feishu; do
+            output="$work/$channel-error"
+            if /tmp/lingcore-base/bin/lingcore "$channel" \
+              --profile "$profile" >"$output" 2>&1; then
+              exit 1
+            fi
+            grep -F 'pip install "lingcore[lark]"' "$output"
+          done

@@ -5,6 +5,13 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+### Added
+
+- Lark/Feishu conversational channel via `lingcore[lark]` (or `[feishu]`),
+  with WebSocket reception, allowlisted DMs/groups, isolated persistent sessions,
+  image/file attachments, expiring tool approvals, and offline `doctor` checks.
+  Run `lingcore lark` or `lingcore feishu`; see [setup](docs/lark.md).
+
 ## [0.6.0] - 2026-11-01
 
 ### Added

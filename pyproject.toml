@@ -34,6 +34,8 @@ dependencies = [
 # purpose. Only the pdf2md tool / PDF modality fallback need it.
 pdf = ["pymupdf==1.27.2.3"]
 telegram = ["python-telegram-bot[rate-limiter,webhooks]==22.8"]
+lark = ["lark-channel-sdk==1.4.0"]
+feishu = ["lark-channel-sdk==1.4.0"]
 # The bundled browser plugin; also run `playwright install chromium` once.
 browser = ["playwright==1.64.0"]
 
@@ -53,6 +55,7 @@ dev = [
     "pymupdf==1.27.2.3",  # keep in sync with optional-dependencies.pdf
     # Keep in sync with optional-dependencies.telegram.
     "python-telegram-bot[rate-limiter,webhooks]==22.8",
+    "lark-channel-sdk==1.4.0",  # keep in sync with optional-dependencies.lark/feishu
     "playwright==1.64.0",  # keep in sync with optional-dependencies.browser
     "ruff==0.16.1",
 ]

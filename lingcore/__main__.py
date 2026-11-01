@@ -61,8 +61,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("doctor", "telegram", "profile", "plugin", "trace", "eval"),
-        help="Run diagnostics, Telegram, traces, evaluations, or profile management.",
+        choices=(
+            "doctor",
+            "telegram",
+            "lark",
+            "feishu",
+            "profile",
+            "plugin",
+            "trace",
+            "eval",
+        ),
+        help="Run diagnostics, a chat channel, traces, evaluations, or profile management.",
     )
     parser.add_argument(
         "--workspace",
@@ -94,6 +103,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="List stored sessions for this profile and exit.",
     )
     parser.add_argument(
+        "--lark-config",
+        "--feishu-config",
+        default=None,
+        help="Lark/Feishu YAML path (default: <profile>/lark.yaml).",
+    )
+    parser.add_argument(
         "--telegram-config",
         default=None,
         help="Telegram YAML path (default: <profile>/telegram.yaml).",
@@ -115,7 +130,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(
             "use evaluation as `lingcore eval run <suite> --output <directory>`"
         )
-    if args.command == "telegram":
+    if args.command in {"telegram", "lark", "feishu"}:
         conflicts = []
         if args.continue_:
             conflicts.append("--continue")
@@ -128,9 +143,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if args.workspace is not None:
             conflicts.append("--workspace")
         if conflicts:
-            parser.error("Telegram mode does not accept " + ", ".join(conflicts))
-    elif args.telegram_config is not None and args.command != "doctor":
+            channel_name = "Telegram" if args.command == "telegram" else "Lark/Feishu"
+            parser.error(channel_name + " mode does not accept " + ", ".join(conflicts))
+    if args.telegram_config is not None and args.command not in {"doctor", "telegram"}:
         parser.error("--telegram-config is only valid with doctor or telegram")
+    if args.lark_config is not None and args.command not in {
+        "doctor",
+        "lark",
+        "feishu",
+    }:
+        parser.error("--lark-config is only valid with doctor, lark or feishu")
     if args.telegram_mode is not None and args.command != "telegram":
         parser.error("--telegram-mode is only valid with telegram")
     return args
@@ -386,7 +408,7 @@ async def _main_async(args: argparse.Namespace) -> int:
     if args.command == "doctor":
         from lingcore.doctor import diagnose_profile, print_doctor_report
 
-        additional_requirements = None
+        additional_requirements = {}
         if args.telegram_config is not None:
             from lingcore.integrations.telegram import load_telegram_config
 
@@ -409,6 +431,22 @@ async def _main_async(args: argparse.Namespace) -> int:
                 additional_requirements[telegram.webhook.secret_token_env] = (
                     "telegram.webhook.secret_token_env"
                 )
+        if args.lark_config is not None:
+            from lingcore.integrations.lark import load_lark_config
+
+            try:
+                lark = load_lark_config(
+                    profile, args.lark_config, require_secrets=False
+                )
+            except ConfigError as e:
+                print(f"config error: {e}", file=sys.stderr)
+                return 2
+            additional_requirements.update(
+                {
+                    lark.app_id_env: "lark.app_id_env",
+                    lark.app_secret_env: "lark.app_secret_env",
+                }
+            )
         report = diagnose_profile(
             profile,
             additional_environment_requirements=additional_requirements,
@@ -561,6 +599,26 @@ def main(argv: list[str] | None = None) -> int:
     if raw_argv and raw_argv[0] == "plugin":
         return _plugin_command(raw_argv[1:])
     args = _parse_args(raw_argv)
+    if args.command in {"lark", "feishu"}:
+        from lingcore.integrations.lark.application import run_lark
+
+        try:
+            return run_lark(args.profile, lark_config_path=args.lark_config)
+        except ModuleNotFoundError as exc:
+            if exc.name != "lark_channel" and not (exc.name or "").startswith(
+                "lark_channel."
+            ):
+                raise
+            print(
+                'Lark/Feishu support is not installed. Install it with:\npip install "lingcore[lark]"',
+                file=sys.stderr,
+            )
+            return 2
+        except ConfigError as e:
+            print(f"config error: {e}", file=sys.stderr)
+            return 2
+        except KeyboardInterrupt:
+            return 130
     if args.command == "telegram":
         try:
             # This import is deliberately after command selection. Ordinary

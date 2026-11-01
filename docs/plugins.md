@@ -390,12 +390,13 @@ public instance. Configure one you operate or trust. See the official
 [Exa Search API](https://exa.ai/docs/reference/search), and
 [DeepSeek Search API](https://api-docs.deepseek.com/guides/search/) contracts.
 
-The daily profile enables this plugin and defaults to SearXNG. Its 64k-token,
+The daily profile enables this plugin. Its 64k-token,
 200-message working set uses automatic compaction and allows up to 50 tool
 iterations per turn for search and source verification. Copy its
-`.env.example` to `.env` and set `SEARXNG_URL`. To use an API provider, set
-`LINGCORE_SEARCH_PROVIDER=exa` with `EXA_API_KEY`, or
-`LINGCORE_SEARCH_PROVIDER=deepseek` to reuse `DEEPSEEK_API_KEY`. Keys resolve
+`.env.example` to `.env` to select DeepSeek search, reusing `DEEPSEEK_API_KEY`.
+For SearXNG, set `LINGCORE_SEARCH_PROVIDER=searxng` and `SEARXNG_URL`; for Exa,
+set `LINGCORE_SEARCH_PROVIDER=exa` and `EXA_API_KEY`. Without an environment
+override, the profile YAML still defaults to SearXNG. Keys resolve
 through the selected profile's environment and never appear in tool output.
 The manifest declares all three environment variables as optional because only
 the selected provider needs its settings; missing settings are reported when

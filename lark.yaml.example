@@ -1,0 +1,20 @@
+# Copy to <profile>/lark.yaml. Both `lingcore lark` and `lingcore feishu`
+# read this file; the domain below selects the service, not the CLI alias.
+domain: feishu                    # feishu (China) or lark (international)
+app_id_env: LARK_APP_ID
+app_secret_env: LARK_APP_SECRET
+
+# App-scoped user open_ids, not email addresses, user_ids or app IDs.
+# An unlisted user can DM the bot to receive their open_id, without starting
+# an agent. Add it here and restart the channel.
+allowed_user_ids:
+  - ou_replace_with_your_open_id
+
+# Groups are disabled by default. To enable a group, list its chat_id here.
+# The sender must also be allowlisted and must @mention the bot each time.
+allowed_chat_ids: []
+
+# Relative to the selected profile, with separate per-chat/per-user state.
+state_dir: .lingcore/lark
+allow_absolute_state_dir: false
+confirmation_timeout: 60

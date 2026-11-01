@@ -199,6 +199,25 @@ For a text-only model, set `llm.modalities: []` in your copy of the profile so
 attached images and PDFs degrade to text instead of failing the request. Set
 `llm.send_prompt_cache_key: false` if the server rejects that field.
 
+### Lark / Feishu
+
+Run a conversational bot over an outbound WebSocket connection:
+
+```bash
+pip install "lingcore[lark]"
+cp lark.yaml.example profiles/coding/lark.yaml
+# Set LARK_APP_ID and LARK_APP_SECRET in profiles/coding/.env, then set
+# domain and allowed_user_ids in lark.yaml.
+lingcore doctor -p profiles/coding --lark-config profiles/coding/lark.yaml
+lingcore lark -p profiles/coding  # `lingcore feishu` is an alias
+```
+
+The channel supports direct messages and allowlisted groups that mention the
+bot, isolated sessions, images/files, and tool approvals. Both CLI aliases use
+`lark.yaml`; `domain: feishu` selects Feishu and `domain: lark` selects
+international Lark. See [Lark / Feishu setup](docs/lark.md) for app permissions,
+event subscriptions, commands, and configuration.
+
 ### Telegram
 
 Telegram is a conversational Bot API frontend (not a broadcast-channel
@@ -335,9 +354,9 @@ four examples (`lingcore profile list` shows the installed set):
 - `profiles/frontend/` — the coding agent plus the `browser` and `process` plugins for running dev servers and checking web UIs (needs the `lingcore[browser]` extra; see [Frontend development](#frontend-development)).
 - `profiles/daily/` — everyday assistant (web research, local notes, persistent
   memory, a calendar; no shell or coding-skill activation). Web search uses
-  the bundled [`search` plugin](docs/plugins.md#bundled-search-plugin): set
-  `SEARXNG_URL` for a JSON-enabled SearXNG instance, or select Exa / DeepSeek in
-  the profile's `.env.example` configuration. The
+  the bundled [`search` plugin](docs/plugins.md#bundled-search-plugin): copy
+  the profile's `.env.example` to `.env` to use DeepSeek search with
+  `DEEPSEEK_API_KEY`. The template also documents SearXNG and Exa options. The
   [`clock` plugin](docs/plugins.md#bundled-clock-plugin) tells the model the
   current date and time (set `LINGCORE_TIMEZONE`, or leave it blank for the
   host's zone), the [`calendar` plugin](docs/plugins.md#bundled-calendar-plugin)
@@ -799,6 +818,7 @@ profiles.py  immutable template manifest + writable user-state initialization
 tools/       Tool / @tool / ToolRegistry / ToolContext, plus builtin tools
 io/          Frontend protocol + run_session driver + Rich CLI
 integrations/telegram/  PTB-light bridge/state/rendering + thin PTB adapter
+integrations/lark/      Lark/Feishu WebSocket channel + isolated conversation state
 ```
 
 Two seams keep the design open: the loop talks only to an `LLMClient`-shaped
