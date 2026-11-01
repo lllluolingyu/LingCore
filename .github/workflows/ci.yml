@@ -125,9 +125,12 @@ jobs:
         with:
           enable-cache: true
       - run: uv python install 3.13
-      - run: uv sync --locked --python 3.13
+      # LingChat's lock records editable LingCore metadata from another commit.
+      # Reconcile it with this checkout, preferring existing dependency versions.
+      - name: Resolve LingChat dependencies against this LingCore checkout
+        run: uv sync --python 3.13
         working-directory: LingChat
-      - run: uv run --python 3.13 pytest -q
+      - run: uv run --locked --python 3.13 pytest -q
         working-directory: LingChat
 
   package:
