@@ -39,6 +39,20 @@ class SessionEvents(SessionDatabase):
         lease: SessionLease | None = None,
     ) -> SessionEvent:
         """Append one replayable runtime event and return its monotonic cursor."""
+        with self._write(session_id, lease):
+            return self._append_event_locked(
+                session_id, message_seq=message_seq, kind=kind, payload=payload
+            )
+
+    def _append_event_locked(
+        self,
+        session_id: str,
+        *,
+        message_seq: int,
+        kind: str,
+        payload: dict[str, Any],
+    ) -> SessionEvent:
+        """Append one replayable runtime event and return its monotonic cursor."""
         if not is_session_id(session_id):
             raise SessionError(f"invalid session id: {session_id!r}")
         if kind not in _SESSION_EVENT_KINDS:
@@ -66,28 +80,27 @@ class SessionEvents(SessionDatabase):
             raise SessionError("session event payload must be an object")
 
         now = self._now()
-        with self._write(session_id, lease):
-            anchor = self._conn.execute(
-                "SELECT 1 FROM messages WHERE session_id = ? AND seq = ?",
-                (session_id, message_seq),
-            ).fetchone()
-            if anchor is None:
-                raise SessionError(
-                    f"cannot anchor session event to missing message {message_seq}"
-                )
-            cur = self._conn.execute(
-                "INSERT INTO session_events "
-                "(session_id, message_seq, kind, created_at, payload) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (session_id, message_seq, kind, now, payload_json),
+        anchor = self._conn.execute(
+            "SELECT 1 FROM messages WHERE session_id = ? AND seq = ?",
+            (session_id, message_seq),
+        ).fetchone()
+        if anchor is None:
+            raise SessionError(
+                f"cannot anchor session event to missing message {message_seq}"
             )
-            if cur.lastrowid is None:
-                raise SessionError("session event insert did not return a cursor")
-            event_seq = int(cur.lastrowid)
-            if kind == "compaction":
-                self._prune_old_compaction_snapshots_locked(
-                    session_id, current_event_seq=event_seq
-                )
+        cur = self._conn.execute(
+            "INSERT INTO session_events "
+            "(session_id, message_seq, kind, created_at, payload) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (session_id, message_seq, kind, now, payload_json),
+        )
+        if cur.lastrowid is None:
+            raise SessionError("session event insert did not return a cursor")
+        event_seq = int(cur.lastrowid)
+        if kind == "compaction":
+            self._prune_old_compaction_snapshots_locked(
+                session_id, current_event_seq=event_seq
+            )
         return SessionEvent(
             event_seq=event_seq,
             message_seq=message_seq,
@@ -165,59 +178,67 @@ class SessionEvents(SessionDatabase):
         lease: SessionLease | None = None,
     ) -> SessionEvent:
         """Persist a compacted working set at the current transcript watermark."""
-        message_seq = self.next_sequence(session_id) - 1
-        if message_seq < 0:
-            raise SessionError("cannot save a compaction before the first message")
-        tail = _compaction_tail(messages)
-        if tail is None:
-            raise SessionError(
-                "compaction snapshot must contain one synthetic summary followed "
-                "by a complete canonical message tail"
+        with self._write(session_id, lease):
+            message_seq = self._next_sequence_locked(session_id) - 1
+            if message_seq < 0:
+                raise SessionError("cannot save a compaction before the first message")
+            tail = _compaction_tail(messages)
+            if tail is None:
+                raise SessionError(
+                    "compaction snapshot must contain one synthetic summary followed "
+                    "by a complete canonical message tail"
+                )
+            canonical_suffix = self._canonical_message_suffix_locked(
+                session_id,
+                through_seq=message_seq,
+                count=len(tail),
             )
-        canonical_suffix = self._canonical_message_suffix(
-            session_id,
-            through_seq=message_seq,
-            count=len(tail),
-        )
-        if canonical_suffix != tail:
-            raise SessionError(
-                "compaction snapshot tail does not match the canonical transcript"
+            if canonical_suffix != tail:
+                raise SessionError(
+                    "compaction snapshot tail does not match the canonical transcript"
+                )
+            if turn_index is None:
+                # Public/manual callers do not have Agent._turn_index. Derive it from
+                # the same validated history resume uses, never from raw dangling
+                # assistant rows left by a crashed turn.
+                records = self._message_records_locked(
+                    session_id, through_seq=message_seq
+                )
+                turn_index = sum(
+                    record.message.role == "assistant"
+                    for record in _trim_dangling_records(records)
+                )
+            if (
+                isinstance(turn_index, bool)
+                or not isinstance(turn_index, int)
+                or turn_index < 0
+            ):
+                raise SessionError("compaction turn index must be non-negative")
+            for label, value, minimum in (
+                ("summarized message count", summarized_messages, 1),
+                ("before token count", before_tokens, 0),
+                ("after token count", after_tokens, 0),
+            ):
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < minimum
+                ):
+                    raise SessionError(f"compaction {label} must be at least {minimum}")
+            return self._append_event_locked(
+                session_id,
+                message_seq=message_seq,
+                kind="compaction",
+                payload={
+                    "messages": [
+                        message.model_dump(mode="json") for message in messages
+                    ],
+                    "turn_index": turn_index,
+                    "summarized_messages": summarized_messages,
+                    "before_tokens": before_tokens,
+                    "after_tokens": after_tokens,
+                },
             )
-        if turn_index is None:
-            # Public/manual callers do not have Agent._turn_index. Derive it from
-            # the same validated history resume uses, never from raw dangling
-            # assistant rows left by a crashed turn.
-            records = self.message_records(session_id, through_seq=message_seq)
-            turn_index = sum(
-                record.message.role == "assistant"
-                for record in _trim_dangling_records(records)
-            )
-        if (
-            isinstance(turn_index, bool)
-            or not isinstance(turn_index, int)
-            or turn_index < 0
-        ):
-            raise SessionError("compaction turn index must be non-negative")
-        for label, value, minimum in (
-            ("summarized message count", summarized_messages, 1),
-            ("before token count", before_tokens, 0),
-            ("after token count", after_tokens, 0),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-                raise SessionError(f"compaction {label} must be at least {minimum}")
-        return self.append_event(
-            session_id,
-            message_seq=message_seq,
-            kind="compaction",
-            lease=lease,
-            payload={
-                "messages": [message.model_dump(mode="json") for message in messages],
-                "turn_index": turn_index,
-                "summarized_messages": summarized_messages,
-                "before_tokens": before_tokens,
-                "after_tokens": after_tokens,
-            },
-        )
 
     def save_skill_state(
         self,
@@ -230,48 +251,50 @@ class SessionEvents(SessionDatabase):
         lease: SessionLease | None = None,
     ) -> SessionEvent:
         """Persist the complete dynamic-skill state plus its visible transition."""
-        message_seq = self.next_sequence(session_id) - 1
-        if message_seq < 0:
-            raise SessionError("cannot save skill state before the first message")
-        for label, names in (
-            ("active", active),
-            ("activated", activated),
-            ("deactivated", deactivated),
-        ):
-            if not isinstance(names, list) or not all(
-                isinstance(name, str) and name for name in names
+        with self._write(session_id, lease):
+            message_seq = self._next_sequence_locked(session_id) - 1
+            if message_seq < 0:
+                raise SessionError("cannot save skill state before the first message")
+            for label, names in (
+                ("active", active),
+                ("activated", activated),
+                ("deactivated", deactivated),
             ):
-                raise SessionError(
-                    f"{label} skill names must be a list of non-empty strings"
-                )
-        active_names = list(dict.fromkeys(active))
-        if approved_high_risk is not None and not isinstance(approved_high_risk, dict):
-            raise SessionError("approved high-risk skill grants must be an object")
-        normalized_approvals: dict[str, list[str]] = {}
-        for name, tools in (approved_high_risk or {}).items():
-            if (
-                not isinstance(name, str)
-                or not name
-                or not isinstance(tools, list)
-                or not all(isinstance(tool, str) and tool for tool in tools)
+                if not isinstance(names, list) or not all(
+                    isinstance(name, str) and name for name in names
+                ):
+                    raise SessionError(
+                        f"{label} skill names must be a list of non-empty strings"
+                    )
+            active_names = list(dict.fromkeys(active))
+            if approved_high_risk is not None and not isinstance(
+                approved_high_risk, dict
             ):
-                raise SessionError(
-                    "approved high-risk skill grants must be string lists"
-                )
-            if name in active_names:
-                normalized_approvals[name] = sorted(set(tools))
-        return self.append_event(
-            session_id,
-            message_seq=message_seq,
-            kind="skill_state",
-            lease=lease,
-            payload={
-                "active": active_names,
-                "activated": list(dict.fromkeys(activated)),
-                "deactivated": list(dict.fromkeys(deactivated)),
-                "approved_high_risk": normalized_approvals,
-            },
-        )
+                raise SessionError("approved high-risk skill grants must be an object")
+            normalized_approvals: dict[str, list[str]] = {}
+            for name, tools in (approved_high_risk or {}).items():
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or not isinstance(tools, list)
+                    or not all(isinstance(tool, str) and tool for tool in tools)
+                ):
+                    raise SessionError(
+                        "approved high-risk skill grants must be string lists"
+                    )
+                if name in active_names:
+                    normalized_approvals[name] = sorted(set(tools))
+            return self._append_event_locked(
+                session_id,
+                message_seq=message_seq,
+                kind="skill_state",
+                payload={
+                    "active": active_names,
+                    "activated": list(dict.fromkeys(activated)),
+                    "deactivated": list(dict.fromkeys(deactivated)),
+                    "approved_high_risk": normalized_approvals,
+                },
+            )
 
     def save_todo_state(
         self,
@@ -286,16 +309,16 @@ class SessionEvents(SessionDatabase):
         content caps), so rewinding a branch restores the previous list simply
         by removing the later rows.
         """
-        message_seq = self.next_sequence(session_id) - 1
-        if message_seq < 0:
-            raise SessionError("cannot save todo state before the first message")
-        return self.append_event(
-            session_id,
-            message_seq=message_seq,
-            kind="todo_state",
-            lease=lease,
-            payload=todos_payload(todos),
-        )
+        with self._write(session_id, lease):
+            message_seq = self._next_sequence_locked(session_id) - 1
+            if message_seq < 0:
+                raise SessionError("cannot save todo state before the first message")
+            return self._append_event_locked(
+                session_id,
+                message_seq=message_seq,
+                kind="todo_state",
+                payload=todos_payload(todos),
+            )
 
     def save_turn_stats(
         self,

@@ -86,7 +86,9 @@ async def regrade_harbor(
         invoke, executable, ["describe", "--dataset", str(dataset)], env
     )
     by_id = {t["id"]: t for t in description["tasks"]}
-    current = {}
+    # Excluded attempts retain their original grades and verifier identity.
+    # Grade sets must describe every planned case, including ungradable ones.
+    current = {task.id: task for task in plan.source.tasks}
     for task in plan.source.tasks:
         if task.id not in cases:
             continue

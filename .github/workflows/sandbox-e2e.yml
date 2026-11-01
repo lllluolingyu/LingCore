@@ -6,6 +6,9 @@ on:
     branches: [main]
     paths:
       - "lingcore/sandbox.py"
+      - "lingcore/sandbox_config.py"
+      - "lingcore/_sandbox_bubblewrap.py"
+      - "lingcore/_sandbox_oci.py"
       - "lingcore/_sandbox_watchdog.py"
       - "lingcore/tools/builtin/shell.py"
       - "tests/test_shell_sandbox_e2e.py"

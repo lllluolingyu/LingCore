@@ -19,7 +19,7 @@ import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 import yaml
 from dotenv import dotenv_values
@@ -191,6 +191,14 @@ class LLMCfg(BaseModel):
     # Responses always retains native encrypted reasoning for replay,
     # independently of this Chat Completions/readable-thinking switch.
     preserve_reasoning: bool = False
+
+    @model_validator(mode="after")
+    def _validate_responses_sampling(self) -> Self:
+        if self.backend == "openai-responses":
+            from lingcore._responses_sampling import responses_sampling
+
+            responses_sampling(self.sampling.as_kwargs())
+        return self
 
     @field_validator("modalities")
     @classmethod

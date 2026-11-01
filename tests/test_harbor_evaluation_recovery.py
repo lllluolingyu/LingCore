@@ -169,6 +169,7 @@ async def test_regrade_repairs_verifier_failures(harbor_plan, monkeypatch, reaso
     (path.parent / "dataset/tiny/tests/test.sh").write_text("corrected verifier")
     report = await regrade(job, bridge=bridge)
     assert report["complete"] and report["harbor_accuracy"] == 1
+
     assert report["regrade_skipped"] == []
     grade = json.loads(
         next(job.glob("executions/*/grades/regrade-*.json")).read_bytes()
@@ -176,6 +177,69 @@ async def test_regrade_repairs_verifier_failures(harbor_plan, monkeypatch, reaso
     assert grade["grade"]["status"] == "valid" and grade["grade"]["passed"]
     assert grade["reward_valid"] and grade["rewards"] == {"reward": 1.0}
     assert all(p.read_bytes() == value for p, value in before.items())
+
+
+async def test_regrade_compares_mixed_gradable_and_environment_failed_cases(
+    harbor_plan, monkeypatch
+):
+    import shutil
+
+    from lingcore.evaluation.compare import compare_jobs
+    from lingcore.evaluation.regrade import regrade
+
+    suite_path, _ = harbor_plan
+    task = suite_path.parent / "dataset/tiny"
+    shutil.copytree(task, task.with_name("z-healthy"))
+    suite = yaml.safe_load(suite_path.read_text())
+    suite["source"]["selection"]["count"] = 2
+    suite["execution"]["infrastructure_retries"] = 0
+    suite_path.write_text(yaml.safe_dump(suite))
+    monkeypatch.setenv("FIXTURE_SCENARIO", "environment_once")
+    lock, path, bridge = await frozen(harbor_plan)
+    job, _ = await run_locked(
+        path, path.parent / "jobs", bridge=bridge, client_factory=client("fail")
+    )
+    report = await regrade(job, bridge=bridge)
+    header = json.loads(
+        (job / "grade-sets" / (report["grade_set"] + ".json")).read_bytes()
+    )
+    assert {c["id"] for c in header["cases"]} == {t.id for t in lock.source.tasks}
+    compared = compare_jobs(job, job, candidate_grades="latest")
+    assert not compared["complete"]
+    assert compared["coverage"]["valid_pairs"] == 1
+    assert compared["coverage"]["unpaired"] == 1
+
+
+@pytest.mark.parametrize("previous", [False, True])
+async def test_failed_harbor_regrade_keeps_latest_completed_report(
+    harbor_plan, monkeypatch, previous
+):
+    import importlib
+
+    from lingcore.evaluation.config import EvaluationConfigError
+    from lingcore.evaluation.regrade import read_report, regrade
+
+    module = importlib.import_module("lingcore.evaluation.harbor.regrade")
+    _, path, bridge = await frozen(harbor_plan)
+    job, original = await run_locked(
+        path, path.parent / "jobs", bridge=bridge, client_factory=client()
+    )
+    completed = await regrade(job, bridge=bridge) if previous else original
+
+    async def fail(*args, **kwargs):
+        raise EvaluationConfigError("bridge failed", "bridge_failed")
+
+    monkeypatch.setattr(module, "invoke_cancellable", fail)
+    with pytest.raises(EvaluationConfigError, match="bridge failed"):
+        await regrade(job, bridge=bridge)
+    assert read_report(job, "latest")["grade_set"] == completed["grade_set"]
+    failed = [
+        json.loads(p.read_bytes())
+        for p in job.glob("grade-sets/regrade-*.json")
+        if not json.loads(p.read_bytes())["complete"]
+    ]
+    assert len(failed) == 1
+    assert not read_report(job, failed[0]["id"])["complete"]
 
 
 @pytest.mark.parametrize("missing", ["regrade_error", "trial_record"])

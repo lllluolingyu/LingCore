@@ -45,7 +45,9 @@ async def finish_io(
 
 @contextmanager
 def directory(path: Path, *, create: bool = False) -> Iterator[ConfinedDirectory]:
-    path = path.absolute()
+    # Normalize locators without resolving symlinks: the descriptor walk below
+    # must still reject every symlink component of the resulting path.
+    path = Path(os.path.abspath(path))
     with confined_directory(
         Path(path.anchor),
         path.relative_to(path.anchor),

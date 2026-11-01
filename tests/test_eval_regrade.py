@@ -128,7 +128,31 @@ async def test_interrupted_regrade_preserves_partial_grade_set(tmp_path, monkeyp
         await task
     header = json.loads(next((job / "grade-sets").glob("regrade-*.json")).read_text())
     assert header["complete"] is False
-    assert read_report(job, "latest")["interrupted"] is True
+    assert read_report(job, header["id"])["interrupted"] is True
+    assert read_report(job, "latest")["grade_set"] == "original"
+
+
+@pytest.mark.parametrize("previous", [False, True])
+async def test_failed_regrade_does_not_shadow_last_completed_report(
+    tmp_path, monkeypatch, previous
+):
+    import importlib
+
+    module = importlib.import_module("lingcore.evaluation.regrade")
+    _, path, _ = await locked_example(tmp_path, monkeypatch)
+    job, original = await run_locked(
+        path, tmp_path / "out", client_factory=greeting_client
+    )
+    completed = await regrade(job) if previous else original
+
+    async def fail(*args):
+        raise EvaluationConfigError("verifier unavailable", "grade_failed")
+
+    monkeypatch.setattr(module, "grade", fail)
+    failed = await regrade(job)
+    assert not failed["complete"]
+    assert read_report(job, "latest")["grade_set"] == completed["grade_set"]
+    assert read_report(job, failed["grade_set"]) == failed
 
 
 async def test_regrade_normalizes_artifact_paths_and_preserves_incomplete_trace(

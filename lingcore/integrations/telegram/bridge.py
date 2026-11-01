@@ -504,6 +504,11 @@ class TelegramBridge:
                     chat_id, "Cannot switch sessions while a turn is running."
                 )
                 return
+            if getattr(runtime.agent.memory, "session_id", None) == session_id:
+                await sender.send_message(
+                    chat_id, f"Resumed session {session_id[:8]} (already active)."
+                )
+                return
             try:
                 scoped, replacement = self._build_agent(
                     runtime.user_id,

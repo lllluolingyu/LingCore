@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from copy import deepcopy
 from typing import Any
 
+from lingcore._responses_sampling import responses_sampling
 from lingcore.errors import LLMStreamError
 from lingcore.llm import (
     _PENDING_CLOSES,
@@ -25,57 +26,6 @@ from lingcore.llm import (
 )
 from lingcore.message import Message, ToolCall
 from lingcore.usage import usage_from_responses
-
-
-def _sampling(sampling: dict[str, Any]) -> dict[str, Any]:
-    """Translate common Chat knobs without silently overriding native knobs."""
-    result = deepcopy(sampling)
-    for alias in ("max_tokens", "max_completion_tokens"):
-        if alias in result:
-            value = result.pop(alias)
-            if "max_output_tokens" in result and result["max_output_tokens"] != value:
-                raise ValueError("conflicting output token limits in sampling")
-            result["max_output_tokens"] = value
-    if "reasoning_effort" in result:
-        effort = result.pop("reasoning_effort")
-        reasoning = result.setdefault("reasoning", {})
-        if not isinstance(reasoning, dict):
-            raise ValueError("sampling.reasoning must be a mapping")
-        if "effort" in reasoning and reasoning["effort"] != effort:
-            raise ValueError("conflicting reasoning effort settings in sampling")
-        reasoning["effort"] = effort
-    choice = result.get("tool_choice")
-    if (
-        isinstance(choice, dict)
-        and choice.get("type") == "function"
-        and "function" in choice
-    ):
-        result["tool_choice"] = {"type": "function", "name": choice["function"]["name"]}
-    # Stateful continuation would bypass local rollback/compaction. Body
-    # overrides must not smuggle it in after our normal request construction.
-    reserved = {
-        "input",
-        "messages",
-        "model",
-        "tools",
-        "stream",
-        "store",
-        "previous_response_id",
-        "conversation",
-        "background",
-    }
-    if reserved.intersection(result) or (reserved | {"include"}).intersection(
-        result.get("extra_body") or {}
-    ):
-        raise ValueError(
-            "sampling cannot override Responses conversation/transport fields"
-        )
-    include = result.setdefault("include", [])
-    if not isinstance(include, list):
-        raise ValueError("sampling.include must be a list")
-    if "reasoning.encrypted_content" not in include:
-        include.append("reasoning.encrypted_content")
-    return result
 
 
 def _failure(code: str | None) -> LLMStreamError:
@@ -101,7 +51,7 @@ class ResponsesLLMClient(LLMClient):
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None
     ) -> Any:
         kwargs: dict[str, Any] = {
-            **_sampling(self.sampling),
+            **responses_sampling(self.sampling),
             "model": self.model,
             "input": messages,
             "stream": True,
@@ -216,12 +166,15 @@ class ResponsesLLMClient(LLMClient):
             for part in item["content"]
         )
         emitted = "".join(text_parts)
-        if not text.startswith(emitted):
+        if text.startswith(emitted):
+            if text[len(emitted) :]:
+                yield LLMChunk(text_delta=text[len(emitted) :])
+        elif terminal != "response.incomplete":
             raise LLMStreamError(
                 "completed text disagrees with streamed text", retryable=True
             )
-        if text[len(emitted) :]:
-            yield LLMChunk(text_delta=text[len(emitted) :])
+        # An incomplete snapshot can omit unfinished text already delivered
+        # in deltas. Its declared limit/filter remains authoritative.
         if terminal == "response.incomplete":
             reason = getattr(
                 getattr(response, "incomplete_details", None), "reason", None

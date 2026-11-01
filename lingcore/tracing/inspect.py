@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,7 +22,7 @@ def inspect_trace(
     directory: Path, *, max_bytes: int = 128 * 1024 * 1024
 ) -> TraceInspection:
     warnings: list[str] = []
-    directory = directory.absolute()
+    directory = Path(os.path.abspath(directory))
     with confined_directory(
         Path(directory.anchor), directory.relative_to(directory.anchor)
     ) as root:

@@ -12,6 +12,24 @@ from lingcore.tracing.inspect import inspect_trace
 from lingcore.tracing.local import LocalTraceSink
 
 
+async def test_trace_parent_locators_keep_symlink_protection(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from lingcore.paths import PathEscapeError
+
+    child = tmp_path / "child"
+    child.mkdir()
+    monkeypatch.chdir(child)
+    recorder = TraceRecorder(LocalTraceSink(Path("../run")))
+    recorder.event("policy.decision")
+    await recorder.aclose()
+    assert inspect_trace(Path("../run")).complete
+    assert inspect_trace(child / ".." / "run").complete
+    (tmp_path / "link").symlink_to(tmp_path / "run", target_is_directory=True)
+    with pytest.raises(PathEscapeError):
+        inspect_trace(Path("../link"))
+
+
 async def test_span_closes_once_and_classifies_errors(tmp_path):
     sink = LocalTraceSink(tmp_path / "run")
     recorder = TraceRecorder(sink)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import queue
 import threading
 import time
@@ -32,7 +33,7 @@ class LocalTraceSink:
     ) -> None:
         if queue_capacity < 1 or max_bytes < 4096 or flush_interval_seconds <= 0:
             raise ValueError("invalid trace sink bounds")
-        self.directory = directory.absolute()
+        self.directory = Path(os.path.abspath(directory))
         self._queue: queue.Queue[_Item] = queue.Queue(queue_capacity)
         self._health = TraceHealth()
         self._lock = threading.Lock()

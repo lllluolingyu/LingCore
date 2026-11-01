@@ -451,75 +451,95 @@ async def _main_async(args: argparse.Namespace) -> int:
             agent_name=profile.name, store=store, model=profile.llm.model
         )
         session_id = resume_meta.id if resume_meta else None
+        agent: Agent | None = None
         first = True
-        while True:
-            # tool_options is a shared mutable dict: the frontend's "allow
-            # always" action writes into it and the agent's ToolContext reads
-            # from it on every tool call. Deep-copied per session so a session
-            # allowlist never leaks into the profile or the next session.
-            tool_options = copy.deepcopy(profile.tool_options)
-            frontend.attach(tool_options)
-            try:
-                agent = Agent.from_profile(
-                    profile,
-                    confirm=frontend.confirm,
-                    base_dir=Path.cwd(),
-                    tool_options=tool_options,
-                    session_store=store,
-                    session_id=session_id,
-                )
-            except LingCoreError as e:
-                print(f"failed to build agent: {e}", file=sys.stderr)
-                return 2
-            frontend.set_commands(agent.commands)
-            if store is not None:
-                frontend.set_session(getattr(agent.memory, "session_id", None))
-
-            if first:
-                frontend.show_banner(
-                    model=profile.llm.model,
-                    workspace=agent.tool_ctx.workspace,
-                    notice=notice,
-                )
-            if session_id is not None and store is not None:
-                meta = store.get(session_id)
-                if meta is not None:
-                    frontend.show_resume(meta, agent.memory.messages)
-            elif not first:
-                frontend.console.rule("[dim]new session[/]", style="dim")
-            first = False
-
-            try:
-                await run_session(agent, frontend)
-            except asyncio.CancelledError:
-                # asyncio.Runner implements Ctrl-C by cancelling the main task.
-                # Agent.run deliberately retains its checkpoint on cancellation;
-                # repair it before the store closes, then let Runner translate
-                # the cancellation to KeyboardInterrupt (exit status 130).
-                if agent.turn_pending_finalization:
+        try:
+            while True:
+                if (
+                    agent is None
+                    or session_id is None
+                    or session_id != getattr(agent.memory, "session_id", None)
+                ):
+                    # Build and acquire the target before retiring the current
+                    # agent. Failed switches preserve its lease and frontend state.
+                    tool_options = copy.deepcopy(profile.tool_options)
                     try:
-                        for plugin_notice in agent.drain_plugin_notices():
-                            frontend.render(plugin_notice)
-                        frontend.render(
-                            agent.finalize_cancelled_turn(reason="interrupted")
+                        replacement = Agent.from_profile(
+                            profile,
+                            confirm=frontend.confirm,
+                            base_dir=Path.cwd(),
+                            tool_options=tool_options,
+                            session_store=store,
+                            session_id=session_id,
                         )
-                    except Exception as exc:
+                    except LingCoreError as e:
+                        if agent is None:
+                            print(f"failed to build agent: {e}", file=sys.stderr)
+                            return 2
                         frontend.console.print(
-                            f"failed to clean up interrupted turn: {exc}",
-                            style="red",
+                            f"Could not switch sessions: {e}",
+                            style="yellow",
                             markup=False,
                         )
-                raise
-            except KeyboardInterrupt:
-                frontend.console.print("\n[dim]interrupted[/]")
-            finally:
-                await agent.aclose()
+                    else:
+                        previous, agent = agent, replacement
+                        if previous is not None:
+                            _print_saved_session(frontend, store, previous)
+                            await previous.aclose()
+                        frontend.attach(tool_options, agent.commands)
+                        if store is not None:
+                            frontend.set_session(
+                                getattr(agent.memory, "session_id", None)
+                            )
+                        if first:
+                            frontend.show_banner(
+                                model=profile.llm.model,
+                                workspace=agent.tool_ctx.workspace,
+                                notice=notice,
+                            )
+                        if session_id is not None and store is not None:
+                            meta = store.get(session_id)
+                            if meta is not None:
+                                frontend.show_resume(meta, agent.memory.messages)
+                        elif not first:
+                            frontend.console.rule("[dim]new session[/]", style="dim")
+                        first = False
+                else:
+                    frontend.console.print("Session is already active.", style="dim")
 
-            _print_saved_session(frontend, store, agent)
-            switch = frontend.take_session_switch()
-            if switch is None:
-                break
-            session_id = switch.session_id
+                assert agent is not None
+                try:
+                    await run_session(agent, frontend)
+                except asyncio.CancelledError:
+                    # asyncio.Runner implements Ctrl-C by cancelling the main task.
+                    # Agent.run deliberately retains its checkpoint on cancellation;
+                    # repair it before the store closes, then let Runner translate
+                    # the cancellation to KeyboardInterrupt (exit status 130).
+                    if agent.turn_pending_finalization:
+                        try:
+                            for plugin_notice in agent.drain_plugin_notices():
+                                frontend.render(plugin_notice)
+                            frontend.render(
+                                agent.finalize_cancelled_turn(reason="interrupted")
+                            )
+                        except Exception as exc:
+                            frontend.console.print(
+                                f"failed to clean up interrupted turn: {exc}",
+                                style="red",
+                                markup=False,
+                            )
+                    raise
+                except KeyboardInterrupt:
+                    frontend.console.print("\n[dim]interrupted[/]")
+
+                switch = frontend.take_session_switch()
+                if switch is None:
+                    _print_saved_session(frontend, store, agent)
+                    break
+                session_id = switch.session_id
+        finally:
+            if agent is not None:
+                await agent.aclose()
         return 0
     finally:
         if store is not None:

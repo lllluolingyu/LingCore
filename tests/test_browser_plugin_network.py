@@ -227,8 +227,11 @@ async def test_socks_proxy_tunnels_only_vetted_hosts():
 
 
 async def test_calls_queued_behind_close_get_a_fresh_owned_session(
-    tmp_path, fake_playwright
+    tmp_path, fake_playwright, monkeypatch
 ):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "playwright.async_api", None)
     profile = profile_for(tmp_path, fetch={"allow_private_hosts": True})
     assert profile.loop.parallel_tools
     batch = ScriptedTurn(

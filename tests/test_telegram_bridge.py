@@ -281,3 +281,26 @@ async def test_resume_selection_survives_silent_restart(tmp_path, monkeypatch):
     restored = await restarted.runtime_for(11, 11, sender)
     assert restored.agent.memory.session_id == first_id
     await restarted.shutdown()
+
+
+async def test_resume_active_session_keeps_agent_and_lease(tmp_path, monkeypatch):
+    _, _, bridge = _setup(tmp_path, monkeypatch)
+    sender = FakeSender()
+    try:
+        await bridge.handle_message(
+            TelegramMessage(1, 11, 11, "private", text="first"), sender
+        )
+        await _finish(bridge)
+        runtime = await bridge.runtime_for(11, 11, sender)
+        agent = runtime.agent
+        session_id = agent.memory.session_id
+        await bridge.handle_message(
+            TelegramMessage(2, 11, 11, "private", text=f"/resume {session_id[:8]}"),
+            sender,
+        )
+        assert runtime.agent is agent
+        assert "already active" in sender.sent[-1][1]
+        runtime.store.heartbeat_session(agent._session_lease)
+        assert not agent._closed
+    finally:
+        await bridge.shutdown()

@@ -66,6 +66,18 @@ def _profile_requirements(
     example_names: set[str] = set()
     config_errors: list[str] = []
 
+    from lingcore._responses_sampling import responses_sampling
+
+    for consumer, llm in (
+        ("llm", profile.llm),
+        ("media_fallback.image", profile.media_fallback.image),
+    ):
+        if llm is not None and llm.backend == "openai-responses":
+            try:
+                responses_sampling(llm.sampling.as_kwargs())
+            except ValueError as exc:
+                config_errors.append(f"{consumer}: {exc}")
+
     _add_requirement(requirements, profile.llm.api_key_env, "llm.api_key_env")
     vision = profile.media_fallback.image
     if vision is not None:

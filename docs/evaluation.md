@@ -175,6 +175,9 @@ evidence and records omitted content explicitly.
 Each job retains immutable `job.json`, `plan.json`, and, when locked, `lock.json`.
 The `executions/` ledger holds start records, results, traces, and evidence.
 Original grades remain in `report.json`; new grade sets have separate reports.
+`--grades latest` selects the newest completed grading pass, falling back to the
+original report if none completed. Failed or interrupted passes remain available
+by their grade-set ID.
 V1 reports remain readable, but V1 jobs cannot resume or regrade.
 
 ```sh

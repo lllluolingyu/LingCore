@@ -90,6 +90,13 @@ async def test_regrade_preserves_original_records_and_never_constructs_agent(
     )
     result = await regrade(job, bridge=bridge)
     assert result["mean_reward"] == 1
+    from lingcore.evaluation.compare import _load
+
+    loaded = _load(job, "latest")
+    assert loaded.report["cases"] == result["cases"]
+    assert all(
+        r.rewards == {"reward": 1.0} and r.reward_valid for r in loaded.results.values()
+    )
     assert all(p.read_bytes() == value for p, value in before.items())
 
 

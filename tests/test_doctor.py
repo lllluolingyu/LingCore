@@ -15,6 +15,20 @@ from lingcore.doctor import diagnose_profile, required_example_names
 REPO_ROOT = Path(__file__).parent.parent
 
 
+def test_doctor_rejects_mutated_responses_sampling():
+    from lingcore.config import SamplingCfg
+
+    profile = AgentProfile.model_validate(
+        {"llm": {"model": "alias", "backend": "openai-responses"}}
+    )
+    profile.llm.sampling = SamplingCfg(extra_body=42)
+    report = diagnose_profile(profile)
+    assert report.exit_code == 1
+    assert any(
+        "sampling.extra_body must be a mapping" in f.message for f in report.errors
+    )
+
+
 def _profile(tmp_path: Path, body: str) -> Path:
     root = tmp_path / "profile"
     root.mkdir()

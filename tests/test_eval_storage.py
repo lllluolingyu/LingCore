@@ -4,7 +4,7 @@ import stat
 import pytest
 
 from lingcore.evaluation.storage import read_bytes, read_json, write_json
-from lingcore.paths import ReadLimitError
+from lingcore.paths import PathEscapeError, ReadLimitError
 
 
 @pytest.mark.parametrize("replace", [False, True])
@@ -45,3 +45,14 @@ def test_bounded_read_identifies_size_limit(tmp_path, monkeypatch, grows_during_
         monkeypatch.setattr(os, "fdopen", grow_then_open)
     with pytest.raises(ReadLimitError, match="read limit"):
         read_bytes(path, max_bytes=8)
+
+
+def test_parent_locators_are_normalized_without_following_symlinks(tmp_path):
+    parent = tmp_path / "child"
+    parent.mkdir()
+    path = parent / ".." / "records" / "record.json"
+    write_json(path, {"ok": True})
+    assert read_json(path) == {"ok": True}
+    (tmp_path / "link").symlink_to(tmp_path / "records", target_is_directory=True)
+    with pytest.raises(PathEscapeError):
+        read_json(parent / ".." / "link" / "record.json")

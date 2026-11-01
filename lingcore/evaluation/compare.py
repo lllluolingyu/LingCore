@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import random
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -72,6 +73,7 @@ def _load(job: Path, grades: str) -> ComparisonJob:
     # Rebuild from the ledger, never turn a stale success summary into evidence.
     state = jobs.scan(job, plan)
     overrides: dict[str, Grade] | None = None
+    grade_details: dict[str, dict[str, Any]] = {}
     if grade_id != "original":
         overrides = {}
         for execution in state.executions:
@@ -94,6 +96,10 @@ def _load(job: Path, grades: str) -> ComparisonJob:
             overrides[execution.trial.execution_id] = Grade.model_validate(
                 value["grade"]
             )
+            if plan.source.kind == "harbor":
+                grade_details[execution.trial.execution_id] = {
+                    key: value[key] for key in ("rewards", "reward_valid")
+                }
     report = build_job_report(
         plan,
         state,
@@ -102,6 +108,7 @@ def _load(job: Path, grades: str) -> ComparisonJob:
         plan_digest=provenance["plan_digest"],
         grade_set=grade_id,
         grades=overrides,
+        grade_details=grade_details,
         interrupted=bool(report.get("interrupted")),
         diagnostics=[
             EvaluationDiagnostic.model_validate(d)
@@ -231,7 +238,10 @@ def compare_jobs(
         raise EvaluationConfigError(
             "bootstrap_samples must be between 100 and 10000", "comparison_samples"
         )
-    baseline, candidate = baseline.absolute(), candidate.absolute()
+    baseline, candidate = (
+        Path(os.path.abspath(baseline)),
+        Path(os.path.abspath(candidate)),
+    )
     with ExitStack() as stack:
         for path in sorted({baseline, candidate}):
             stack.enter_context(job_lock(path))

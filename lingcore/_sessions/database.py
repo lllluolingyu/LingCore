@@ -142,13 +142,16 @@ class SessionDatabase:
 
     def release_session(self, lease: SessionLease) -> None:
         with self._lock:
-            if self._closed:
-                return
-            with self._conn:
-                self._conn.execute("BEGIN IMMEDIATE")
-                self._leases.release_locked(lease)
-            if self._leases.owned.get(lease.session_id) == lease:
-                del self._leases.owned[lease.session_id]
+            try:
+                if not self._closed:
+                    with self._conn:
+                        self._conn.execute("BEGIN IMMEDIATE")
+                        self._leases.release_locked(lease)
+            finally:
+                # Even if SQLite cannot release it now, a closed owner must
+                # stop renewing so the durable lease can expire normally.
+                if self._leases.owned.get(lease.session_id) == lease:
+                    del self._leases.owned[lease.session_id]
 
     def append(
         self, session_id: str, message: Message, *, lease: SessionLease | None = None
@@ -246,6 +249,19 @@ class SessionDatabase:
         through_seq: int | None = None,
     ) -> builtins.list[StoredMessage]:
         """Stored messages in a stable inclusive/exclusive sequence window."""
+        with self._lock:
+            return self._message_records_locked(
+                session_id, after_seq=after_seq, through_seq=through_seq
+            )
+
+    def _message_records_locked(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = -1,
+        through_seq: int | None = None,
+    ) -> builtins.list[StoredMessage]:
+        """Stored messages in a stable inclusive/exclusive sequence window."""
         if after_seq < -1:
             raise SessionError("message replay cursor must be -1 or greater")
         if through_seq is not None and through_seq < 0:
@@ -256,8 +272,7 @@ class SessionDatabase:
             sql += " AND seq <= ?"
             params.append(through_seq)
         sql += " ORDER BY seq"
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
+        rows = self._conn.execute(sql, params).fetchall()
         out: list[StoredMessage] = []
         for seq, payload in rows:
             message = _stored_message(session_id, seq, payload)
@@ -265,6 +280,14 @@ class SessionDatabase:
         return out
 
     def _canonical_message_suffix(
+        self, session_id: str, *, through_seq: int, count: int
+    ) -> builtins.list[Message]:
+        with self._lock:
+            return self._canonical_message_suffix_locked(
+                session_id, through_seq=through_seq, count=count
+            )
+
+    def _canonical_message_suffix_locked(
         self, session_id: str, *, through_seq: int, count: int
     ) -> builtins.list[Message]:
         """Read only enough canonical rows to validate a working-set suffix.
@@ -281,13 +304,12 @@ class SessionDatabase:
         records: list[StoredMessage] = []
         batch_size = max(32, min(count * 2, 256))
         while True:
-            with self._lock:
-                rows = self._conn.execute(
-                    "SELECT seq, payload FROM messages "
-                    "WHERE session_id = ? AND seq <= ? "
-                    "ORDER BY seq DESC LIMIT ?",
-                    (session_id, upper_seq, batch_size),
-                ).fetchall()
+            rows = self._conn.execute(
+                "SELECT seq, payload FROM messages "
+                "WHERE session_id = ? AND seq <= ? "
+                "ORDER BY seq DESC LIMIT ?",
+                (session_id, upper_seq, batch_size),
+            ).fetchall()
             if not rows:
                 return []
             parsed_desc: list[StoredMessage] = []
@@ -315,10 +337,14 @@ class SessionDatabase:
     def next_sequence(self, session_id: str) -> int:
         """Sequence the next append will receive (0 for a fresh session)."""
         with self._lock:
-            row = self._conn.execute(
-                "SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()
+            return self._next_sequence_locked(session_id)
+
+    def _next_sequence_locked(self, session_id: str) -> int:
+        """Sequence the next append will receive (0 for a fresh session)."""
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
         return int(row[0])
 
     def truncate_after(

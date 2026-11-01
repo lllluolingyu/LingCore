@@ -217,6 +217,10 @@ async def run(
             # explicit finalize handshake instead of racing it.
             self._turn_cancel_requested = True
             self._active_turn_task = None
+            if self._turn_committed is None:
+                self.execution_outcome = ExecutionOutcome(
+                    status="cancelled", cause="agent"
+                )
         else:
             # Unsolicited ``aclose()`` cannot yield an Error event, but it
             # must repair the abandoned turn. Durable cleanup failures are

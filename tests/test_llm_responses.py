@@ -311,15 +311,20 @@ async def test_malformed_arguments_cannot_execute(make_client, tmp_path, argumen
 
 
 @pytest.mark.parametrize("cutoff", ["max_output_tokens", "content_filter"])
+@pytest.mark.parametrize(
+    "streamed,snapshot",
+    [("partial", "partial"), ("partial", "part"), ("partial", None), ("", "partial")],
+)
 async def test_incomplete_drops_all_tools_and_native_state(
-    make_client, tmp_path, cutoff
+    make_client, tmp_path, cutoff, streamed, snapshot
 ):
     client, requests, bodies = make_client(
         turns=[
             [
-                delta("partial"),
+                delta(streamed),
                 terminal(
-                    [reasoning(), message("partial"), call()],
+                    [reasoning(), call()]
+                    + ([message(snapshot)] if snapshot is not None else []),
                     status="incomplete",
                     reason=cutoff,
                 ),
@@ -337,6 +342,7 @@ async def test_incomplete_drops_all_tools_and_native_state(
     events = [e async for e in agent.run("go")]
     assert isinstance(events[-1], Error)
     assert not any(isinstance(e, ToolCallStarted) for e in events)
+    assert not any(isinstance(e, StreamRetry) for e in events)
     assert len(requests) == 1 and bodies[0].closed
     assert all(m.responses_content is None for m in agent.memory.messages)
     if cutoff == "max_output_tokens":
@@ -486,6 +492,12 @@ async def test_stop_removes_committed_native_tool_turn_from_memory_and_session(
         {"max_tokens": 1, "max_output_tokens": 2},
         {"previous_response_id": "r"},
         {"extra_body": {"store": True}},
+        {"extra_body": 42},
+        {"extra_body": []},
+        {"tool_choice": {"type": "function", "function": {}}},
+        {"tool_choice": {"type": "function", "function": "read_file"}},
+        {"tool_choice": {"type": "function"}},
+        {"tool_choice": []},
     ],
 )
 async def test_conflicting_or_stateful_settings_fail_before_http(make_client, sampling):
@@ -493,6 +505,30 @@ async def test_conflicting_or_stateful_settings_fail_before_http(make_client, sa
     with pytest.raises(LLMStreamError) as caught:
         [c async for c in client.stream([])]
     assert not requests and caught.value.category == "configuration"
+
+
+@pytest.mark.parametrize(
+    "sampling",
+    [
+        {"max_tokens": 1, "max_output_tokens": 2},
+        {"previous_response_id": "r"},
+        {"extra_body": 42},
+        {"tool_choice": {"type": "function", "function": {}}},
+    ],
+)
+def test_invalid_responses_settings_fail_during_profile_validation(sampling):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AgentProfile.model_validate(
+            {
+                "llm": {
+                    "model": "alias",
+                    "backend": "openai-responses",
+                    "sampling": sampling,
+                }
+            }
+        )
 
 
 def test_media_legacy_history_and_opaque_state():

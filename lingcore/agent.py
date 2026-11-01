@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import AsyncGenerator, AsyncIterator
-from contextlib import AbstractContextManager, aclosing
+from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from lingcore._agent import dispatch, iteration, lifecycle, run
@@ -463,21 +463,15 @@ class Agent:
         """Reconcile a durable tail whose earlier rollback failed."""
         return lifecycle._retry_pending_turn_cleanup(self)
 
-    async def run(
-        self, user_input: str | UserInput
-    ) -> AsyncGenerator[AgentEvent, None]:
+    def run(self, user_input: str | UserInput) -> AsyncGenerator[AgentEvent, None]:
         """Drive one user turn to completion, yielding events as they happen."""
-        async with aclosing(run.run(self, user_input)) as stream:
-            async for event in stream:
-                yield event
+        return run.run(self, user_input)
 
-    async def _run_turn(
+    def _run_turn(
         self, user_input: str | UserInput, lease: object
     ) -> AsyncGenerator[AgentEvent, None]:
         """Run the acquired turn; :meth:`run` owns failure containment."""
-        async with aclosing(iteration._run_turn(self, user_input, lease)) as stream:
-            async for event in stream:
-                yield event
+        return iteration._run_turn(self, user_input, lease)
 
     async def _turn_end(
         self, event: TurnEndEvent, lease: object, terminal: Final | Error

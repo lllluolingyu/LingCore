@@ -131,3 +131,44 @@ def test_resume_conflicts_with_no_session(tmp_path):
     d = _write_profile(tmp_path)
     with pytest.raises(SystemExit):
         main(["-p", str(d), "--resume", "aa", "--no-session"])
+
+
+@pytest.mark.parametrize("target", ["busy", "active"])
+def test_interactive_resume_keeps_current_session_on_conflict_or_noop(
+    tmp_path, monkeypatch, capsys, target
+):
+    import lingcore.__main__ as module
+
+    d = _write_profile(tmp_path)
+    seen = []
+
+    async def run(agent, frontend):
+        seen.append(agent)
+        if len(seen) == 1:
+            agent.tool_ctx.options["session_marker"] = "retained"
+            assert (
+                frontend._command("/resume " + ("ab" if target == "busy" else "aa"))
+                is None
+            )
+        elif len(seen) == 2:
+            assert agent is seen[0] and not agent._closed
+            assert agent.tool_ctx.options["session_marker"] == "retained"
+            agent._session_store.heartbeat_session(agent._session_lease)
+            assert frontend._command("/new") is None
+        else:
+            assert len(seen) == 3 and agent is not seen[0]
+            assert seen[0]._closed
+            assert "session_marker" not in agent.tool_ctx.options
+
+    monkeypatch.setattr(module, "run_session", run)
+    with SessionStore(d / "sessions.db") as store:
+        store.append(SID_A, Message.user("current"))
+        store.append(SID_B, Message.user("other"))
+        lease = store.acquire_session(SID_B)
+        assert main(["-p", str(d), "--resume", "aa"]) == 0
+        store.heartbeat_session(lease)
+    assert len(seen) == 3 and all(agent._closed for agent in seen)
+    out = capsys.readouterr().out
+    assert (
+        "Could not switch sessions" if target == "busy" else "already active"
+    ) in out

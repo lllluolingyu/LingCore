@@ -219,6 +219,7 @@ async def test_private_credential_in_model_command_is_not_forwarded(
 async def test_regrade_only_selected_gradable_attempts(
     harbor_plan, monkeypatch, scenario
 ):
+    from lingcore.evaluation.compare import compare_jobs
     from lingcore.evaluation.regrade import regrade
 
     suite_path, _ = harbor_plan
@@ -236,6 +237,11 @@ async def test_regrade_only_selected_gradable_attempts(
         for p in job.glob("executions/*/result.json")
     }
     report = await regrade(job, bridge=bridge)
+    comparison = compare_jobs(
+        job, job, baseline_grades="latest", candidate_grades="latest"
+    )
+    assert comparison["coverage"]["planned_pairs"] == 1
+    assert comparison["complete"] == report["complete"]
     assert report["complete"] == original["complete"]
     assert all(p.read_bytes() == value for p, value in before.items())
     grades = list(job.glob("executions/*/grades/regrade-*.json"))

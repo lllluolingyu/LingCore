@@ -231,6 +231,59 @@ def test_failed_hydration_releases_lease(tmp_path, monkeypatch):
         assert store.acquire_session(sid).epoch == 2
 
 
+@pytest.mark.parametrize("stale", [False, True])
+def test_failed_release_stops_renewal_without_forgetting_replacement(tmp_path, stale):
+    path, sid = tmp_path / "sessions.db", new_session_id()
+    with SessionStore(path) as store, sqlite3.connect(path) as blocker:
+        lease = store.acquire_session(sid)
+        if stale:
+            expire(path, sid)
+            replacement = store.acquire_session(sid)
+        store._conn.execute("PRAGMA busy_timeout=1")
+        blocker.execute("BEGIN IMMEDIATE")
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                store.release_session(lease)
+        finally:
+            blocker.rollback()
+        if stale:
+            assert store._leases.owned[sid] == replacement
+            store.heartbeat_session(replacement)
+        else:
+            assert sid not in store._leases.owned
+            expire(path, sid)
+            assert store.acquire_session(sid).epoch == lease.epoch + 1
+
+
+@pytest.mark.parametrize("event", ["compaction", "skill", "todo"])
+def test_state_save_checks_lease_before_reading_replaced_transcript(tmp_path, event):
+    path, sid = tmp_path / "sessions.db", new_session_id()
+    with SessionStore(path) as old, SessionStore(path) as replacement:
+        lease = old.acquire_session(sid)
+        old.append(sid, Message.user("old"), lease=lease)
+        expire(path, sid)
+        current = replacement.acquire_session(sid)
+        replacement.truncate_after(sid, -1, lease=current)
+        with pytest.raises(SessionError, match="lease was lost"):
+            if event == "compaction":
+                old.save_compaction(
+                    sid,
+                    messages=[Message(role="user", name="summary", content="summary")],
+                    summarized_messages=1,
+                    before_tokens=10,
+                    after_tokens=1,
+                    lease=lease,
+                )
+            elif event == "skill":
+                old.save_skill_state(
+                    sid, active=[], activated=[], deactivated=[], lease=lease
+                )
+            else:
+                old.save_todo_state(sid, [], lease=lease)
+        assert replacement.message_records(sid) == []
+        assert replacement.events(sid) == []
+
+
 async def test_stop_after_takeover_preserves_replacement_messages(tmp_path):
     entered = asyncio.Event()
 

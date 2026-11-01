@@ -182,9 +182,14 @@ class _FakeContext(_FakeHandle):
 @pytest.fixture
 def fake_playwright(monkeypatch):
     """Patch launches to install fake handles; returns the launched sessions."""
+    from lingcore.bundled_plugins.browser import session
+
     launched = []
     monkeypatch.setattr(
         browser, "_playwright_errors", lambda: (_FakeError, _FakeTimeout)
+    )
+    monkeypatch.setattr(
+        session, "_playwright_errors", lambda: (_FakeError, _FakeTimeout)
     )
 
     async def launch(self):

@@ -13,6 +13,7 @@ from lingcore.events import (
     TextDelta,
     TurnCancelled,
 )
+from lingcore.execution import ExecutionOutcome
 from lingcore.llm import LLMChunk
 from tests.fakes import FakeLLMClient, ScriptedTurn
 from tests.support.agent import _agent, _drain
@@ -73,6 +74,46 @@ async def test_aclose_rolls_back_partial_turn_and_releases_lease(workspace):
     recovered = await _drain(agent, "try again")
     assert isinstance(recovered[-1], Final)
     assert recovered[-1].content == "recovered"
+
+
+async def test_injected_cancellation_preserves_outcome_and_finalization(workspace):
+    agent = _agent(FakeLLMClient([ScriptedTurn(text="partial")]), workspace)
+    stream = agent.run("question")
+    assert isinstance(await anext(stream), TextDelta)
+    with pytest.raises(asyncio.CancelledError):
+        await stream.athrow(asyncio.CancelledError())
+    assert agent.execution_outcome == ExecutionOutcome(
+        status="cancelled", cause="agent"
+    )
+    assert agent.turn_pending_finalization
+    assert isinstance(agent.finalize_cancelled_turn(), TurnCancelled)
+    assert [(m.role, m.content) for m in agent.memory.messages] == [
+        ("user", "question")
+    ]
+    await agent.aclose()
+
+
+async def test_closing_cancelled_consumer_records_cancelled_outcome(workspace):
+    agent = _agent(FakeLLMClient([ScriptedTurn(text="partial")]), workspace)
+    stream = agent.run("question")
+    ready = asyncio.Event()
+
+    async def consume():
+        assert isinstance(await anext(stream), TextDelta)
+        ready.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(consume())
+    await ready.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await stream.aclose()
+    assert agent.execution_outcome == ExecutionOutcome(
+        status="cancelled", cause="agent"
+    )
+    assert isinstance(agent.finalize_cancelled_turn(), TurnCancelled)
+    await agent.aclose()
 
 
 async def test_stale_terminal_stream_cannot_roll_back_new_turn(workspace):

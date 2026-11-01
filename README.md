@@ -6,9 +6,10 @@ The same runtime becomes a different kind of agent — coding assistant,
 role-play character, teaching helper, psych consultant — purely by loading a
 different **profile**. Adding a new agent type is a config file, not new code.
 
-Built directly on the OpenAI SDK (chat-completions + tool calling), so it works
-against OpenAI, local servers like **Ollama** and **vLLM**, or any
-OpenAI-compatible endpoint by pointing at a different `base_url`.
+Supports OpenAI Chat Completions and Responses, plus Anthropic Messages,
+through their native SDKs. The Chat Completions backend also works with local
+servers like **Ollama** and **vLLM**, or other OpenAI-compatible endpoints,
+by pointing at a different `base_url`.
 
 > Status: MVP. The coding agent runs over the CLI or the sibling LingChat web
 > app. Role-play / teaching / psych profiles use the same runtime.
@@ -80,7 +81,13 @@ OpenAI-compatible endpoint by pointing at a different `base_url`.
   rewinding a branch removes its derived events as well. A
   validated transcript prefix can also be forked atomically into a new session,
   carrying compatible snapshots/skill state with fresh cursors while preserving
-  parent/root provenance.
+  parent/root provenance. Cross-process leases allow one attached agent per
+  session and prevent stale owners from writing after another agent takes over.
+- **Local tracing and evaluations** — opt-in JSONL traces record request usage
+  and tool/hook/approval timings. Evaluation suites run with fresh state,
+  execution budgets, locked plans, recovery, regrading, and offline comparison.
+  Native cases use deterministic graders; an isolated Harbor bridge supports
+  Docker terminal tasks. See [tracing and evaluation](docs/evaluation.md).
 - **Frontend-agnostic** — the loop emits events consumed by the CLI, official
   Telegram channel, and sibling LingChat web app; another
   frontend can render the same contract without touching core.
@@ -766,19 +773,26 @@ gate the builtin `run_shell`/`write_file`/`edit_file`/`patch_file` get by name.
 ## Architecture
 
 ```
-message.py   canonical Message/ToolCall/ToolResult; the only wire-format seam
-llm.py       async LLMClient over the OpenAI SDK (the loop never imports openai)
+message.py   canonical messages, tool calls/results, and attachment models
+llm.py       async Chat Completions client over the OpenAI SDK
+llm_responses.py  native Responses client + ordered reasoning/tool replay
+llm_anthropic.py  native Anthropic Messages client + caching/thinking
 events.py    AgentEvent union the loop emits
-agent.py     the async run loop + Agent.from_profile  ← the core
+agent.py / _agent/  public Agent API + profile assembly, run loop, and lifecycle
 composer.py  PromptComposer seam: per-turn system-prompt assembly
 config.py    AgentProfile + scoped profile .env + YAML ${ENV} expansion
 doctor.py    offline profile/env/.env.example diagnostics (never prints values)
-sandbox.py   typed host/Bubblewrap/OCI shell runners + process supervision
+sandbox.py   host/Bubblewrap/OCI shell runners + process supervision
+sandbox_config.py  validated shell and sandbox configuration
 outer_agents.py  shared runner/aliases/spec for the codex + claude-code skills
 paths.py     confined path validation + no-follow directory traversal/I/O
 knowledge.py provider-neutral embedding/reranking seams + SiliconFlow adapters
 memory.py    ShortTermMemory protocol + WindowMemory (prefix-stable eviction) + SummarizingMemory (compaction)
-sessions.py  SessionStore + SessionMemory — transcript, snapshots, replay, rewind, fork
+sessions.py / _sessions/  public session API + transcript, snapshots, replay, rewind, fork
+session_leases.py  cross-process ownership and stale-writer fencing
+execution.py execution budgets, typed outcomes, and scripted frontend
+tracing/     local trace journals, request instrumentation, and offline inspection
+evaluation/  native/Harbor evaluations, locks, recovery, regrading, and comparison
 skills.py    Skill / SkillState / load_skill_tools — skills, incl. code-shipping
 guardrails.py  Guardrail protocol + NoopGuardrail (pre/post hooks)
 profiles.py  immutable template manifest + writable user-state initialization
@@ -834,8 +848,9 @@ commitments.
      frontend.
    - Keep explicit tool-driven retrieval as the baseline, then add opt-in
      `auto_retrieve` prompt injection with a hard context budget.
-   - Ship retrieval evaluations for relevance, stale-index handling, citation
-     validity, and the offline grep fallback.
+   - Implemented: native regression cases check source citations and retrieval
+     after source updates using the offline grep backend.
+   - Add broader relevance and semantic/hybrid stale-index evaluations.
 
 3. **v0.4 — Plugins**
    - Implemented: versioned manifests, import-free discovery, explicit enablement,
@@ -874,7 +889,7 @@ commitments.
    - Later for daily: a documented Telegram setup and `knowledge` over saved
      notes.
 
-5. **In progress — Tracing and evaluations**
+5. **v0.6 — Tracing and evaluations**
    - Implemented: opt-in local JSONL traces, request usage,
      tool/hook/approval timings, bounded redacted content, and
      `lingcore trace show <run-directory>`. Tracing remains disabled by default.
@@ -887,27 +902,31 @@ commitments.
      infrastructure retries, and `eval regrade` over saved evidence. Reports
      include selected and all-attempt usage. See
      [tracing and evaluation](docs/evaluation.md).
-   - Harbor evaluations use an isolated Python 3.12 bridge, local Docker tasks,
-     measured source locks, terminal tools, rewards, resume, separate-verifier
-     regrade, and ATIF export. The synthetic workflow uses fake model clients;
-     public Terminal-Bench runs remain manual. See the
+   - Implemented: Harbor evaluations use an isolated Python ≥3.12 bridge,
+     local Docker tasks, measured source locks, terminal tools, rewards, resume,
+     separate-verifier regrade, and ATIF export. The synthetic workflow uses
+     fake model clients; public Terminal-Bench runs remain manual. See the
      [Harbor setup and suite configuration](docs/evaluation.md#harbor-and-terminal-bench).
    - Implemented: offline `eval compare`, paired per-case changes, case-level
      bootstrap intervals, and a five-case native regression suite covering
      citations, source freshness, calendar recurrence, and multi-turn file work.
-   - Next: optional exporters and additional benchmark capabilities.
+   - Implemented: the native Responses backend supports streamed text and tool
+     calls, image/PDF inputs, usage reporting, and encrypted reasoning replay
+     across tools and session resume.
+   - Implemented: session schema v3 adds cross-process leases that prevent
+     concurrent attachment and fence stale writes.
+   - Later: optional exporters, distributed evaluation, and additional
+     benchmark capabilities.
 
 6. **Later — Durable workflows**
    - Implemented in LingChat/AgentGUI: server-owned sessions keep turns and
      background processes alive across browser disconnects. Reconnect restores
      progress and pending approvals; backend shutdown interrupts all runtimes
      and reaps their processes before closing stores.
-   - Implemented: cross-process session leases fence stale writes and prevent
-     concurrent attachment. Next: durable job checkpoints so work can recover
-     across backend restarts, beyond the current process-lifetime ownership.
+   - Add durable checkpoints for interactive and background work so it can
+     recover across backend restarts, beyond current process-lifetime ownership.
    - Extend edit/fork flows with regenerate-without-edit and merge/export controls.
-   - Add schema-validated results and an optional Responses API backend behind
-     the existing LLM seam.
+   - Add schema-validated results behind the existing LLM seam.
 
 7. **Postponed — MCP as a plugin component**
    - Postponed in favor of trusted, in-process tools and the plugin API. To

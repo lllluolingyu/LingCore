@@ -216,7 +216,11 @@ def read_report(job: Path, grades: str = "original") -> dict[str, Any]:
                     and name != "original.json"
                     and name.endswith(".json")
                 ):
-                    headers.append(read_json(job / "grade-sets" / name))
+                    header = read_json(job / "grade-sets" / name)
+                    # Interrupted/failed passes remain explicitly addressable,
+                    # but must not displace the last completed grading pass.
+                    if header.get("complete") is True:
+                        headers.append(header)
         if not headers:
             return report(job / "report.json")
         grades = max(headers, key=lambda h: (h["created_at"], h["id"]))["id"]

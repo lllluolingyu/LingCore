@@ -5,6 +5,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-01
+
 ### Added
 
 - Native OpenAI Responses backend (`llm.backend: openai-responses`) with
@@ -22,17 +24,17 @@ Notable user-facing changes to LingCore are documented here. The project uses
 - An isolated Harbor 0.25.0 bridge for Docker terminal tasks, with supervised
   command execution, cleanup, reward reports, separate-verifier regrading, and
   ATIF trajectory export. Harbor remains outside the base installation.
-- Publisher-verified Terminal-Bench 4 task packages and a pinned ten-task CPU
-  development subset. Full benchmark eligibility requires the complete release
-  and its repetition/reward policy; the subset is not a leaderboard result.
+- Publisher verification for Terminal-Bench 4.0.0 task packages and
+  capability-based selection of CPU development subsets. Full benchmark
+  eligibility requires the complete release and its repetition/reward policy;
+  development subsets are not leaderboard results.
 - Nightly synthetic Harbor Docker integration checks at 03:17 UTC, also
   available through manual CI dispatch. These use fake model clients; the
   nightly schedule does not run the unrelated CI matrix or paid benchmarks.
 - A five-case native regression suite with three repetitions, covering files,
   source citations, retrieval after source updates, calendar DST recurrence,
-  and multi-turn invoice updates. A separate CPU-10 smoke preset bounds agent
-  wall time, requests, tool calls, and reported tokens without changing the
-  relaxed suite.
+  and multi-turn invoice updates. The suite and cases live in
+  [tests/fixtures/evaluation](tests/fixtures/evaluation).
 - Offline `eval compare` for compatible preserved jobs, including selected
   regrades, per-case regressions/improvements, paired latency and usage deltas,
   and deterministic case-level bootstrap intervals. Incomplete evidence
@@ -41,6 +43,21 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ### Fixed
 
+- Evaluation and trace paths accept `..` locators, including external Harbor
+  datasets and locks stored in a separate directory, while retaining symlink
+  protection.
+- Harbor regrades retain identities for ungradable cases and carry updated
+  reward details into comparisons. `--grades latest` selects the latest
+  completed grading pass; failed and interrupted passes remain available by ID.
+- Incomplete Responses output retains its declared error and partial text even
+  when the terminal snapshot omits streamed text. Malformed sampling settings
+  are rejected during profile validation and offline diagnostics.
+- Resuming the active Telegram session retains its agent. Failed interactive
+  CLI session switches preserve the current session and its state.
+- Failed SQLite lease release stops heartbeat renewal, and compaction, skill,
+  and todo snapshots validate ownership before reading their transcript anchor.
+- Generator cancellation preserves the cancelled execution outcome and the
+  frontend's explicit turn-finalization handshake.
 - Oversized Harbor artifacts are recorded as `oversized` in the evidence
   manifest without invalidating a verifier result. Confined reads distinguish
   byte-limit failures from unsafe-path errors, which still fail collection.
@@ -575,7 +592,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 - Initial tagged preview of the config-driven async agent runtime.
 
-[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/lllluolingyu/LingCore/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/lllluolingyu/LingCore/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/lllluolingyu/LingCore/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/lllluolingyu/LingCore/compare/v0.4.1...v0.4.2
