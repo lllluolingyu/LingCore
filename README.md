@@ -306,12 +306,40 @@ state are discarded) and a second Ctrl-C quits. In-session commands:
 | `/sessions` | list stored sessions for the profile |
 | `/resume <id>` | switch to a stored session by id prefix |
 | `/usage` | token usage for the current session |
+| `/init [focus]` | coding profile: inspect the environment and save an approved snapshot |
 | `/help` | list commands |
 | `/exit` | quit (also `/quit`, `/q`, Ctrl-D) |
 
 By default the agent works in a `workspace/` folder inside the profile
 directory (auto-created) — point it at a real project with
 `--workspace /path/to/project` or `LINGCORE_WORKSPACE`.
+
+In the coding profile, `/init` inspects the OS, CPU/memory/disk resources,
+available toolchains and installed packages through the configured shell.
+An optional focus, such as `/init Python and GPU`, guides the inspection.
+Normal shell confirmations apply. Saving with `world` separately requires
+approval of the exact snapshot, including its destination and the fact that it
+will become system-prompt context in later sessions. No confirmation handler,
+denial, or cancellation means no save. This gate also applies when `world` is
+already in a profile's default tools or is reached through a chat channel.
+
+Snapshots go to `<profile>/.lingcore/world.md`, which is ignored by Git for the
+bundled checkout profiles; the authored `world.md` stays untouched. The next
+model request sees the timestamped observations. Re-run `/init` after changing
+workspace or environment. Explicit execution state directories and chat users
+get their own runtime file. Configure `tool_options.world.path` to choose another
+runtime location (absolute paths require `allow_absolute_path: true`); it cannot
+target the source profile's authored `world.md` or escape explicit execution
+state. Custom profiles in a repository should ignore their runtime directory.
+Authored files retain their original loading behavior, including symlinks and
+large files; the 64 KiB, no-follow limit applies only to mutable runtime state.
+Saves hold a persistent advisory lock and reject an approval whose snapshot
+revision has changed, so concurrent sessions must re-read and re-approve.
+
+Earlier development versions wrote a managed section into the authored
+`world.md`. Inspect and remove any old host-specific section before committing
+that file; new saves neither rewrite nor automatically migrate it. For locked
+evaluations, see the [profile-change migration](docs/evaluation.md#run-lock-and-resume).
 
 Conversations are saved automatically — per profile — and can be picked up
 later:
@@ -396,6 +424,46 @@ launching process. Real `.env` files are gitignored; commit a secret-free
 `.env.example` when a profile or skill needs setup documentation. The example
 `coding`, `frontend`, `daily`, and `teaching` profiles include one. Run `lingcore doctor --profile <path>` after copying
 or editing one. To create a new agent type, add a directory—no code required.
+
+**Experimental output rewriting** is enabled in the `daily` profile and off
+elsewhere. A separate model polishes completed replies for more natural wording;
+this is a runtime stage configured in the profile. Its model, backend, base URL,
+and API key are independent of the main model:
+
+```yaml
+output_rewrite:
+  enabled: true
+  llm:
+    model: your-rewrite-model
+    backend: openai  # also openai-responses or anthropic
+    base_url: https://your-rewrite-provider.example/v1
+    api_key_env: REWRITE_API_KEY
+    max_retries: 1
+    stream_retries: 1
+  timeout_seconds: 30
+```
+
+Set the named key in the profile's `.env`. For `daily`, use
+`LINGCORE_REWRITE_MODEL`, `LINGCORE_REWRITE_BASE_URL`, and
+`LINGCORE_REWRITE_API_KEY_ENV` (plus `LINGCORE_REWRITE_BACKEND` when needed).
+Its defaults use a separate DeepSeek request with the existing `DEEPSEEK_API_KEY`.
+Set `LINGCORE_REWRITE_ENABLED=false` to disable it in `daily`, or
+`output_rewrite.enabled: false` in another profile.
+
+The wording model receives only the draft reply, with no tools, conversation
+history, or attachments. Replies are buffered while rewriting; the output
+guardrail then checks the result before it is displayed or saved in history.
+Tool calls and incomplete replies skip rewriting. Failed, empty, incomplete,
+or oversized rewrites fall back to the original reply. The pass has a total
+wall-time limit (`timeout_seconds`, default 30 seconds); drafts larger than
+`max_input_chars` skip it, and rewrites exceeding `max_output_chars` are rejected
+(both default to 32,000 characters). `prompt` can customize the editing style.
+This adds model latency and usage, included in the normal usage totals and
+recorded as `output_rewrite` requests in traces.
+`UsageReported.purpose` identifies these requests; the label is also persisted
+with token usage in `turn_stats` so the CLI, LingChat, and AgentGUI count the
+extra spend without using it for the main context gauge after replay. Older
+usage records without a label default to `main`.
 
 Model replies that reach an output or context limit end with an explicit
 incomplete-response error, preserving the output-guarded partial text and the
@@ -800,6 +868,8 @@ events.py    AgentEvent union the loop emits
 agent.py / _agent/  public Agent API + profile assembly, run loop, and lifecycle
 composer.py  PromptComposer seam: per-turn system-prompt assembly
 config.py    AgentProfile + scoped profile .env + YAML ${ENV} expansion
+world.py     approved private runtime snapshots, confined writes, locking, revision checks
+output_rewrite.py  experimental wording pass with an independently configured model
 doctor.py    offline profile/env/.env.example diagnostics (never prints values)
 sandbox.py   host/Bubblewrap/OCI shell runners + process supervision
 sandbox_config.py  validated shell and sandbox configuration

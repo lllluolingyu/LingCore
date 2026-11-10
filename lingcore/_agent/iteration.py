@@ -27,6 +27,7 @@ from lingcore.events import (
 from lingcore.execution import ExecutionOutcome
 from lingcore.ingest import ingest_attachments
 from lingcore.message import Message, ToolCall, UserInput
+from lingcore.output_rewrite import replace_reply_text
 from lingcore.plugins import (
     AttachmentView,
     TurnEndEvent,
@@ -208,7 +209,8 @@ async def _run_turn(
                             reasoning_parts.append(chunk.reasoning_delta)
                         if chunk.text_delta:
                             content_parts.append(chunk.text_delta)
-                            yield TextDelta(chunk.text_delta)
+                            if self.output_rewriter is None:
+                                yield TextDelta(chunk.text_delta)
                         if chunk.tool_calls:
                             tool_calls = chunk.tool_calls
                         if chunk.finish_reason:
@@ -261,7 +263,11 @@ async def _run_turn(
                     attempt=attempt,
                     max_attempts=self.stream_retries,
                     reason=str(e),
-                    discarded_chars=sum(len(p) for p in content_parts),
+                    discarded_chars=(
+                        sum(len(p) for p in content_parts)
+                        if self.output_rewriter is None
+                        else 0
+                    ),
                 )
                 previous_request = self.request_ledger.last_request_id
                 self.request_ledger.retry_request_id = previous_request
@@ -311,6 +317,7 @@ async def _run_turn(
                 detail=finish_detail,
                 dropped_tool_calls=max(dropped_tool_calls, len(tool_calls)),
             )
+        assistant_request_id = self.request_ledger.last_request_id
         assistant = Message.assistant(
             content=content,
             # No call in a cut-off batch may execute, even one whose JSON
@@ -322,12 +329,17 @@ async def _run_turn(
             finish_reason=finish_reason,
             finish_detail=finish_detail,
         )
+        if self.output_rewriter is not None and not incomplete and not tool_calls:
+            with self.recorder.span("output.rewrite"):
+                rewritten = await self.output_rewriter.rewrite(assistant.content)
+            final = await self.guardrail.post_output(rewritten)
+            replace_reply_text(assistant, final)
         self.memory.add(assistant)
         self._capture_committed(
             "message",
             {
                 "role": "assistant",
-                "request_id": self.request_ledger.last_request_id,
+                "request_id": assistant_request_id,
                 "finish_reason": finish_reason,
                 "content": assistant.content,
                 "tool_calls": [
@@ -355,7 +367,12 @@ async def _run_turn(
             return
 
         if not assistant.tool_calls:
-            final = await self.guardrail.post_output(assistant.content)
+            if self.output_rewriter is None:
+                final = await self.guardrail.post_output(assistant.content)
+            else:
+                final = assistant.content
+                if final:
+                    yield TextDelta(final)
             await self._turn_end(
                 TurnEndEvent(final, turn_index=self._turn_index),
                 lease,
@@ -367,6 +384,8 @@ async def _run_turn(
             yield Final(final)
             return
 
+        if self.output_rewriter is not None and assistant.content:
+            yield TextDelta(assistant.content)
         for call in assistant.tool_calls:
             yield ToolCallStarted(call)
 

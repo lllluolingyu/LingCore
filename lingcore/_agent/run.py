@@ -18,7 +18,6 @@ from lingcore.events import (
     Error,
     Final,
     TurnStatsReported,
-    UsageReported,
 )
 from lingcore.execution import ExecutionOutcome
 from lingcore.message import UserInput
@@ -157,8 +156,8 @@ async def run(
                 # Usage precedes the event that followed its request, so
                 # it always arrives before the turn's terminal event; the
                 # turn's totals come last, immediately before its outcome.
-                for usage in self.usage_meter.drain():
-                    yield UsageReported(usage)
+                for usage_event in self.drain_usage():
+                    yield usage_event
                 if stats is not None:
                     yield TurnStatsReported(stats)
                 yield event
@@ -187,8 +186,8 @@ async def run(
         except Exception:
             repaired = False
         stats = self._finish_turn_stats(lease, persist=repaired)
-        for usage in self.usage_meter.drain():
-            yield UsageReported(usage)
+        for usage_event in self.drain_usage():
+            yield usage_event
         if stats is not None:
             yield TurnStatsReported(stats)
         yield Error(str(exc))
@@ -245,8 +244,8 @@ async def run(
                 f"; rollback failed: {type(rollback_exc).__name__}: {rollback_exc}"
             )
         stats = self._finish_turn_stats(lease, persist=rolled_back)
-        for usage in self.usage_meter.drain():
-            yield UsageReported(usage)
+        for usage_event in self.drain_usage():
+            yield usage_event
         for notice in notices:
             yield notice
         if stats is not None:

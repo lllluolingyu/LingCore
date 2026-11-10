@@ -231,10 +231,11 @@ def render(self: CLIFrontend, event: AgentEvent) -> None:
             self._flush()
             self._render_todos(todos)
             self._show_working("thinking")
-        case UsageReported(usage):
+        case UsageReported(usage, purpose):
             self._turn_usage.add(usage)
             self._session_usage.add(usage)
-            self._context_tokens = usage.input_tokens + usage.output_tokens
+            if purpose != "output_rewrite":
+                self._context_tokens = usage.input_tokens + usage.output_tokens
         case TurnStatsReported(stats):
             self._turn_stats = stats
         case Final(_):

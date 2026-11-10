@@ -29,6 +29,23 @@ llm:
   sampling:
     temperature: 0.6
 
+# Experimental: polish completed replies with a separate model request.
+# These settings are independent of llm above; defaults use the same provider.
+# Disable with LINGCORE_REWRITE_ENABLED=false in this profile's .env.
+output_rewrite:
+  enabled: ${LINGCORE_REWRITE_ENABLED:-true}
+  llm:
+    backend: ${LINGCORE_REWRITE_BACKEND:-openai}
+    model: ${LINGCORE_REWRITE_MODEL:-deepseek-flash}
+    base_url: ${LINGCORE_REWRITE_BASE_URL:-https://api.deepseek.com}
+    api_key_env: ${LINGCORE_REWRITE_API_KEY_ENV:-DEEPSEEK_API_KEY}
+    modalities: []
+    max_retries: 1
+    stream_retries: 1
+    sampling:
+      temperature: 0.5
+  timeout_seconds: 30
+
 persona:
   # Inline fallback — world.md / role.md / workflow.md are loaded automatically
   # if present.

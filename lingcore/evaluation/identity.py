@@ -444,6 +444,7 @@ async def candidate_identity(
             measured,
             llm=_OfflineClient(),
             vision_llm=_OfflineClient(),
+            rewrite_llm=_OfflineClient(),
             state_dir=Path(temporary) / "state",
             recorder=NoopRecorder(),
             tool_registry=tool_registry,

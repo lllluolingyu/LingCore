@@ -261,3 +261,28 @@ def test_cli_footer_reports_the_turn_rate() -> None:
     cli.render(TurnStatsReported(TurnStats((usage,), at, at, 3000, 1000)))
     cli.render(Final("done"))
     assert "236 tok/s" in cli.console.export_text()
+
+
+def test_rewrite_purpose_survives_stats_replay_with_legacy_defaults():
+    from lingcore.events import UsageReported
+    from lingcore.usage import turn_stats_from_payload, turn_stats_payload
+
+    at = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    stats = TurnStats(
+        (
+            TokenUsage("main", 1000, 20),
+            TokenUsage("editor", 40, 10, purpose="output_rewrite"),
+        ),
+        at,
+        at,
+        100,
+        80,
+    )
+    payload = turn_stats_payload(stats)
+    assert "purpose" not in payload["usage"][0]
+    assert payload["usage"][1]["purpose"] == "output_rewrite"
+    restored = turn_stats_from_payload(payload)
+    assert restored == stats
+    assert UsageReported(restored.usage[1]).purpose == "output_rewrite"
+    payload["usage"][1].pop("purpose")
+    assert turn_stats_from_payload(payload).usage[1].purpose == "main"

@@ -76,6 +76,7 @@ packages = ["lingcore"]
 [tool.hatch.build.targets.wheel.force-include]
 "profiles/coding/.env.example" = "lingcore/profile_templates/coding/.env.example"
 "profiles/coding/config.yaml" = "lingcore/profile_templates/coding/config.yaml"
+"profiles/coding/commands/init.md" = "lingcore/profile_templates/coding/commands/init.md"
 "profiles/coding/role.md" = "lingcore/profile_templates/coding/role.md"
 "profiles/coding/workflow.md" = "lingcore/profile_templates/coding/workflow.md"
 "profiles/coding/world.md" = "lingcore/profile_templates/coding/world.md"

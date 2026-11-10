@@ -40,6 +40,7 @@ PROFILE_TEMPLATE_FILES: dict[str, tuple[str, ...]] = {
     "coding": (
         ".env.example",
         "config.yaml",
+        "commands/init.md",
         "role.md",
         "workflow.md",
         "world.md",

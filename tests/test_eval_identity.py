@@ -8,6 +8,7 @@ import yaml
 from lingcore.evaluation.config import EvaluationConfigError
 from lingcore.evaluation.identity import canonical_json
 from lingcore.evaluation.lock import load_lock, resolve, validate, write_lock
+from lingcore.world import WorldFile
 from tests.test_evaluation import copied_suite, example_env
 
 
@@ -26,6 +27,30 @@ async def test_resolutions_are_stable_and_offline(tmp_path, monkeypatch):
     assert first.candidate.tools.initial == ["list_dir", "read_file", "write_file"]
     assert first.candidate.model.id == "fake-model"
     assert len(first.trials) == 2
+
+
+async def test_world_tool_requires_new_lock_but_host_snapshots_do_not_drift(
+    tmp_path, monkeypatch
+):
+    example_env(monkeypatch)
+    suite = copied_suite(tmp_path)
+    path = tmp_path / "baseline.lock.json"
+    baseline = await resolve(suite, path)
+    profile_file = tmp_path / "agent.yaml"
+    profile = yaml.safe_load(profile_file.read_text())
+    profile["tools"].append("world")
+    profile_file.write_text(yaml.safe_dump(profile))
+    drift = await validate(baseline, path)
+    assert any(item.field.startswith("candidate.") for item in drift)
+    updated_path = tmp_path / "with-world.lock.json"
+    updated = await resolve(suite, updated_path)
+    write_lock(updated, updated_path)
+    assert await validate(updated, updated_path) == []
+    await WorldFile(tmp_path / ".lingcore").update("Private host environment", tmp_path)
+    after = await resolve(suite, updated_path)
+    assert after.plan_digest == updated.plan_digest
+    assert "Private host environment" not in canonical_json(after.model_dump()).decode()
+    assert await validate(updated, updated_path) == []
 
 
 @pytest.mark.parametrize(

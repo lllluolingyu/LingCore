@@ -12,6 +12,7 @@ from lingcore.errors import ConfigError
 
 _PER_USER_FILES = (
     ("memory", "memory.md", frozenset({"memory"})),
+    ("world", ".lingcore/world.md", frozenset({"world"})),
     (
         "calendar",
         "calendar.ics",

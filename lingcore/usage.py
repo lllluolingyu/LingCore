@@ -22,7 +22,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Literal, TypeGuard
 
@@ -65,6 +65,8 @@ class TokenUsage:
     output_tokens: int = 0
     cached_input_tokens: int = 0
     reasoning_tokens: int = 0
+    # Persisted with turn_stats so replay distinguishes secondary wording work.
+    purpose: str = "main"
 
 
 def _count(value: Any) -> int:
@@ -170,18 +172,23 @@ class UsageMeter:
     """
 
     def __init__(self) -> None:
-        self._pending: list[TokenUsage] = []
+        self._pending: list[tuple[TokenUsage, str]] = []
         self._tally: list[TokenUsage] | None = None
 
-    def record(self, usage: TokenUsage) -> None:
+    def record(self, usage: TokenUsage, *, purpose: str | None = None) -> None:
+        if purpose is not None and purpose != usage.purpose:
+            usage = replace(usage, purpose=purpose)
         observer = request_usage_observer.get()
         if observer is not None:
             observer(usage)
-        self._pending.append(usage)
+        self._pending.append((usage, usage.purpose))
         if self._tally is not None:
             self._tally.append(usage)
 
     def drain(self) -> list[TokenUsage]:
+        return [usage for usage, _ in self.drain_with_purpose()]
+
+    def drain_with_purpose(self) -> list[tuple[TokenUsage, str]]:
         pending, self._pending = self._pending, []
         return pending
 
@@ -222,6 +229,7 @@ def turn_stats_payload(stats: TurnStats) -> dict[str, Any]:
                 "output_tokens": u.output_tokens,
                 "cached_input_tokens": u.cached_input_tokens,
                 "reasoning_tokens": u.reasoning_tokens,
+                **({"purpose": u.purpose} if u.purpose != "main" else {}),
             }
             for u in stats.usage
         ],
@@ -247,6 +255,9 @@ def turn_stats_from_payload(payload: Any) -> TurnStats | None:
     for item in raw_usage:
         if not isinstance(item, dict) or not isinstance(item.get("model"), str):
             return None
+        purpose = item.get("purpose", "main")
+        if not isinstance(purpose, str) or not purpose:
+            return None
         usage.append(
             TokenUsage(
                 model=item["model"],
@@ -254,6 +265,7 @@ def turn_stats_from_payload(payload: Any) -> TurnStats | None:
                 output_tokens=_count(item.get("output_tokens")),
                 cached_input_tokens=_count(item.get("cached_input_tokens")),
                 reasoning_tokens=_count(item.get("reasoning_tokens")),
+                purpose=purpose,
             )
         )
     try:

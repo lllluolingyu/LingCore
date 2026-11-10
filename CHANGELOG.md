@@ -5,12 +5,32 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-10
+
 ### Added
 
 - Lark/Feishu conversational channel via `lingcore[lark]` (or `[feishu]`),
   with WebSocket reception, allowlisted DMs/groups, isolated persistent sessions,
   image/file attachments, expiring tool approvals, and offline `doctor` checks.
   Run `lingcore lark` or `lingcore feishu`; see [setup](docs/lark.md).
+- Coding `/init` command and `world` tool for inspecting the runtime and saving
+  an explicitly approved environment snapshot in private `.lingcore/world.md`
+  state, without modifying authored profile instructions. Saves use atomic
+  publication, a cross-process lock, and revision checks; chat state is per user.
+- Experimental output rewriting, enabled in the daily profile, with independent
+  model, endpoint, and credential configuration. Completed replies are buffered,
+  rewritten, guarded, and persisted; failed or incomplete rewrites retain the
+  original response, and Stop and execution budgets remain effective.
+
+### Fixed
+
+- Rewrite usage retains its purpose in live events and saved turn statistics,
+  allowing frontends to include its spend without replacing the main context
+  gauge. Legacy usage records default to `main`.
+- Runtime world state no longer imposes its size or symlink restrictions on
+  authored `world.md`, or suppresses an inline persona after restart.
+- Evaluation documentation explains lock migration after tool/profile changes;
+  private host snapshots remain outside isolated candidate identity.
 
 ## [0.6.0] - 2026-11-01
 
@@ -599,7 +619,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 - Initial tagged preview of the config-driven async agent runtime.
 
-[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/lllluolingyu/LingCore/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/lllluolingyu/LingCore/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/lllluolingyu/LingCore/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/lllluolingyu/LingCore/compare/v0.4.2...v0.5.0

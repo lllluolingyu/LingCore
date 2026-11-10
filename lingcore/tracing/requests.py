@@ -168,6 +168,9 @@ class InstrumentedClient:
                 values: dict[str, Any] = {}
                 if observed is not None:
                     values = asdict(observed)
+                    # Request purpose belongs to this instrumentation wrapper;
+                    # persisted TokenUsage also labels secondary requests.
+                    values.pop("purpose", None)
                 usage = RequestUsage(
                     **({"model": self.model} | values | billing),
                     request_id=request_id,

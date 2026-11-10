@@ -71,6 +71,10 @@ def _profile_requirements(
     for consumer, llm in (
         ("llm", profile.llm),
         ("media_fallback.image", profile.media_fallback.image),
+        (
+            "output_rewrite.llm",
+            profile.output_rewrite.llm if profile.output_rewrite.enabled else None,
+        ),
     ):
         if llm is not None and llm.backend == "openai-responses":
             try:
@@ -83,6 +87,12 @@ def _profile_requirements(
     if vision is not None:
         _add_requirement(
             requirements, vision.api_key_env, "media_fallback.image.api_key_env"
+        )
+    if profile.output_rewrite.enabled and profile.output_rewrite.llm is not None:
+        _add_requirement(
+            requirements,
+            profile.output_rewrite.llm.api_key_env,
+            "output_rewrite.llm.api_key_env",
         )
 
     _plugin_environment_requirements(
@@ -461,6 +471,10 @@ def diagnose_profile(
     findings: list[DoctorFinding] = [
         DoctorFinding("ok", f"profile {profile.name!r} loaded and validated")
     ]
+    if profile.output_rewrite.enabled:
+        findings.append(
+            DoctorFinding("info", "experimental output rewriting is enabled")
+        )
 
     if source_dir is None:
         findings.append(DoctorFinding("warning", "profile has no source directory"))

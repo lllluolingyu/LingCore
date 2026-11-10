@@ -118,6 +118,13 @@ class UsageReported:
     """
 
     usage: TokenUsage
+    # Secondary wording requests count toward spend, but do not describe the
+    # main conversation's context window. Default keeps existing producers.
+    purpose: str = "main"
+
+    def __post_init__(self) -> None:
+        if self.purpose == "main":
+            self.purpose = self.usage.purpose
 
 
 @dataclass(slots=True)

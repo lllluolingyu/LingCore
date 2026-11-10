@@ -139,6 +139,24 @@ key ordering do not change identity; prompt/tool source assets are hashed as
 bytes. Credential availability and Git status are informational. Model aliases
 may still change behind an endpoint; reports retain provider-reported model IDs.
 
+Adding `world` to the coding profile's tool ceiling, changing its tool schema or
+prompt files, or enabling output rewriting is an intentional candidate change.
+Locks resolved before those changes must report drift; do not hide the new tool
+from identity checks or edit an old lock's digests. Keep the old lock with its
+original profile/runtime for historical jobs, and resolve a new candidate lock:
+
+```sh
+lingcore eval resolve my-eval/suite.yaml --lock my-eval/with-world.lock.json
+lingcore eval validate --lock my-eval/with-world.lock.json
+```
+
+Use `--replace` only when intentionally replacing an unused development lock.
+Native evaluations start with isolated execution state: host snapshots in the
+source profile's `.lingcore/world.md` are not copied into the measured prompt or
+execution, and refreshing those snapshots does not change candidate identity.
+Authored `world.md` remains a hashed prompt asset. Snapshot saves still need a
+confirmation handler; headless execution does not implicitly approve them.
+
 Resume holds the job lock, preserves existing attempts, and replaces interrupted
 ones from fresh state. If the suite and lock moved together, pass
 `--lock /new/location/suite.lock.json` to resume with the identical saved lock.

@@ -45,6 +45,7 @@ tools:
   - search
   - git
   - run_shell
+  - world
   - fetch_url
   - todo_write
   - activate_skill

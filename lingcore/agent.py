@@ -60,6 +60,7 @@ if TYPE_CHECKING:
 
     from lingcore.config import AgentProfile
     from lingcore.modality import MediaAdapter
+    from lingcore.output_rewrite import OutputRewriter
     from lingcore.sessions import SessionStore
     from lingcore.skills import SkillState
     from lingcore.tools import ConfirmFn, EnvironmentBinding
@@ -139,6 +140,7 @@ class Agent:
         recorder: TraceRecorder | None = None,
         execution_budget: ExecutionBudget | None = None,
         request_ledger: RequestLedger | None = None,
+        output_rewriter: OutputRewriter | None = None,
     ) -> None:
         # v0.1 accepted a static prompt as the fourth positional argument or
         # as ``system_prompt=``. Keep both forms while routing new code through
@@ -212,6 +214,7 @@ class Agent:
         # Text-fallback adapter for attachment kinds the model lacks
         # (None — the all-native default — costs nothing).
         self.media_adapter = media_adapter
+        self.output_rewriter = output_rewriter
         # Provider usage reported by this agent's clients; drained into
         # ``UsageReported`` events by ``run``. An injected client may record
         # into ``agent.usage_meter`` itself.
@@ -334,6 +337,7 @@ class Agent:
         confirm: "ConfirmFn | None" = None,
         llm: _LLMLike | None = None,
         vision_llm: _LLMLike | None = None,
+        rewrite_llm: _LLMLike | None = None,
         base_dir: "Path | None" = None,
         tool_options: "dict | None" = None,
         session_store: "SessionStore | None" = None,
@@ -352,7 +356,8 @@ class Agent:
         recorded. Opening the store is the composition root's job — see
         ``lingcore.sessions.open_store``. ``vision_llm`` overrides the
         ``media_fallback.image`` client (tests inject a fake here, exactly
-        like ``llm``).
+        like ``llm``). ``rewrite_llm`` similarly overrides the experimental
+        ``output_rewrite.llm`` client when rewriting is enabled.
         """
         return profile_builder.from_profile(
             cls,
@@ -360,6 +365,7 @@ class Agent:
             confirm=confirm,
             llm=llm,
             vision_llm=vision_llm,
+            rewrite_llm=rewrite_llm,
             base_dir=base_dir,
             tool_options=tool_options,
             session_store=session_store,
@@ -393,7 +399,10 @@ class Agent:
         cancellation landed were billed even though their events never
         reached the stream.
         """
-        return [UsageReported(usage) for usage in self.usage_meter.drain()]
+        return [
+            UsageReported(usage, purpose)
+            for usage, purpose in self.usage_meter.drain_with_purpose()
+        ]
 
     def drain_plugin_notices(self) -> list[PluginNotice]:
         """Take pending transient notices before finalizing a cancelled turn.

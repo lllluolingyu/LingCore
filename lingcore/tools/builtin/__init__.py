@@ -11,6 +11,7 @@ from lingcore.tools.builtin import (  # noqa: F401  (registration side effect)
     skill,
     todo,
     web,
+    world,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "skill",
     "todo",
     "web",
+    "world",
 ]

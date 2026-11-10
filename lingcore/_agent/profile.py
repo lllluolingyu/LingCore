@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from lingcore.composer import PromptComposer, StaticComposer
@@ -14,6 +15,7 @@ from lingcore.todos import TodoState
 from lingcore.tools import ToolContext, ToolRegistry
 from lingcore.tracing import TraceRecorder
 from lingcore.tracing.requests import InstrumentedClient, RequestLedger
+from lingcore.usage import UsageSink
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -33,6 +35,7 @@ def from_profile(
     confirm: "ConfirmFn | None" = None,
     llm: _LLMLike | None = None,
     vision_llm: _LLMLike | None = None,
+    rewrite_llm: _LLMLike | None = None,
     base_dir: "Path | None" = None,
     tool_options: "dict | None" = None,
     session_store: "SessionStore | None" = None,
@@ -51,7 +54,8 @@ def from_profile(
     recorded. Opening the store is the composition root's job — see
     ``lingcore.sessions.open_store``. ``vision_llm`` overrides the
     ``media_fallback.image`` client (tests inject a fake here, exactly
-    like ``llm``).
+    like ``llm``). ``rewrite_llm`` similarly overrides the experimental
+    ``output_rewrite.llm`` client when rewriting is enabled.
     """
     from pathlib import Path
 
@@ -62,13 +66,14 @@ def from_profile(
     from lingcore.llm import LLMClient
     from lingcore.llm_anthropic import AnthropicLLMClient
     from lingcore.llm_responses import ResponsesLLMClient
+    from lingcore.output_rewrite import OutputRewriter
     from lingcore.tools import REGISTRY
 
     # One meter per agent: the main client doubles as the compaction and
     # memory summarizer, so every request it makes is accounted here.
     usage_meter = UsageMeter()
 
-    def make_client(cfg: LLMCfg) -> _LLMLike:
+    def make_client(cfg: LLMCfg, *, usage_sink: UsageSink | None = None) -> _LLMLike:
         kwargs: dict[str, Any] = {
             "model": cfg.model,
             "api_key": cfg.resolve_api_key(getattr(profile, "_profile_env", {})),
@@ -78,7 +83,7 @@ def from_profile(
             "timeout": cfg.timeout,
             "modalities": cfg.modalities,
             "stream_usage": cfg.stream_usage,
-            "usage_sink": usage_meter.record,
+            "usage_sink": usage_sink or usage_meter.record,
             "preserve_reasoning": cfg.preserve_reasoning,
         }
         if cfg.backend == "anthropic":
@@ -239,6 +244,27 @@ def from_profile(
                 "vision",
             )
 
+        output_rewriter = None
+        rewrite_cfg = profile.output_rewrite
+        if rewrite_cfg.enabled:
+            assert rewrite_cfg.llm is not None
+            rewrite_sink = partial(usage_meter.record, purpose="output_rewrite")
+            rewrite_client = (
+                rewrite_llm
+                if rewrite_llm is not None
+                else make_client(rewrite_cfg.llm, usage_sink=rewrite_sink)
+            )
+            if (
+                rewrite_llm is not None
+                and hasattr(rewrite_llm, "usage_sink")
+                and getattr(rewrite_llm, "usage_sink") is None
+            ):
+                setattr(rewrite_llm, "usage_sink", rewrite_sink)
+            output_rewriter = OutputRewriter(
+                instrument(rewrite_client, rewrite_cfg.llm, "output_rewrite"),
+                rewrite_cfg,
+            )
+
         # One effective tool_options dict drives BOTH the ToolContext the tools
         # see and the auto-compaction injection below — reading the override for
         # one and the profile for the other would let a caller's override be
@@ -253,6 +279,7 @@ def from_profile(
             for key, default in (
                 ("memory", "memory.md"),
                 ("calendar", "calendar.ics"),
+                ("world", ".lingcore/world.md"),
             ):
                 options = effective_tool_options.get(key, {})
                 raw = Path(options.get("path", default))
@@ -422,8 +449,31 @@ def from_profile(
         layers: list[str] = []
         includes: list[str] = []
         memory_path: Path | None = None
+        from lingcore.world import WORLD_STATE_KEY, WorldFile, build_world_file
+
+        world_file: WorldFile | None = None
+        authored_world = ""
+        if "world" in profile.tools and effective_state is not None:
+            source_world = source_dir / "world.md" if source_dir is not None else None
+            if source_world is not None and source_world.is_file():
+                authored_world = source_world.read_text("utf-8")
+            world_file = build_world_file(
+                effective_state,
+                effective_tool_options.get("world", {}),
+                fallback=authored_world,
+            )
+            if (
+                source_world is not None
+                and world_file.path.absolute() == source_world.absolute()
+            ):
+                raise ConfigError(
+                    "world runtime path must differ from authored world.md"
+                )
+            tool_ctx.options[WORLD_STATE_KEY] = world_file
         if source_dir is not None:
-            layer_names = ["world.md", "role.md", "workflow.md"]
+            layer_names = ["role.md", "workflow.md"]
+            if world_file is None:
+                layer_names.insert(0, "world.md")
             layers = [
                 (source_dir / name).read_text("utf-8")
                 for name in layer_names
@@ -469,6 +519,7 @@ def from_profile(
                 or loaded_plugins.prompt_layers
             )
             or memory_path is not None
+            or world_file is not None
             or skill_state is not None
             or bool(profile.persona.project_instructions)
         )
@@ -478,7 +529,11 @@ def from_profile(
             # a profile relying on the inline prompt doesn't silently lose it just
             # because memory or skills forced the layered path.
             base_layers = layers
-            if not layers and profile.persona.system_prompt.strip():
+            if (
+                not layers
+                and not authored_world.strip()
+                and profile.persona.system_prompt.strip()
+            ):
                 base_layers = [profile.persona.system_prompt]
             composer = LayeredComposer(
                 layers=base_layers
@@ -489,6 +544,7 @@ def from_profile(
                 skill_instructions=skill_state.instruction_map() if skill_state else {},
                 workspace=workspace,
                 project_instructions=tuple(profile.persona.project_instructions),
+                world=world_file,
             )
         else:
             composer = StaticComposer(profile.persona.system_prompt)
@@ -515,6 +571,7 @@ def from_profile(
             recorder=recorder,
             request_ledger=ledger,
             execution_budget=execution_budget,
+            output_rewriter=output_rewriter,
         )
         agent._turn_index = restored_turn_index
         agent._owned_session_store = session_store if owns_store else None

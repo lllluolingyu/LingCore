@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from lingcore.paths import PathEscapeError, confined_directory
+from lingcore.world import WorldFile
 
 # A project-instruction file larger than this is not read at all; one within it
 # is inlined up to PROJECT_INSTRUCTIONS_MAX_CHARS. Both bound the system prompt
@@ -123,9 +124,21 @@ class LayeredComposer:
     # re-read on every compose() so edits apply to the next request.
     workspace: Path | None = None
     project_instructions: tuple[str, ...] = ()
+    # Opt-in profile environment state, refreshed after the world tool writes.
+    world: WorldFile | None = None
 
     async def compose(self, ctx: ComposeContext) -> str:
         parts: list[str] = list(self.layers)
+
+        if self.world is not None:
+            from lingcore.errors import ToolError
+
+            try:
+                world = self.world.read()
+            except ToolError:
+                world = self.world.fallback
+            if world:
+                parts.insert(0, world)
 
         if self.workspace is not None and self.project_instructions:
             project = read_project_instructions(

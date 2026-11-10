@@ -19,9 +19,11 @@ def test_initialize_profile_copies_only_declared_template_files(tmp_path):
     initialized = initialize_profile("coding", destination=destination)
 
     assert initialized == destination
-    assert {path.name for path in destination.iterdir()} == set(
-        PROFILE_TEMPLATE_FILES["coding"]
-    )
+    assert {
+        path.relative_to(destination).as_posix()
+        for path in destination.rglob("*")
+        if path.is_file()
+    } == set(PROFILE_TEMPLATE_FILES["coding"])
     assert not (destination / "sessions.db").exists()
     assert not (destination / "workspace").exists()
     assert AgentProfile.load(destination).name == "coding"
@@ -58,7 +60,9 @@ async def test_daily_ships_its_slash_commands(tmp_path, monkeypatch):
         "today.md",
     ]
     profile = AgentProfile.load(destination)
-    async with Agent.from_profile(profile, llm=FakeLLMClient([])) as agent:
+    async with Agent.from_profile(
+        profile, llm=FakeLLMClient([]), rewrite_llm=FakeLLMClient([])
+    ) as agent:
         names = {command.qualified_name for command in agent.commands.commands}
         assert names == {
             "/brief",
@@ -115,7 +119,11 @@ async def test_today_reads_the_requested_day_and_memory_through_the_agent(
             ScriptedTurn(text="Here is today's agenda."),
         ]
     )
-    async with Agent.from_profile(profile, llm=llm) as agent:
+    async with Agent.from_profile(
+        profile,
+        llm=llm,
+        rewrite_llm=FakeLLMClient([ScriptedTurn(text="Here is today's agenda.")]),
+    ) as agent:
         add = agent.tools.get("calendar_add")
         await add.run(
             add.validate_args(
