@@ -424,6 +424,7 @@ def test_query_and_result_limits(args):
 
 async def test_daily_has_search_immediately_without_code_review(tmp_path, monkeypatch):
     monkeypatch.delenv("LINGCORE_SEARCH_PROVIDER", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     destination = initialize_profile("daily", destination=tmp_path / "daily")
     profile = AgentProfile.load(destination)
     assert profile.plugins == ["search", "clock"]
@@ -438,7 +439,9 @@ async def test_daily_has_search_immediately_without_code_review(tmp_path, monkey
         "calendar_remove",
     } <= profile.initial_tool_set()
     async with Agent.from_profile(
-        profile, llm=FakeLLMClient([ScriptedTurn(text="hello")])
+        profile,
+        llm=FakeLLMClient([ScriptedTurn(text="hello")]),
+        rewrite_llm=FakeLLMClient([]),
     ) as agent:
         names = {
             schema["function"]["name"] for schema in agent._effective_tool_schemas()

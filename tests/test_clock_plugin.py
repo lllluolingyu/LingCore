@@ -109,12 +109,17 @@ async def test_daily_sends_the_clock_with_the_message_not_the_system_prompt(
 ):
     monkeypatch.setenv("LINGCORE_TIMEZONE", "Asia/Tokyo")
     monkeypatch.delenv("LINGCORE_SEARCH_PROVIDER", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     profile = AgentProfile.load(
         initialize_profile("daily", destination=tmp_path / "daily")
     )
     assert profile.plugins == ["search", "clock"]
     fake = FakeLLMClient([ScriptedTurn(text="one"), ScriptedTurn(text="two")])
-    async with Agent.from_profile(profile, llm=fake) as agent:
+    async with Agent.from_profile(
+        profile,
+        llm=fake,
+        rewrite_llm=FakeLLMClient([ScriptedTurn(text="one"), ScriptedTurn(text="two")]),
+    ) as agent:
         for text in ("hello", "again"):
             events = [event async for event in agent.run(text)]
             assert isinstance(events[-1], Final)
