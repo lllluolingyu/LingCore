@@ -5,6 +5,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-15
+
 ### Fixed
 
 - Restore the high-risk confirmation floor, use current frontend confirmation
@@ -650,7 +652,8 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 - Initial tagged preview of the config-driven async agent runtime.
 
-[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/lllluolingyu/LingCore/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/lllluolingyu/LingCore/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/lllluolingyu/LingCore/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/lllluolingyu/LingCore/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/lllluolingyu/LingCore/compare/v0.5.0...v0.5.1
