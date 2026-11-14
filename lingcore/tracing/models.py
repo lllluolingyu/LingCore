@@ -124,7 +124,7 @@ class TraceLink(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     trace_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     span_id: str = Field(pattern=r"^[0-9a-f]{16}$")
-    relation: Literal["trial", "source", "retry"] = "source"
+    relation: Literal["trial", "source", "retry", "delegate"] = "source"
 
 
 class SpanContext(BaseModel):

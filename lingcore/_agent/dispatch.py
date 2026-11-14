@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 from lingcore.errors import (
@@ -13,6 +14,16 @@ from lingcore.plugins import (
     ToolCallEvent,
 )
 from lingcore.tools import Tool, ToolOutput
+from lingcore.tools._progress import invocation
+
+dispatch_tool_name: ContextVar[str | None] = ContextVar(
+    "dispatch_tool_name", default=None
+)
+dispatch_execution: ContextVar[bool] = ContextVar("dispatch_execution", default=False)
+
+dispatch_authorization: ContextVar[frozenset[str] | None] = ContextVar(
+    "dispatch_authorization", default=None
+)
 
 if TYPE_CHECKING:
     from lingcore.agent import Agent
@@ -68,6 +79,19 @@ async def _dispatch(self: Agent, calls: list[ToolCall]) -> list[ToolResult]:
     producing_request_id = self.request_ledger.last_request_id
 
     async def run_one(call: ToolCall) -> ToolResult:
+        phase = dispatch_execution.set(False)
+        call_name = dispatch_tool_name.set(call.name)
+        authority = dispatch_authorization.set(authorized)
+        progress_call = invocation.set((self.tool_ctx, call.id))
+        try:
+            return await execute(call)
+        finally:
+            dispatch_execution.reset(phase)
+            dispatch_tool_name.reset(call_name)
+            invocation.reset(progress_call)
+            dispatch_authorization.reset(authority)
+
+    async def execute(call: ToolCall) -> ToolResult:
         # Validation and the batch's authorization snapshot precede every
         # hook: plugins cannot make an invalid or forbidden call reachable.
         identity = {
@@ -158,9 +182,15 @@ async def _dispatch(self: Agent, calls: list[ToolCall]) -> list[ToolResult]:
                         "tool.arguments",
                         {"span_id": execution.context.span_id, "unavailable": True},
                     )
+            end_turn = False
             try:
-                out = await tool.run(args, self.tool_ctx)
+                phase = dispatch_execution.set(True)
+                try:
+                    out = await tool.run(args, self.tool_ctx)
+                finally:
+                    dispatch_execution.reset(phase)
                 if isinstance(out, ToolOutput):
+                    end_turn = out.end_turn and call.name in self.terminal_tools
                     result = ToolResult(
                         call_id=call.id,
                         name=call.name,
@@ -187,7 +217,9 @@ async def _dispatch(self: Agent, calls: list[ToolCall]) -> list[ToolResult]:
                 output_bytes=len(result.content.encode(errors="replace")),
                 attachments=len(result.attachments),
             )
-            return await self._hooks.after_tool(event, result)
+            result = await self._hooks.after_tool(event, result)
+            result._end_turn = bool(end_turn and result.ok)
+            return result
 
     if self.parallel_tools and len(calls) > 1:
         tasks = [asyncio.create_task(run_one(call)) for call in calls]

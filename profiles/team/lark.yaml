@@ -1,0 +1,4 @@
+app_id_env: LARK_APP_ID
+app_secret_env: LARK_APP_SECRET
+allowed_user_ids: ["${TEAM_REQUESTER:-unconfigured}", "${TEAM_APPROVER:-unconfigured}"]
+allowed_chat_ids: []

@@ -74,6 +74,18 @@ packages = ["lingcore"]
 # The explicit file manifest prevents ignored sessions, workspaces, memories,
 # secrets, and local scratch artifacts from leaking into release wheels.
 [tool.hatch.build.targets.wheel.force-include]
+"profiles/team/config.yaml" = "lingcore/profile_templates/team/config.yaml"
+"profiles/team/.env.example" = "lingcore/profile_templates/team/.env.example"
+"profiles/team/lark.yaml" = "lingcore/profile_templates/team/lark.yaml"
+"profiles/team/roles/router.yaml" = "lingcore/profile_templates/team/roles/router.yaml"
+"profiles/team/roles/router.md" = "lingcore/profile_templates/team/roles/router.md"
+"profiles/team/roles/executor.yaml" = "lingcore/profile_templates/team/roles/executor.yaml"
+"profiles/team/roles/executor.md" = "lingcore/profile_templates/team/roles/executor.md"
+"profiles/team/roles/observer.yaml" = "lingcore/profile_templates/team/roles/observer.yaml"
+"profiles/coding/roles/reviewer.yaml" = "lingcore/profile_templates/coding/roles/reviewer.yaml"
+"profiles/coding/roles/skeptic.yaml" = "lingcore/profile_templates/coding/roles/skeptic.yaml"
+"profiles/coding/roles/writer.yaml" = "lingcore/profile_templates/coding/roles/writer.yaml"
+"profiles/coding/workflows/review-changes.yaml" = "lingcore/profile_templates/coding/workflows/review-changes.yaml"
 "profiles/coding/.env.example" = "lingcore/profile_templates/coding/.env.example"
 "profiles/coding/config.yaml" = "lingcore/profile_templates/coding/config.yaml"
 "profiles/coding/commands/init.md" = "lingcore/profile_templates/coding/commands/init.md"

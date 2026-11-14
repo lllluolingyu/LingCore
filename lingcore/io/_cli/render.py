@@ -16,6 +16,7 @@ from lingcore.errors import INCOMPLETE_FINISH_REASONS, incomplete_response_messa
 from lingcore.events import (
     AgentEvent,
     Compacted,
+    DelegatedUsageReported,
     Error,
     Final,
     PluginNotice,
@@ -24,6 +25,7 @@ from lingcore.events import (
     TextDelta,
     TodoUpdated,
     ToolCallStarted,
+    ToolProgress,
     ToolResultEvent,
     TurnCancelled,
     TurnStatsReported,
@@ -231,6 +233,19 @@ def render(self: CLIFrontend, event: AgentEvent) -> None:
             self._flush()
             self._render_todos(todos)
             self._show_working("thinking")
+        case ToolProgress(_, payload):
+            from rich.tree import Tree
+
+            from lingcore.delegation.presentation import progress_text
+
+            tree = Tree(Text(progress_text(payload)))
+            for node in payload.get("nodes", [])[-12:]:
+                tree.add(Text(f"{node['role']} · {node['id']} · {node['status']}"))
+            self._show_live(tree)
+        case DelegatedUsageReported(records):
+            for record in records:
+                self._delegated_usage.add(record.usage)
+                self._turn_delegated_usage.add(record.usage)
         case UsageReported(usage, purpose):
             self._turn_usage.add(usage)
             self._session_usage.add(usage)
@@ -264,12 +279,15 @@ def _end_turn(self: CLIFrontend) -> None:
         parts.append(_duration(time.monotonic() - self._turn_started))
     if self._turn_usage.requests:
         parts.append(self._turn_usage.describe())
+    if self._turn_delegated_usage.requests:
+        parts.append("workers: " + self._turn_delegated_usage.describe())
     rate = _rate(self._turn_stats)
     if rate:
         parts.append(rate)
     if parts:
         self.console.print(f"[dim]  ↳ {' · '.join(parts)}[/]")
     self._turn_usage = _UsageTotals()
+    self._turn_delegated_usage = _UsageTotals()
     self._turn_started = None
     self._turn_stats = None
 

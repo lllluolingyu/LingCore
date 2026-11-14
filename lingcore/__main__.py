@@ -97,6 +97,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Run without persisting this session.",
     )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Include delegated worker sessions in --list-sessions",
+    )
     g.add_argument(
         "--list-sessions",
         action="store_true",
@@ -215,7 +220,9 @@ def _profile_command(argv: list[str]) -> int:
     return 0
 
 
-def _print_sessions(store: SessionStore | None, notice: str | None) -> int:
+def _print_sessions(
+    store: SessionStore | None, notice: str | None, *, include_delegated: bool = False
+) -> int:
     """``--list-sessions``: print a table and exit (never builds an Agent)."""
     from rich.console import Console
 
@@ -223,7 +230,7 @@ def _print_sessions(store: SessionStore | None, notice: str | None) -> int:
     if store is None:
         console.print(f"[dim]{notice or 'sessions are disabled for this profile'}[/]")
         return 0
-    sessions = store.list()
+    sessions = store.list(include_delegated=include_delegated)
     if not sessions:
         console.print("[dim]no stored sessions[/]")
         return 0
@@ -462,7 +469,7 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     try:
         if args.list_sessions:
-            return _print_sessions(store, notice)
+            return _print_sessions(store, notice, include_delegated=args.all)
 
         resume_meta: SessionMeta | None = None
         if args.continue_ or args.resume:
@@ -586,6 +593,14 @@ async def _main_async(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] == "superagent":
+        from lingcore.superagent.service import service_command
+
+        return service_command(raw_argv[1:])
+    if raw_argv and raw_argv[0] == "run":
+        from lingcore.delegation.cli import run_command
+
+        return run_command(raw_argv[1:])
     if raw_argv and raw_argv[0] == "eval":
         from lingcore.evaluation.runner import evaluation_command
 

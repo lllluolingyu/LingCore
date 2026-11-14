@@ -12,7 +12,7 @@ from lingcore.plugins.commands import CommandCatalog
 from lingcore.plugins.hooks import HookRunner
 from lingcore.session_leases import SessionLease
 from lingcore.todos import TodoState
-from lingcore.tools import ToolContext, ToolRegistry
+from lingcore.tools import Tool, ToolContext, ToolRegistry
 from lingcore.tracing import TraceRecorder
 from lingcore.tracing.requests import InstrumentedClient, RequestLedger
 from lingcore.usage import UsageSink
@@ -45,6 +45,8 @@ def from_profile(
     tool_registry: ToolRegistry | None = None,
     execution_budget: ExecutionBudget | None = None,
     environment_binding: EnvironmentBinding | None = None,
+    extra_tools: tuple[Tool, ...] = (),
+    terminal_tools: frozenset[str] = frozenset(),
 ) -> "Agent":
     """Assemble a runnable Agent from a validated profile.
 
@@ -179,10 +181,23 @@ def from_profile(
     tools = (
         tool_registry if tool_registry is not None else REGISTRY.subset(profile.tools)
     )
+    # Host-only additions live in this agent's private registry. Neither the
+    # profile ceiling nor global registration can manufacture terminal tools.
+    extra_names = frozenset(t.name for t in extra_tools)
+    if len(extra_names) != len(extra_tools) or extra_names & frozenset(tools.names()):
+        raise ConfigError(
+            "extra tools must have unique names outside the profile ceiling"
+        )
+    if not terminal_tools <= extra_names:
+        raise ConfigError("terminal tools must be supplied through extra_tools")
+    if extra_tools:
+        tools = tools.subset(tools.names())
+        for extra in extra_tools:
+            tools.register(extra)
     # The initially-enabled subset (``initial_tools`` or the complement of
     # ``skill_gated_tools``; neither ⇒ all of the ceiling). Skills unlock the
     # rest, if any, on activation.
-    initial_tools_set = profile.initial_tool_set()
+    initial_tools_set = profile.initial_tool_set() | extra_names
     # A statically-engaged skill (profile ``skills:``) is always on: its
     # requested tools are granted from the start, exactly like an activated
     # dynamic skill's — intersected with the ceiling, never beyond it
@@ -498,6 +513,24 @@ def from_profile(
                 else:
                     memory_path = (effective_state / raw_mem).resolve()
 
+        worker_layers = getattr(profile, "_worker_layers", None)
+        if worker_layers is not None:
+            layers = list(worker_layers)
+            contexts: frozenset[str] = getattr(profile, "_worker_context", frozenset())
+            if "memory" not in contexts:
+                memory_path = None
+            if "world" not in contexts:
+                world_file = None
+
+        from lingcore.delegation.roles import DELEGATION_TOOLS
+
+        if set(profile.tools) & DELEGATION_TOOLS:
+            from lingcore.delegation.catalog import prompt_catalog
+
+            includes.append(
+                prompt_catalog(getattr(profile, "_delegation_profile", profile))
+            )
+
         # Statically-declared skills (profile ``skills:``) inject their
         # instructions as an always-on prompt layer — distinct from the dynamic
         # activate_skill path, which injects via active_skills in the loop.
@@ -572,7 +605,15 @@ def from_profile(
             request_ledger=ledger,
             execution_budget=execution_budget,
             output_rewriter=output_rewriter,
+            terminal_tools=terminal_tools,
         )
+        from lingcore.delegation.roles import DELEGATION_TOOLS
+
+        if set(profile.tools) & DELEGATION_TOOLS or profile.superagent is not None:
+            from lingcore.delegation.supervisor import Supervisor
+
+            original_profile = getattr(profile, "_delegation_profile", profile)
+            agent.tool_ctx.delegation = Supervisor(agent, original_profile)
         agent._turn_index = restored_turn_index
         agent._owned_session_store = session_store if owns_store else None
         if session_store is not None and sid is not None:

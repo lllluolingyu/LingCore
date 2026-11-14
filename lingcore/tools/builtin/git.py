@@ -21,6 +21,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from lingcore._git_metadata import isolated_metadata
 from lingcore.errors import ToolError
 from lingcore.paths import PathEscapeError, resolve_confined
 from lingcore.tools import ToolContext, tool
@@ -345,6 +346,13 @@ async def _abort(proc: asyncio.subprocess.Process) -> None:
 async def git(args: GitArgs, ctx: ToolContext) -> str:
     workspace = _validate_checkout(ctx)
     operation = _operation_args(args, ctx)
+    async with isolated_metadata(workspace) as metadata:
+        return await _inspect(args, workspace, operation, metadata)
+
+
+async def _inspect(
+    args: GitArgs, workspace: Path, operation: list[str], metadata: Path
+) -> str:
     executable = _git_executable()
     # These fixed overrides suppress local executable hooks/helpers for every
     # supported operation. Operation-specific flags also disable diff/textconv.
@@ -364,7 +372,8 @@ async def git(args: GitArgs, ctx: ToolContext) -> str:
         proc = await asyncio.create_subprocess_exec(
             *command,
             cwd=workspace,
-            env=_git_environment(workspace),
+            env=_git_environment(workspace)
+            | {"GIT_DIR": str(metadata / ".git"), "GIT_WORK_TREE": str(workspace)},
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=os.name == "posix",

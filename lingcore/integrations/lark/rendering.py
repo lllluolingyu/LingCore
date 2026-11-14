@@ -10,6 +10,7 @@ from lingcore.events import (
     Error,
     Final,
     PluginNotice,
+    ToolProgress,
     ToolResultEvent,
     TurnCancelled,
 )
@@ -20,7 +21,13 @@ _LOG = logging.getLogger(__name__)
 
 async def deliver(event: AgentEvent, message: LarkMessage, sender: LarkSender) -> None:
     # Buffer text until Final/Error: only post-output-guardrail content is sent.
-    if isinstance(event, Final):
+    if isinstance(event, ToolProgress):
+        from lingcore.delegation.presentation import progress_text
+
+        status = getattr(sender, "send_status", None)
+        if status is not None:
+            await status(message, progress_text(event.payload))
+    elif isinstance(event, Final):
         await sender.send_text(message, event.content or "(empty response)")
     elif isinstance(event, Error):
         text = "\n\n".join(

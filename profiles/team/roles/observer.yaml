@@ -1,0 +1,4 @@
+description: Read-only observation for inferred work explicitly admitted by a rule.
+tools: [read_file, list_dir, search, git]
+context: [project_instructions]
+confirm: deny

@@ -284,6 +284,7 @@ def load_telegram_config(
     *,
     mode: Literal["polling", "webhook"] | None = None,
     require_secrets: bool = True,
+    transport_only: bool = False,
 ) -> TelegramConfig:
     """Load and bind ``telegram.yaml`` for a selected agent profile.
 
@@ -328,7 +329,8 @@ def load_telegram_config(
             f"invalid Telegram config {config_path}: {_safe_validation_message(exc)}"
         ) from None
 
-    _validate_profile_policy(profile)
+    if not transport_only:
+        _validate_profile_policy(profile)
     state_path = _resolve_state_path(profile_dir, config)
     config._profile_env = profile_env
     config._profile_dir = profile_dir.resolve()

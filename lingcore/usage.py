@@ -69,6 +69,16 @@ class TokenUsage:
     purpose: str = "main"
 
 
+@dataclass(frozen=True, slots=True)
+class DelegatedUsage:
+    """Worker spend; never part of the parent's own context or throughput."""
+
+    run_id: str
+    worker_id: str
+    role: str
+    usage: TokenUsage
+
+
 def _count(value: Any) -> int:
     # bool is an int subclass but never a token count.
     if isinstance(value, bool) or not isinstance(value, int | float):
@@ -174,6 +184,21 @@ class UsageMeter:
     def __init__(self) -> None:
         self._pending: list[tuple[TokenUsage, str]] = []
         self._tally: list[TokenUsage] | None = None
+        self._delegated_pending: list[DelegatedUsage] = []
+        self._delegated_tally: list[DelegatedUsage] | None = None
+
+    def record_delegated(self, usage: DelegatedUsage) -> None:
+        self._delegated_pending.append(usage)
+        if self._delegated_tally is not None:
+            self._delegated_tally.append(usage)
+
+    def drain_delegated(self) -> list[DelegatedUsage]:
+        pending, self._delegated_pending = self._delegated_pending, []
+        return pending
+
+    def close_delegated_tally(self) -> tuple[DelegatedUsage, ...]:
+        tally, self._delegated_tally = self._delegated_tally or [], None
+        return tuple(tally)
 
     def record(self, usage: TokenUsage, *, purpose: str | None = None) -> None:
         if purpose is not None and purpose != usage.purpose:
@@ -194,6 +219,7 @@ class UsageMeter:
 
     def open_tally(self) -> None:
         self._tally = []
+        self._delegated_tally = []
 
     def close_tally(self) -> tuple[TokenUsage, ...]:
         tally, self._tally = self._tally or [], None
@@ -204,12 +230,14 @@ class UsageMeter:
 class TurnStats:
     """What one turn cost and how long it spent generating.
 
-    ``usage`` is every request billed on the turn's behalf, in order — the
+    ``usage`` is every request made by this agent, in order — the
     replies and any compaction, memory-condensing or vision request.
     ``model_ms`` is the turn's wall time less the time it spent running tool
     batches (which includes waiting for approvals) and backing off between
     stream retries, so output tokens over ``model_ms`` is the turn's
     throughput. It still includes each request's time to first token.
+    ``delegated`` separately records foreground workers' spend; it never
+    contributes to this agent's context gauge or throughput.
     """
 
     usage: tuple[TokenUsage, ...]
@@ -217,38 +245,47 @@ class TurnStats:
     ended_at: datetime
     elapsed_ms: int
     model_ms: int
+    delegated: tuple[DelegatedUsage, ...] = ()
+
+
+def _usage_payload(u: TokenUsage) -> dict[str, Any]:
+    return {
+        "model": u.model,
+        "input_tokens": u.input_tokens,
+        "output_tokens": u.output_tokens,
+        "cached_input_tokens": u.cached_input_tokens,
+        "reasoning_tokens": u.reasoning_tokens,
+        **({"purpose": u.purpose} if u.purpose != "main" else {}),
+    }
 
 
 def turn_stats_payload(stats: TurnStats) -> dict[str, Any]:
     """JSON payload persisted as a ``turn_stats`` session event."""
-    return {
-        "usage": [
-            {
-                "model": u.model,
-                "input_tokens": u.input_tokens,
-                "output_tokens": u.output_tokens,
-                "cached_input_tokens": u.cached_input_tokens,
-                "reasoning_tokens": u.reasoning_tokens,
-                **({"purpose": u.purpose} if u.purpose != "main" else {}),
-            }
-            for u in stats.usage
-        ],
+    payload = {
+        "usage": [_usage_payload(u) for u in stats.usage],
         "started_at": stats.started_at.isoformat(),
         "ended_at": stats.ended_at.isoformat(),
         "elapsed_ms": stats.elapsed_ms,
         "model_ms": stats.model_ms,
     }
+    if stats.delegated:
+        payload["delegated"] = [
+            {
+                "run_id": d.run_id,
+                "worker_id": d.worker_id,
+                "role": d.role,
+                "usage": _usage_payload(d.usage),
+            }
+            for d in stats.delegated
+        ]
+    return payload
 
 
 def _is_ms(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
-def turn_stats_from_payload(payload: Any) -> TurnStats | None:
-    """Validate a stored payload; ``None`` for anything malformed, never raises."""
-    if not isinstance(payload, dict):
-        return None
-    raw_usage = payload.get("usage")
+def _read_usage(raw_usage: Any) -> tuple[TokenUsage, ...] | None:
     if not isinstance(raw_usage, list):
         return None
     usage: list[TokenUsage] = []
@@ -268,6 +305,34 @@ def turn_stats_from_payload(payload: Any) -> TurnStats | None:
                 purpose=purpose,
             )
         )
+    return tuple(usage)
+
+
+def turn_stats_from_payload(payload: Any) -> TurnStats | None:
+    """Validate a stored payload; ``None`` for anything malformed, never raises."""
+    if not isinstance(payload, dict):
+        return None
+    usage = _read_usage(payload.get("usage"))
+    if usage is None:
+        return None
+    raw_delegated = payload.get("delegated", [])
+    if not isinstance(raw_delegated, list):
+        return None
+    delegated = []
+    for item in raw_delegated:
+        if not isinstance(item, dict) or any(
+            not isinstance(item.get(key), str) or not item[key]
+            for key in ("run_id", "worker_id", "role")
+        ):
+            return None
+        worker_usage = _read_usage([item.get("usage")])
+        if worker_usage is None:
+            return None
+        delegated.append(
+            DelegatedUsage(
+                item["run_id"], item["worker_id"], item["role"], worker_usage[0]
+            )
+        )
     try:
         started_at = datetime.fromisoformat(payload["started_at"])
         ended_at = datetime.fromisoformat(payload["ended_at"])
@@ -285,6 +350,7 @@ def turn_stats_from_payload(payload: Any) -> TurnStats | None:
         ended_at=ended_at,
         elapsed_ms=elapsed_ms,
         model_ms=min(model_ms, elapsed_ms),
+        delegated=tuple(delegated),
     )
 
 
@@ -305,11 +371,14 @@ class TurnClock:
         finally:
             self._waited += time.monotonic() - since
 
-    def finish(self, usage: tuple[TokenUsage, ...]) -> TurnStats:
+    def finish(
+        self, usage: tuple[TokenUsage, ...], delegated: tuple[DelegatedUsage, ...] = ()
+    ) -> TurnStats:
         elapsed = max(0.0, time.monotonic() - self._start)
         elapsed_ms = round(elapsed * 1000)
         return TurnStats(
             usage=usage,
+            delegated=delegated,
             started_at=self.started_at,
             ended_at=datetime.now(timezone.utc),
             elapsed_ms=elapsed_ms,

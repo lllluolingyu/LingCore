@@ -1,0 +1,9 @@
+name: github
+version: 1.0.0
+api: 1
+description: Opt-in GitHub issue-comment source and reply channel for superagents.
+skills: null
+commands: null
+environment:
+  - name: GITHUB_TOKEN
+    required: true

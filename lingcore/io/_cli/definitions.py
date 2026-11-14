@@ -13,6 +13,7 @@ _HELP_COMMANDS = (
     ("/new", "start a fresh session"),
     ("/sessions", "list stored sessions for this profile"),
     ("/resume <id>", "switch to a stored session by id prefix"),
+    ("/workflows", "List workflows and recent runs"),
     ("/usage", "token usage for this session"),
     ("/help", "show this help"),
     ("/exit", "quit (also /quit, /q, Ctrl-D)"),

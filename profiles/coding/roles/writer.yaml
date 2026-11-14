@@ -1,0 +1,5 @@
+description: Write a concise report using only the provided findings.
+tools: []
+workspace: scratch
+context: []
+confirm: deny

@@ -105,7 +105,7 @@ async def run(
                     TraceLink(
                         trace_id=parent_context.trace_id,
                         span_id=parent_context.span_id,
-                        relation="trial",
+                        relation=getattr(self, "_trace_relation", "trial"),
                     ),
                 )
             }

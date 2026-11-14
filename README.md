@@ -16,6 +16,13 @@ by pointing at a different `base_url`.
 
 ## Features
 
+- **Delegation and workflows** — bounded role-based workers, isolated snapshots,
+  typed results, pipelined review and durable resume. The coding profile includes
+  a 40-worker review workflow. [Usage and configuration](docs/workflows-and-superagents.md).
+- **Team superagents** — policy-gated tickets, exact human tool approvals, durable
+  execution/reply queues, Lark/Telegram/schedule/GitHub sources, and an authenticated
+  LingChat needs-person panel. Start from `profiles/team`.
+
 - **Profile-driven** — model, endpoint, persona, tool list, workspace, memory,
   and sampling all live in a YAML file. Secrets stay in exported environment
   variables or an optional profile-local `.env`, never in YAML.

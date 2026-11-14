@@ -1,6 +1,7 @@
 """Built-in tools. Importing this package registers them in the global REGISTRY."""
 
 from lingcore.tools.builtin import (  # noqa: F401  (registration side effect)
+    delegate,
     fs,
     git,
     knowledge,
@@ -11,6 +12,7 @@ from lingcore.tools.builtin import (  # noqa: F401  (registration side effect)
     skill,
     todo,
     web,
+    workflow,
     world,
 )
 

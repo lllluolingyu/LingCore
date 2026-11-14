@@ -118,6 +118,15 @@ class SessionForkMeta(BaseModel):
     through_seq: int = Field(ge=0)
 
 
+class SessionDelegationMeta(BaseModel):
+    parent_session_id: str | None = None
+    anchor_seq: int
+    run_id: str
+    node_key: str
+    role: str
+    envelope: dict[str, Any]
+
+
 class SessionMeta(BaseModel):
     """Summary row for one stored session."""
 
@@ -128,6 +137,7 @@ class SessionMeta(BaseModel):
     updated_at: datetime
     message_count: int = 0
     fork: SessionForkMeta | None = None
+    delegation: SessionDelegationMeta | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +287,15 @@ def _row_to_meta(row: tuple) -> SessionMeta:
         fork = SessionForkMeta.model_validate(raw_fork) if raw_fork else None
     except Exception:
         fork = None
+    raw_delegation = _session_meta(raw_meta).get("delegation")
+    try:
+        delegation = (
+            SessionDelegationMeta.model_validate(raw_delegation)
+            if raw_delegation
+            else None
+        )
+    except Exception:
+        delegation = None
     return SessionMeta(
         id=sid,
         title=title,
@@ -285,6 +304,7 @@ def _row_to_meta(row: tuple) -> SessionMeta:
         updated_at=updated_at,
         message_count=count,
         fork=fork,
+        delegation=delegation,
     )
 
 

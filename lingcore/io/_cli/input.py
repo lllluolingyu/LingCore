@@ -226,6 +226,17 @@ def _command(self: CLIFrontend, line: str) -> bool | None:
     if name == "/help":
         self._print_help()
         return True
+    if name == "/workflows":
+        for workflow, description in self._workflows:
+            self.console.print(Text(workflow + " — " + description))
+        if not self._workflows:
+            self.console.print("No named workflows configured.")
+        runs = self._workflow_runs() if self._workflow_runs else []
+        if runs:
+            self.console.print("Recent runs:")
+            for line in runs:
+                self.console.print(Text(line))
+        return True
     if name == "/usage":
         if self._session_usage.requests:
             self.console.print(
@@ -233,6 +244,8 @@ def _command(self: CLIFrontend, line: str) -> bool | None:
             )
         else:
             self.console.print("[dim]no usage reported yet[/]")
+        if self._delegated_usage.requests:
+            self.console.print("workers: " + self._delegated_usage.describe())
         return True
     if name == "/new":
         self._session_switch = SessionSwitch(None)

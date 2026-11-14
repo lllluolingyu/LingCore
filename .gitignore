@@ -152,6 +152,7 @@ venv.bak/
 # Local channel configuration
 lark.yaml
 telegram.yaml
+!profiles/team/lark.yaml
 
 # Spyder project settings
 .spyderproject

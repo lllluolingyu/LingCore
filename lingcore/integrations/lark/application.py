@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,27 @@ def normalize_message(message: Any) -> LarkMessage:
 class SDKSender:
     def __init__(self, channel: Any) -> None:
         self.channel = channel
+        self._statuses: dict[str, tuple[str, float]] = {}
+
+    async def send_status(self, message: LarkMessage, text: str) -> None:
+        previous = self._statuses.get(message.message_id)
+        if previous and time.monotonic() - previous[1] < 1:
+            return
+        if previous:
+            self._check(await self.channel.edit_message(previous[0], {"text": text}))
+            self._statuses[message.message_id] = (previous[0], time.monotonic())
+        else:
+            result = await self.channel.send(
+                message.chat_id, {"text": text}, {"reply_to": message.message_id}
+            )
+            self._check(result)
+            if result.message_id:
+                self._statuses[message.message_id] = (
+                    result.message_id,
+                    time.monotonic(),
+                )
+        while len(self._statuses) > 128:
+            self._statuses.pop(next(iter(self._statuses)))
 
     @staticmethod
     def _check(result: Any) -> None:
@@ -79,7 +101,7 @@ class SDKSender:
         return data
 
 
-def create_lark_channel(config: LarkConfig) -> Any:
+def create_lark_channel(config: LarkConfig, *, require_mention: bool = True) -> Any:
     from lark_channel import (
         ChatQueueConfig,
         FeishuChannel,
@@ -103,7 +125,7 @@ def create_lark_channel(config: LarkConfig) -> Any:
             dm_policy="open",
             group_policy="allowlist" if config.allowed_chat_ids else "disabled",
             group_allowlist=config.allowed_chat_ids,
-            require_mention=True,
+            require_mention=require_mention,
             respond_to_mention_all=False,
         ),
         inbound=InboundConfig(

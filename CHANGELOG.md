@@ -5,6 +5,37 @@ Notable user-facing changes to LingCore are documented here. The project uses
 
 ## [Unreleased]
 
+### Fixed
+
+- Restore the high-risk confirmation floor, use current frontend confirmation
+  callbacks, and validate panel approvals against published service authority.
+- Settle terminal launch effects, preserve router identity across restarts, and
+  avoid duplicate final reports or successful approval-card deliveries.
+- Validate workflow collection types, preserve Python orchestration errors and
+  child blocks, align resume context with workers, and stream artifact I/O.
+- Prevent repository-controlled Git filters and helpers from executing on the host
+  during snapshot finalization or builtin Git inspection.
+- Isolate ticket lifetimes from router rollback; deliver executor follow-ups and
+  approver cards, preserve progress/final distinctions, and honor configured slots.
+- Bound superagent history and idle database work; retain failed routing decisions
+  for correction and initialize GitHub cursors without replaying old comments.
+- Preserve optional results and blocked dependencies, apply output guards to worker
+  submissions, and report background deadlines. Resume, retention, frozen-input
+  verification and channel confirmations now respect their lifecycle boundaries.
+
+### Added
+
+- Role-based delegation with inherited authorization, typed terminal results,
+  ancestor budgets, separate worker usage, and cancellable progress.
+- Session schema 4 run journals, worker lineage, frozen/snapshot/scratch workspaces,
+  retained patches, background completion, continuation, and retention commands.
+- Bounded declarative and explicitly consented Python workflows, pipelined maps,
+  safe value-based resume, model-facing workflow tools, and a 40-worker review example.
+- Superagent domain engine, durable effects/outbox, host-verified per-ticket tool
+  approvals, sandboxed executors, restart recovery, source adapters and team template.
+- Run/service CLI commands, offline diagnostics, frontend progress and an authenticated
+  LingChat needs-person panel in the companion workspace.
+
 ## [0.6.1] - 2026-11-10
 
 ### Added

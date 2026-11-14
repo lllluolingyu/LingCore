@@ -36,6 +36,12 @@ persona:
     - CLAUDE.md
 
 tools:
+  - delegate
+  - workflow_run
+  - workflow_status
+  - workflow_result
+  - workflow_stop
+  - workflow_resume
   - read_file
   - pdf2md
   - write_file

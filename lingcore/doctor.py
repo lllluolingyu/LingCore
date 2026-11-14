@@ -159,6 +159,13 @@ def _profile_requirements(
                     "tool_options.run_shell.sandbox.pass_env",
                 )
 
+    from lingcore._doctor_delegation import environment
+
+    try:
+        for name, consumer in environment(profile).items():
+            _add_requirement(requirements, name, consumer)
+    except Exception as exc:
+        config_errors.append(f"superagent source configuration: {exc}")
     example_names.update(requirements)
     return requirements, example_names, config_errors
 
@@ -507,6 +514,9 @@ def diagnose_profile(
     findings.extend(_shell_sandbox_findings(profile))
     findings.extend(_outer_agent_findings(profile))
     findings.extend(_plugin_findings(profile))
+    from lingcore._doctor_delegation import findings as delegation_findings
+
+    findings.extend(delegation_findings(profile))
     for name, consumers in sorted(requirements.items()):
         used_by = ", ".join(sorted(consumers))
         if name in profile_env:

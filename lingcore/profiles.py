@@ -37,7 +37,21 @@ def initialize_state_directory(path: Path) -> Path:
 # Keep this manifest explicit: profile workspaces, sessions, memories, secrets,
 # and other ignored local artifacts must never leak into a wheel template.
 PROFILE_TEMPLATE_FILES: dict[str, tuple[str, ...]] = {
+    "team": (
+        "config.yaml",
+        ".env.example",
+        "lark.yaml",
+        "roles/router.yaml",
+        "roles/router.md",
+        "roles/executor.yaml",
+        "roles/executor.md",
+        "roles/observer.yaml",
+    ),
     "coding": (
+        "roles/reviewer.yaml",
+        "roles/skeptic.yaml",
+        "roles/writer.yaml",
+        "workflows/review-changes.yaml",
         ".env.example",
         "config.yaml",
         "commands/init.md",

@@ -203,6 +203,7 @@ def test_every_shipped_profile_that_needs_env_has_complete_safe_example(
         monkeypatch.delenv(name, raising=False)
 
     expected = {
+        "team": {"LINGCORE_API_KEY", "LARK_APP_ID", "LARK_APP_SECRET"},
         "coding": {"LLY_API_KEY"},
         "frontend": {"LLY_API_KEY"},
         "daily": {"DEEPSEEK_API_KEY", "SEARXNG_URL", "EXA_API_KEY"},

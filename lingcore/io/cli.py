@@ -111,6 +111,10 @@ class CLIFrontend:
         self._stale_input: asyncio.Future[str] | None = None
         self._turn_usage = _UsageTotals()
         self._session_usage = _UsageTotals()
+        self._delegated_usage = _UsageTotals()
+        self._turn_delegated_usage = _UsageTotals()
+        self._workflows: list[tuple[str, str]] = []
+        self._workflow_runs: Callable[[], list[str]] | None = None
         self._turn_stats: TurnStats | None = None
         self._session_switch: SessionSwitch | None = None
         # The running turn's stop request while interrupt_scope is active (the
@@ -124,6 +128,12 @@ class CLIFrontend:
         # monitor wakeup cancelled before prompt_async could return it.
         self._accepted: str | None = None
         self._pending_submit: str | None = None
+
+    def set_workflows(self, entries: list[tuple[str, str]]) -> None:
+        self._workflows = entries
+
+    def set_workflow_runs(self, read: Callable[[], list[str]]) -> None:
+        self._workflow_runs = read
 
     def set_commands(self, commands: CommandCatalog) -> None:
         """Rebind command help/completion for the active Agent."""
@@ -144,6 +154,10 @@ class CLIFrontend:
             self.set_commands(commands)
         self._turn_usage = _UsageTotals()
         self._session_usage = _UsageTotals()
+        self._delegated_usage = _UsageTotals()
+        self._turn_delegated_usage = _UsageTotals()
+        self._workflows = []
+        self._workflow_runs = None
         self._turn_stats = None
         self._context_tokens = 0
         # Rebuilt lazily with an empty in-memory history on the next prompt.

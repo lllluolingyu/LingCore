@@ -20,6 +20,8 @@ from lingcore.usage import RequestUsage
 
 if TYPE_CHECKING:
     from lingcore.agent import Agent
+    from lingcore.io.base import Frontend
+    from lingcore.tools import ConfirmFn
 
 
 class RunnerSignal(BaseException):
@@ -59,6 +61,7 @@ class ExecutionLimits(BaseModel):
     wall_seconds: float | None = Field(default=None, gt=0)
     model_requests: int | None = Field(default=None, ge=0)
     tool_calls: int | None = Field(default=None, ge=0)
+    agents: int | None = Field(default=None, ge=0)
     reported_tokens: int | None = Field(default=None, ge=0)
     usage_missing: Literal["ignore", "stop"] = "ignore"
     automatic_turns: int = Field(default=0, ge=0)
@@ -67,20 +70,58 @@ class ExecutionLimits(BaseModel):
 class ExecutionBudget:
     """Synchronous admission; independent of event rendering and trace health."""
 
-    def __init__(self, limits: ExecutionLimits | None = None) -> None:
+    def __init__(
+        self,
+        limits: ExecutionLimits | None = None,
+        *,
+        parent: ExecutionBudget | None = None,
+    ) -> None:
         self.limits = limits or ExecutionLimits()
+        self._parent = parent
         self.requests = 0
         self.tools = 0
+        self.agents = 0
         self.tokens = 0
         self.automatic_turns = 0
         self.usage_complete = True
-        self.deadline: float | None = None
+        self._deadline: float | None = None
         self.exhausted: str | None = None
         self._seen_usage: set[str] = set()
 
     def start(self) -> None:
-        if self.deadline is None and self.limits.wall_seconds is not None:
-            self.deadline = time.monotonic() + self.limits.wall_seconds
+        for budget in self._chain():
+            if budget._deadline is None and budget.limits.wall_seconds is not None:
+                budget._deadline = time.monotonic() + budget.limits.wall_seconds
+
+    def _chain(self) -> Iterator[ExecutionBudget]:
+        budget: ExecutionBudget | None = self
+        while budget is not None:
+            yield budget
+            budget = budget._parent
+
+    def child(self, limits: ExecutionLimits | None = None) -> ExecutionBudget:
+        return ExecutionBudget(limits, parent=self)
+
+    @property
+    def deadline(self) -> float | None:
+        deadlines = [b._deadline for b in self._chain() if b._deadline is not None]
+        return min(deadlines, default=None)
+
+    @deadline.setter
+    def deadline(self, value: float | None) -> None:
+        # Preserve the existing driver/test override; an inherited deadline
+        # still bounds this budget even when its local deadline is extended.
+        self._deadline = value
+
+    @property
+    def remaining_tokens(self) -> int | None:
+        """Reported-usage headroom, excluding all unreported in-flight spend."""
+        remaining = [
+            max(0, b.limits.reported_tokens - b.tokens)
+            for b in self._chain()
+            if b.limits.reported_tokens is not None
+        ]
+        return min(remaining, default=None)
 
     def _stop(self, limit: str) -> None:
         self.exhausted = limit
@@ -92,7 +133,7 @@ class ExecutionBudget:
         if self.deadline is not None and time.monotonic() >= self.deadline:
             self._stop("wall_seconds")
 
-    def reserve_request(self) -> None:
+    def _check_request(self) -> None:
         self._check()
         if self.limits.usage_missing == "stop" and not self.usage_complete:
             self._stop("usage_unavailable")
@@ -106,26 +147,45 @@ class ExecutionBudget:
             and self.tokens >= self.limits.reported_tokens
         ):
             self._stop("reported_tokens")
-        self.requests += 1
+
+    def check(self) -> None:
+        """Propagate an already exhausted ancestor after a contained worker exits."""
+        for budget in self._chain():
+            budget._check()
+
+    def _reserve(self, counter: str, limit: str) -> None:
+        # No await between validation and mutation: a rejected child cannot
+        # consume any ancestor's admission capacity on the owning event loop.
+        chain = tuple(self._chain())
+        for budget in chain:
+            if counter == "requests":
+                budget._check_request()
+            else:
+                budget._check()
+                cap = getattr(budget.limits, limit)
+                if cap is not None and getattr(budget, counter) >= cap:
+                    budget._stop(limit)
+        for budget in chain:
+            setattr(budget, counter, getattr(budget, counter) + 1)
+
+    def reserve_request(self) -> None:
+        self._reserve("requests", "model_requests")
 
     def reserve_tool(self) -> None:
-        self._check()
-        if self.limits.tool_calls is not None and self.tools >= self.limits.tool_calls:
-            self._stop("tool_calls")
-        self.tools += 1
+        self._reserve("tools", "tool_calls")
+
+    def reserve_agent(self) -> None:
+        self._reserve("agents", "agents")
 
     def reserve_automatic_turn(self) -> None:
-        self._check()
-        if self.automatic_turns >= self.limits.automatic_turns:
-            self._stop("automatic_turns")
-        self.automatic_turns += 1
+        self._reserve("automatic_turns", "automatic_turns")
 
     def record_usage(self, usage: RequestUsage) -> None:
-        if usage.request_id in self._seen_usage:
-            return
-        self._seen_usage.add(usage.request_id)
-        self.tokens += (usage.input_tokens or 0) + (usage.output_tokens or 0)
-        self.usage_complete &= usage.availability == "reported"
+        for budget in self._chain():
+            if usage.request_id not in budget._seen_usage:
+                budget._seen_usage.add(usage.request_id)
+                budget.tokens += (usage.input_tokens or 0) + (usage.output_tokens or 0)
+                budget.usage_complete &= usage.availability == "reported"
 
 
 class ScriptedFrontend:
@@ -187,41 +247,62 @@ class HeadlessResult:
 
 async def run_headless(
     agent: Agent,
-    turns: Sequence[str | UserInput],
+    turns: Sequence[str | UserInput] = (),
     *,
     allow_automatic_turns: bool = False,
     cleanup_seconds: float = 5,
     trace_context: SpanContext | None = None,
     runner_signal: asyncio.Future[RunnerSignal] | None = None,
     benchmark_environment: bool = False,
+    frontend: Frontend | None = None,
+    confirm: ConfirmFn | None = None,
 ) -> HeadlessResult:
-    """Driver-owned deadline, normal Stop handshake, bounded cleanup on all exits."""
+    """Driver-owned deadline, normal Stop handshake, bounded cleanup on all exits.
+
+    Supply either scripted ``turns`` or a ``frontend`` that can supply nudges.
+    ``confirm`` replaces the frontend's policy without losing approval tracing.
+    The driver closes the Agent on completion, failure, and cancellation.
+    """
     from lingcore.io.base import run_session
 
-    frontend = ScriptedFrontend(
-        agent,
-        turns,
-        allow_automatic_turns=allow_automatic_turns,
-        benchmark_environment=benchmark_environment,
+    if frontend is not None and turns:
+        raise ValueError("pass either turns or frontend, not both")
+    target = (
+        frontend
+        if frontend is not None
+        else ScriptedFrontend(
+            agent,
+            turns,
+            allow_automatic_turns=allow_automatic_turns,
+            benchmark_environment=benchmark_environment,
+        )
     )
 
     # Preserve the Agent's approval instrumentation around the headless policy.
-    async def confirm(prompt: str) -> bool:
+    policy = (
+        "worker"
+        if frontend is not None or confirm is not None
+        else ("benchmark_environment" if benchmark_environment else "evaluation_deny")
+    )
+    confirmation = confirm if confirm is not None else target.confirm
+
+    async def traced_confirm(prompt: str) -> bool:
         with agent.recorder.span(
             "approval.wait",
-            attributes={
-                "policy": "benchmark_environment"
-                if benchmark_environment
-                else "evaluation_deny"
-            },
+            attributes={"policy": policy},
         ) as span:
-            allowed = await frontend.confirm(prompt)
+            allowed = await confirmation(prompt)
             span.close(
                 "ok" if allowed else "denied", decision="allow" if allowed else "deny"
             )
             return allowed
 
-    agent.tool_ctx.confirm = confirm
+    agent.tool_ctx.confirm = traced_confirm
+    # The wrapper owns stop state even when a custom frontend is waiting for
+    # input or supplies a post-result nudge.
+    from lingcore._execution_frontend import HeadlessFrontend
+
+    driver = HeadlessFrontend(agent, target)
     budget = agent.execution_budget
     if budget is not None:
         budget.start()
@@ -232,15 +313,14 @@ async def run_headless(
         else None
     )
     with bind(root.context if root else None):
-        session = asyncio.create_task(run_session(agent, frontend))
+        session = asyncio.create_task(run_session(agent, driver))
 
     async def deadline() -> None:
         assert budget is not None and budget.deadline is not None
         await asyncio.sleep(max(0, budget.deadline - time.monotonic()))
         if not session.done():
-            frontend.timed_out = True
-            frontend.stopped = True
-            if not agent.cancel_turn():
+            driver.timed_out = True
+            if not driver.stop():
                 session.cancel()
 
     timer = (
@@ -254,8 +334,7 @@ async def run_headless(
         nonlocal received_signal
         assert runner_signal is not None
         received_signal = await asyncio.shield(runner_signal)
-        frontend.stopped = True
-        if not agent.cancel_turn():
+        if not driver.stop():
             session.cancel()
 
     monitor = (
@@ -268,7 +347,7 @@ async def run_headless(
         await session
     except asyncio.CancelledError:
         current = asyncio.current_task()
-        interrupted = (not frontend.timed_out and received_signal is None) or bool(
+        interrupted = (not driver.timed_out and received_signal is None) or bool(
             current and current.cancelling()
         )
         if not session.done():
@@ -294,7 +373,7 @@ async def run_headless(
         outcome = agent.execution_outcome or ExecutionOutcome(
             status="failed", cause="runner"
         )
-        if frontend.timed_out:
+        if driver.timed_out:
             outcome = ExecutionOutcome(
                 status="timed_out", cause="agent", limit_type="wall_seconds"
             )

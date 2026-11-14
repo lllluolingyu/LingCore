@@ -8,11 +8,11 @@ adapter later drive the exact same ``Agent.run`` without changes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from lingcore.message import ToolCall, ToolResult
 from lingcore.todos import TodoItem
-from lingcore.usage import TokenUsage, TurnStats
+from lingcore.usage import DelegatedUsage, TokenUsage, TurnStats
 
 
 @dataclass(slots=True)
@@ -34,6 +34,21 @@ class ToolResultEvent:
     """A tool finished (successfully or not)."""
 
     result: ToolResult
+
+
+@dataclass(frozen=True, slots=True)
+class ToolProgress:
+    """Transient progress, delivered while the batch runs, never persisted."""
+
+    call_id: str
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class DelegatedUsageReported:
+    """Foreground worker spend, separate from own-agent UsageReported."""
+
+    records: tuple[DelegatedUsage, ...]
 
 
 @dataclass(slots=True)
@@ -175,4 +190,6 @@ AgentEvent = (
     | TurnStatsReported
     | TodoUpdated
     | PluginNotice
+    | ToolProgress
+    | DelegatedUsageReported
 )

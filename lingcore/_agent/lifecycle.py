@@ -30,6 +30,8 @@ async def aclose(self: Agent) -> None:
     """
     self._closed = True
     self.background.close()
+    if self.tool_ctx.delegation is not None:
+        await self.tool_ctx.delegation.aclose()
     try:
         await self._hooks.aclose()
     finally:
@@ -158,6 +160,8 @@ def _rollback_turn(
         # the turn) must not leave the in-process turn lease wedged.
         self._hooks.drain_notices()
         self._hooks.turn_rolled_back(TurnRolledBackEvent(reason, self._turn_started_at))
+        if self.tool_ctx.delegation is not None:
+            self.tool_ctx.delegation.rollback(self._turn_started_at)
         self._trace_status = trace_status or (
             "cancelled" if reason != "failed" else "error"
         )
@@ -198,7 +202,9 @@ def _finish_turn_stats(
     clock, self._turn_clock = self._turn_clock, None
     if clock is None:
         return None
-    stats = clock.finish(self.usage_meter.close_tally())
+    stats = clock.finish(
+        self.usage_meter.close_tally(), self.usage_meter.close_delegated_tally()
+    )
     committed, self._turn_stats_committed = self._turn_stats_committed, False
     seq, self._turn_stats_seq = self._turn_stats_seq, None
     if not committed:

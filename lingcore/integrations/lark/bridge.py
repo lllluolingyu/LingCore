@@ -17,6 +17,7 @@ from lingcore.agent import Agent
 from lingcore.config import AgentProfile
 from lingcore.errors import ConfigError, SessionError, ToolError
 from lingcore.events import AgentEvent, Error, Final, TurnCancelled
+from lingcore.integrations._background import bind_background, close_background
 from lingcore.integrations._profiles import scoped_profile
 from lingcore.integrations.lark.config import LarkConfig
 from lingcore.integrations.lark.confirmations import Confirmations
@@ -182,6 +183,8 @@ class LarkBridge:
                 )
                 return
             runtime.message = message
+            if hasattr(runtime.agent, "background"):
+                runtime.agent.background.paused = False
             task = asyncio.create_task(
                 self._run_turn(runtime, message),
                 name=f"lingcore-lark-{runtime.scope_id[:12]}",
@@ -217,6 +220,7 @@ class LarkBridge:
             raise
         runtime = LarkRuntime(scope_id, user_dir, store, agent)
         self._runtimes[message.scope] = runtime
+        bind_background(self, runtime, "lark")
         return runtime
 
     def _build_agent(
@@ -295,6 +299,7 @@ class LarkBridge:
             return
         previous = runtime.agent
         runtime.agent = replacement
+        bind_background(self, runtime, "lark")
         await previous.aclose()
         await self.sender.send_text(
             message,
@@ -374,6 +379,8 @@ class LarkBridge:
 
     async def _stop(self, message: LarkMessage) -> None:
         runtime = self._runtimes.get(message.scope)
+        if runtime is not None and hasattr(runtime.agent, "background"):
+            runtime.agent.background.paused = True
         self.confirmations.deny(message.scope)
         if runtime is None or runtime.task is None or runtime.task.done():
             await self.sender.send_text(message, "No active turn to stop.")
@@ -401,6 +408,7 @@ class LarkBridge:
         if self._closed:
             return
         self._closing = True
+        await close_background(self)
         async with self._dispatch_lock:
             if self._closed:
                 return

@@ -32,9 +32,11 @@ from pydantic import (
     model_validator,
 )
 
+from lingcore.delegation.config import DelegationConfig, WorkflowConfig
 from lingcore.errors import ConfigError
 from lingcore.media_types import FALLBACK_TEXT_MAX_CHARS, NativeModality
 from lingcore.modality import DEFAULT_PDF_MAX_CHARS
+from lingcore.superagent.config import SuperagentConfig
 from lingcore.terminal_options import TerminalOptions
 from lingcore.tool_options import (
     parse_network_policy,
@@ -462,6 +464,9 @@ class AgentProfile(BaseModel):
     media_fallback: MediaFallbackCfg = Field(default_factory=MediaFallbackCfg)
     output_rewrite: OutputRewriteCfg = Field(default_factory=OutputRewriteCfg)
     tracing: TracingCfg = Field(default_factory=TracingCfg)
+    delegation: DelegationConfig = Field(default_factory=DelegationConfig)
+    workflows: WorkflowConfig = Field(default_factory=WorkflowConfig)
+    superagent: SuperagentConfig | None = None
 
     @field_validator("plugins")
     @classmethod
@@ -589,6 +594,15 @@ class AgentProfile(BaseModel):
             )
         if profile.output_rewrite.llm is not None:
             object.__setattr__(profile.output_rewrite.llm, "_profile_env", profile_env)
+        from lingcore.delegation.roles import DELEGATION_TOOLS
+
+        if set(profile.tools) & DELEGATION_TOOLS or profile.superagent is not None:
+            from lingcore.delegation.validation import validate_definitions
+
+            try:
+                validate_definitions(profile)
+            except Exception as exc:
+                raise ConfigError(f"invalid delegation configuration: {exc}") from None
         return profile
 
     def workspace_path(self, base: Path | None = None) -> Path:

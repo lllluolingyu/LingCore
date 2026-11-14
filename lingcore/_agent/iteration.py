@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
+from lingcore._agent.batch import tool_batch
 from lingcore.background import BackgroundInput
 from lingcore.composer import ComposeContext
 from lingcore.errors import (
@@ -398,7 +399,10 @@ async def _run_turn(
         # Tool runs (and the approvals inside them) are the turn waiting
         # on the world, not generating.
         with self._turn_waiting():
-            results = await self._dispatch(assistant.tool_calls)
+            async with tool_batch(self, assistant.tool_calls) as batch:
+                async for progress in batch.progress():
+                    yield progress
+            results = batch.results
         for notice in self._hooks.drain_notices():
             yield notice
         for result in results:
@@ -483,6 +487,18 @@ async def _run_turn(
                     lease=self._session_lease,
                 )
             yield TodoUpdated(todos=self.todo_state.items)
+
+        terminal_result = next((r for r in results if r._end_turn and r.ok), None)
+        if terminal_result is not None:
+            final = await self.guardrail.post_output(terminal_result.content)
+            await self._turn_end(
+                TurnEndEvent(final, turn_index=self._turn_index), lease, Final(final)
+            )
+            for notice in self._hooks.drain_notices():
+                yield notice
+            self._clear_turn_state(lease)
+            yield Final(final)
+            return
 
     message = f"reached max iterations ({self.max_iters}) without a final reply"
     await self._turn_end(

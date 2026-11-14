@@ -1,0 +1,4 @@
+name: workflows
+version: 1.0.0
+api: 1
+description: Build bounded delegated workflows and inspect their durable results.

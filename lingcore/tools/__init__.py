@@ -70,6 +70,15 @@ class ToolContext:
     recorder: TraceRecorder | None = field(default=None, repr=False)
     environment_binding: EnvironmentBinding | None = field(default=None, repr=False)
 
+    delegation: Any = field(default=None, repr=False)
+    supports_async_confirm: bool = False
+
+    def progress(self, payload: dict[str, Any]) -> None:
+        """Publish transient progress for this invocation; no-op outside a batch."""
+        from lingcore.tools._progress import report
+
+        report(self, payload)
+
     def getenv(self, name: str, default: str | None = None) -> str | None:
         """Resolve this profile's ``.env``, then the process environment.
 
@@ -87,6 +96,8 @@ class ToolOutput:
 
     text: str
     attachments: list[Attachment] = field(default_factory=list)
+    # Honoured only for host-injected tools in Agent.terminal_tools.
+    end_turn: bool = False
 
 
 ToolFn = Callable[..., Awaitable[str | ToolOutput]]

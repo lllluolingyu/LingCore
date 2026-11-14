@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from copy import deepcopy
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from lingcore.media_types import (
     FALLBACK_TEXT_MAX_CHARS,
@@ -150,6 +150,8 @@ class ToolResult(BaseModel):
     content: str
     ok: bool = True
     attachments: list[Attachment] = Field(default_factory=list)
+    # Dispatch-only control bit. Never serialized or accepted from tool args.
+    _end_turn: bool = PrivateAttr(default=False)
 
     @field_validator("attachments")
     @classmethod

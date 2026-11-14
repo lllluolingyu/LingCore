@@ -1,0 +1,83 @@
+name: review-changes
+description: Review the uncommitted diff by dimension; keep findings that survive verification.
+when_to_use: A thorough review of a non-trivial change.
+inputs:
+  type: object
+  properties:
+    focus: {type: string, maxLength: 500}
+# The agent bound of this spec is exactly 40. Adding `retry_on` to a node
+# multiplies that node's count, so it needs a higher `max_agents`.
+limits: {max_agents: 40, max_concurrency: 4, reported_tokens: 600000}
+schemas:
+  findings:
+    type: object
+    required: [findings]
+    properties:
+      findings:
+        type: array
+        maxItems: 4
+        items:
+          type: object
+          required: [file, line, claim]
+          properties:
+            file: {type: string}
+            line: {type: integer}
+            claim: {type: string, maxLength: 800}
+  verdict:
+    type: object
+    required: [refuted, reason]
+    properties:
+      refuted: {type: boolean}
+      reason: {type: string, maxLength: 600}
+phases:
+  - title: Review
+  - title: Verify
+  - title: Report
+steps:
+  - id: reviewed
+    phase: Review
+    map:
+      over: [correctness, security, concurrency]
+      as: dimension
+      stages:
+        - agent:
+            role: reviewer
+            label: review:${dimension}
+            output: findings
+            prompt: |
+              Review the uncommitted diff for ${dimension} defects only.
+              Return at most four findings, choosing the most severe.
+              Extra focus from the requester: ${inputs.focus}
+        - map:
+            over: ${prev.findings}
+            as: finding
+            max_items: 4
+            stages:
+              - phase: Verify
+                agent:
+                  role: skeptic
+                  repeat: 3
+                  label: verify:${finding.file}
+                  output: verdict
+                  prompt: |
+                    Try to refute this finding. Default to refuted=true if unsure.
+                    ${finding}
+              - keep:
+                  if:
+                    votes: {over: "${prev}", field: refuted, equals: false, at_least: 2}
+                  value: ${finding}
+  - id: confirmed
+    transform:
+      flatten: ${reviewed}
+  - id: report
+    phase: Report
+    when:
+      nonempty: ${confirmed}
+    agent:
+      role: writer
+      prompt: |
+        Write a concise review from these verified findings, most severe first:
+        ${confirmed}
+result:
+  findings: ${confirmed}
+  report: ${report}

@@ -20,11 +20,12 @@ from lingcore._sessions.models import (
     _trim_dangling_records,
     is_session_id,
 )
+from lingcore._sessions.runs import RUN_DDL, detach_locked
 from lingcore.errors import SessionError
 from lingcore.message import Message
 from lingcore.session_leases import LEASE_DDL, SessionLease, SessionLeases
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 _DDL = [
     LEASE_DDL,
@@ -95,7 +96,7 @@ class SessionDatabase:
             if version < _SCHEMA_VERSION:
                 with self._conn:
                     self._conn.execute("BEGIN IMMEDIATE")
-                    for stmt in _DDL:
+                    for stmt in _DDL + RUN_DDL:
                         self._conn.execute(stmt)
                     self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         except BaseException:
@@ -218,11 +219,20 @@ class SessionDatabase:
         sessions = self.list(limit=1)
         return sessions[0] if sessions else None
 
-    def list(self, *, limit: int = 200) -> list[SessionMeta]:
+    def list(
+        self, *, limit: int = 200, include_delegated: bool = False
+    ) -> list[SessionMeta]:
         """All sessions, most recently active first."""
         with self._lock:
             rows = self._conn.execute(
-                _META_QUERY + "ORDER BY s.updated_at DESC, s.id LIMIT ?", (limit,)
+                _META_QUERY
+                + (
+                    ""
+                    if include_delegated
+                    else "WHERE json_extract(s.meta, '$.delegation') IS NULL "
+                )
+                + "ORDER BY s.updated_at DESC, s.id LIMIT ?",
+                (limit,),
             ).fetchall()
         return [_row_to_meta(r) for r in rows]
 
@@ -356,6 +366,7 @@ class SessionDatabase:
         kept while any partially committed assistant/tool tail is discarded.
         """
         with self._write(session_id, lease):
+            detach_locked(self._conn, session_id, seq, "stopped")
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ? AND seq > ?",
                 (session_id, seq),
@@ -417,6 +428,7 @@ class SessionDatabase:
                 "DELETE FROM session_events WHERE session_id = ? AND message_seq >= ?",
                 (session_id, seq),
             )
+            detach_locked(self._conn, session_id, seq - 1, "edited")
             # If this was the auto-titled first prompt, clear it so appending the
             # edited prompt derives a fresh title. Preserve explicit renames.
             title = current_title

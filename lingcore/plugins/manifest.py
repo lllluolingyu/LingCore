@@ -111,6 +111,7 @@ class PluginManifest(BaseModel):
     skills: str | None = "skills"
     commands: str | None = "commands"
     prompt: str | None = None
+    workflows: str | None = None
     options_key: str | None = None
     on_hook_error: Literal["block", "ignore"] = "block"
     hook_timeout: float = Field(default=10, gt=0, le=60)
@@ -135,7 +136,7 @@ class PluginManifest(BaseModel):
             version_tuple(value)
         return value
 
-    @field_validator("module", "skills", "commands", "prompt")
+    @field_validator("module", "skills", "commands", "prompt", "workflows")
     @classmethod
     def _path(cls, value: str | None) -> str | None:
         return relative_component(value) if value is not None else None

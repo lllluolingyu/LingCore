@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from lingcore.agent import Agent
 from lingcore.errors import ConfigError, LingCoreError, ToolError
 from lingcore.events import AgentEvent, Error, Final, PluginNotice, TurnCancelled
+from lingcore.integrations._background import bind_background, close_background
 from lingcore.integrations.telegram import _commands, _delivery
 from lingcore.integrations.telegram._commands import _RESERVED_COMMANDS
 from lingcore.integrations.telegram._profiles import scoped_profile
@@ -278,6 +279,7 @@ class TelegramBridge:
                 user_dir=user_dir,
             )
             self._runtimes[user_id] = runtime
+            bind_background(self, runtime, "telegram")
             return runtime
 
     async def shutdown(self) -> None:
@@ -285,6 +287,7 @@ class TelegramBridge:
         if self._closed:
             return
         self._closing = True
+        await close_background(self)
         tasks = list(self._tasks)
         for runtime in self._runtimes.values():
             runtime.agent.cancel_turn()
@@ -326,6 +329,8 @@ class TelegramBridge:
     ) -> None:
         async with runtime.lock:
             active = self._user_tasks.get(runtime.user_id)
+            if hasattr(runtime.agent, "background"):
+                runtime.agent.background.paused = False
             if active is not None and not active.done():
                 await sender.send_message(
                     chat_id,
@@ -526,6 +531,7 @@ class TelegramBridge:
             previous = runtime.agent
             runtime.profile = scoped
             runtime.agent = replacement
+            bind_background(self, runtime, "telegram")
             close = getattr(previous, "aclose", None)
             if close is not None:
                 await close()
@@ -534,6 +540,8 @@ class TelegramBridge:
 
     async def _stop(self, user_id: int, chat_id: int, sender: TelegramSender) -> None:
         runtime = self._runtimes.get(user_id)
+        if runtime is not None and hasattr(runtime.agent, "background"):
+            runtime.agent.background.paused = True
         task = self._user_tasks.get(user_id)
         if runtime is None or task is None or task.done():
             await self.confirmations.deny_user(user_id)

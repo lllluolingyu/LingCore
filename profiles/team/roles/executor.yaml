@@ -1,0 +1,4 @@
+description: Complete an approved ticket in its retained workspace.
+tools: [read_file, list_dir, search, git, write_file, edit_file, patch_file, run_shell, process_start, process_logs, process_stop, process_list]
+context: [project_instructions]
+max_iters: 40

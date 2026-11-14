@@ -117,6 +117,7 @@ def load_lark_config(
     path: str | Path | None = None,
     *,
     require_secrets: bool = True,
+    transport_only: bool = False,
 ) -> LarkConfig:
     if not isinstance(profile, AgentProfile):
         profile = AgentProfile.load(profile)
@@ -148,7 +149,8 @@ def load_lark_config(
             f"{'.'.join(map(str, error['loc']))}: {error['msg']}" for error in errors
         )
         raise ConfigError(f"invalid Lark config: {detail}") from None
-    _validate_profile(profile)
+    if not transport_only:
+        _validate_profile(profile)
     state = Path(config.state_dir).expanduser()
     if state.is_absolute() and not config.allow_absolute_state_dir:
         raise ConfigError(

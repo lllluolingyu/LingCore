@@ -65,6 +65,32 @@ async def run_session(agent: Agent, frontend: Frontend) -> None:
     but reuse the exact same agent and events.
     """
     background = agent.background
+    catalog_setter = getattr(frontend, "set_workflows", None)
+    if catalog_setter and agent.tool_ctx.delegation is not None:
+        from lingcore.workflows.catalog import discovery_cards
+
+        catalog_setter(
+            [
+                (w["workflow"], w["description"])
+                for w in discovery_cards(agent.tool_ctx.delegation.profile)
+            ]
+        )
+    runs_setter = getattr(frontend, "set_workflow_runs", None)
+    if runs_setter and agent.tool_ctx.delegation is not None:
+        supervisor = agent.tool_ctx.delegation
+        runs_setter(
+            lambda: [
+                f"{r.id} · {r.name or r.kind} · {r.status} · {r.agents} workers"
+                for r in supervisor.journal.list(agent._session_id)[:20]
+            ]
+        )
+    agent.tool_ctx.supports_async_confirm = bool(
+        getattr(frontend, "supports_async_confirm", False)
+    )
+    if agent.tool_ctx.delegation is not None:
+        agent.tool_ctx.delegation.broker.async_confirm = (
+            agent.tool_ctx.supports_async_confirm
+        )
     background.enabled = bool(getattr(frontend, "supports_background", False))
     while True:
         user_input = await _read_next(agent, frontend)

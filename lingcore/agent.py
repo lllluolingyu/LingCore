@@ -25,6 +25,7 @@ from lingcore.background import BackgroundInbox
 from lingcore.composer import ComposeContext, PromptComposer, StaticComposer
 from lingcore.events import (
     AgentEvent,
+    DelegatedUsageReported,
     Error,
     Final,
     PluginNotice,
@@ -141,6 +142,7 @@ class Agent:
         execution_budget: ExecutionBudget | None = None,
         request_ledger: RequestLedger | None = None,
         output_rewriter: OutputRewriter | None = None,
+        terminal_tools: frozenset[str] = frozenset(),
     ) -> None:
         # v0.1 accepted a static prompt as the fourth positional argument or
         # as ``system_prompt=``. Keep both forms while routing new code through
@@ -154,6 +156,7 @@ class Agent:
         if composer is None:
             raise TypeError("Agent requires a composer or system_prompt")
         self.recorder = recorder if recorder is not None else NoopRecorder()
+        self._trace_relation: Literal["trial", "delegate"] = "trial"
         self.execution_budget = execution_budget
         self.execution_outcome: ExecutionOutcome | None = None
         self.request_ledger = request_ledger or (
@@ -173,6 +176,9 @@ class Agent:
             )
         )
         self.tools = tools
+        if not terminal_tools <= frozenset(tools.names()):
+            raise ValueError("terminal tools must be registered on the agent")
+        self.terminal_tools = frozenset(terminal_tools)
         # Tools active without any skill. None ⇒ all of the ceiling (today's
         # default). A narrower set gates the rest behind skill activation; the
         # ceiling (``tools``) still bounds what a skill can ever unlock.
@@ -347,6 +353,8 @@ class Agent:
         tool_registry: ToolRegistry | None = None,
         execution_budget: ExecutionBudget | None = None,
         environment_binding: EnvironmentBinding | None = None,
+        extra_tools: tuple[Tool, ...] = (),
+        terminal_tools: frozenset[str] = frozenset(),
     ) -> "Agent":
         """Assemble a runnable Agent from a validated profile.
 
@@ -358,6 +366,8 @@ class Agent:
         ``media_fallback.image`` client (tests inject a fake here, exactly
         like ``llm``). ``rewrite_llm`` similarly overrides the experimental
         ``output_rewrite.llm`` client when rewriting is enabled.
+        ``extra_tools`` adds host-supplied tools to a private registry;
+        ``terminal_tools`` may name only these additions. Neither is config.
         """
         return profile_builder.from_profile(
             cls,
@@ -375,6 +385,8 @@ class Agent:
             tool_registry=tool_registry,
             execution_budget=execution_budget,
             environment_binding=environment_binding,
+            extra_tools=extra_tools,
+            terminal_tools=terminal_tools,
         )
 
     async def __aenter__(self) -> Agent:
@@ -391,7 +403,7 @@ class Agent:
         """
         return await lifecycle.aclose(self)
 
-    def drain_usage(self) -> list[UsageReported]:
+    def drain_usage(self) -> list[UsageReported | DelegatedUsageReported]:
         """Return usage recorded but not yet emitted by ``run``.
 
         A frontend that stops a turn calls this after
@@ -399,10 +411,14 @@ class Agent:
         cancellation landed were billed even though their events never
         reached the stream.
         """
-        return [
+        events: list[UsageReported | DelegatedUsageReported] = [
             UsageReported(usage, purpose)
             for usage, purpose in self.usage_meter.drain_with_purpose()
         ]
+        delegated = self.usage_meter.drain_delegated()
+        if delegated:
+            events.append(DelegatedUsageReported(tuple(delegated)))
+        return events
 
     def drain_plugin_notices(self) -> list[PluginNotice]:
         """Take pending transient notices before finalizing a cancelled turn.

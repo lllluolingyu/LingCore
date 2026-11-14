@@ -18,6 +18,7 @@ from lingcore.events import (
     TextDelta,
     TodoUpdated,
     ToolCallStarted,
+    ToolProgress,
     ToolResultEvent,
     TurnCancelled,
     TurnStatsReported,
@@ -116,6 +117,11 @@ class TelegramTurnRenderer:
             await self.reconcile_final(event.content)
         elif isinstance(event, StreamRetry):
             await self._discard_attempt(event)
+        elif isinstance(event, ToolProgress):
+            from lingcore.delegation.presentation import progress_text
+
+            self._tools[event.call_id] = (progress_text(event.payload), "running")
+            await self._render_status()
         elif isinstance(event, ToolCallStarted):
             self._tools[event.call.id] = (event.call.name, "running")
             await self._render_status()

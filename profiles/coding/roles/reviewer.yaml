@@ -1,0 +1,10 @@
+description: Inspect the frozen run input and report verifiable defects.
+tools:
+- read_file
+- list_dir
+- search
+- git
+workspace: frozen
+context:
+- project_instructions
+confirm: deny
